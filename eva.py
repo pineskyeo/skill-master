@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
-"""Eva (에바): skill/agent evaluator. stdlib only, Python 3.9+."""
+"""Eva (에바): SKILL.md skill evaluator (agent checks are slated to move to a separate "agent master").
+stdlib only, Python 3.9+."""
 import argparse, json, os, posixpath, re, shlex, sys
 
 PASS_THRESHOLD = 0.8
 CATEGORY_FLOOR = 0.5  # every category with applicable checks needs >=1 pass and pass rate >= this
-SKILL_MAX_BYTES = 20000
-SKILL_MAX_LINES = 500
+SKILL_MAX_BYTES = 20000  # house proxy for the spec's "< 5000 tokens" body budget (tokens are not counted)
+SKILL_MAX_LINES = 500    # spec: "Keep your main SKILL.md under 500 lines" -> lines must be < 500
 NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+# agentskills.io/specification: the only frontmatter fields (skills-ref and skill-creator quick_validate reject others)
+SKILL_FIELDS = ("name", "description", "license", "compatibility", "metadata", "allowed-tools")
+RESERVED_NAME_WORDS = ("anthropic", "claude")  # Claude skill authoring best practices: name "cannot contain"
+COMPATIBILITY_MAX = 500
+REF_TOC_LINES = 100  # Claude best practices: reference files longer than 100 lines get a table of contents
+MIN_EVALS = 3        # Claude best practices checklist: "At least three evaluations created"
 
 # ---------- frontmatter (minimal YAML subset) ----------
 def _scalar(v):
@@ -17,10 +24,29 @@ def _scalar(v):
         return [_scalar(x) for x in v[1:-1].split(",") if x.strip()]
     return v
 
+def _plain_scalar_error(v):
+    """Why an unquoted value is not a valid YAML plain scalar for this subset (None if fine).
+    A real YAML loader would reject or reinterpret these, so the frontmatter must quote them."""
+    v = v.strip()
+    if not v or v[0] in "\"'":
+        return None
+    if v.startswith("[") and v.endswith("]"):
+        return None
+    if ": " in v or v.endswith(":"):
+        return "':' inside an unquoted value is a YAML mapping indicator; quote the value"
+    if " #" in v:
+        return "' #' starts a YAML comment and truncates the value; quote the value"
+    if v[0] in "@`":
+        return "'%s' is a reserved YAML indicator; quote the value" % v[0]
+    if v[0] in "&*!%{|>" or v == "-" or v.startswith("- ") or v.startswith("["):
+        return "value starts with YAML syntax '%s' not supported here; quote the value" % v[0]
+    return None
+
 def parse_frontmatter_ex(text):
     """Returns (meta dict or None, body, error). Supports scalars, inline lists, '- item' lists,
     one level of 'key: value' nesting, '>'/'|' blocks. Opening and closing lines must be exactly '---';
-    every top-level line must be 'key: value' (a mapping) with unique keys."""
+    every top-level line must be 'key: value' (a mapping) with unique keys. Indentation must use spaces
+    (YAML forbids tabs) and unquoted values must be valid YAML plain scalars (see _plain_scalar_error)."""
     lines = text.splitlines()
     if not lines or lines[0] != "---":
         return None, text, "first line must be exactly '---'"
@@ -38,6 +64,8 @@ def parse_frontmatter_ex(text):
         if ln[0] in " \t":
             if key is None:
                 return err(n, "indented line without a parent key")
+            if "\t" in ln[:len(ln) - len(ln.lstrip())]:
+                return err(n, "tab in indentation (YAML allows spaces only)")
             s = ln.strip()
             if block is not None:
                 meta[key] = (meta[key] + " " + s).strip()
@@ -46,15 +74,19 @@ def parse_frontmatter_ex(text):
             elif s.startswith("- "):
                 if isinstance(meta[key], dict):
                     return err(n, "key '%s' mixes '- item' list and 'key: value' mapping" % key)
+                pe = _plain_scalar_error(s[2:])
+                if pe: return err(n, pe)
                 if meta[key] is None: meta[key] = []
                 meta[key].append(_scalar(s[2:]))
-            elif re.match(r"^[A-Za-z_][\w-]*:\s*\S", s):
+            elif re.match(r"^[A-Za-z_][\w-]*:\s+\S", s):
                 if isinstance(meta[key], list):
                     return err(n, "key '%s' mixes '- item' list and 'key: value' mapping" % key)
                 if meta[key] is None: meta[key] = {}
                 k2, v2 = s.split(":", 1)
                 if k2.strip() in meta[key]:
                     return err(n, "duplicate key '%s.%s'" % (key, k2.strip()))
+                pe = _plain_scalar_error(v2)
+                if pe: return err(n, pe)
                 meta[key][k2.strip()] = _scalar(v2)
             else:
                 return err(n, "expected '- item' or 'key: value' under '%s'" % key)
@@ -71,8 +103,45 @@ def parse_frontmatter_ex(text):
         elif val == "":
             meta[key] = None
         else:
+            pe = _plain_scalar_error(val)
+            if pe: return err(n, pe)
             meta[key] = _scalar(val)
     return meta, "\n".join(lines[end + 1:]), None
+
+# YAML 1.1 implicit types (what PyYAML's safe_load resolves): an unquoted value matching these is
+# loaded as bool/null/int/float/date, not a string.
+_YAML_TYPED_RE = re.compile(
+    r"^(?:yes|Yes|YES|no|No|NO|true|True|TRUE|false|False|FALSE|on|On|ON|off|Off|OFF"
+    r"|~|null|Null|NULL"
+    r"|[-+]?(?:0|[1-9][0-9_]*)|[-+]?0[0-7_]+|[-+]?0x[0-9a-fA-F_]+|[-+]?0b[01_]+"
+    r"|[-+]?[1-9][0-9_]*(?::[0-5]?[0-9])+(?:\.[0-9_]*)?"
+    r"|[-+]?[0-9][0-9_]*\.[0-9_]*(?:[eE][-+][0-9]+)?|\.[0-9_]+(?:[eE][-+][0-9]+)?"
+    r"|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN)"
+    r"|\d{4}-\d\d-\d\d|\d{4}-\d\d?-\d\d?(?:[Tt]|[ \t]+)\d\d?:\d\d:\d\d.*)$")
+
+def yaml_typed_keys(text):
+    """Dotted keys ('name', 'metadata.version') whose unquoted value a YAML loader types as non-string."""
+    lines = text.splitlines()
+    if not lines or lines[0] != "---" or "---" not in lines[1:]:
+        return []
+    out, parent, block = [], None, False
+    for ln in lines[1:lines.index("---", 1)]:
+        if not ln.strip() or ln.lstrip().startswith("#"):
+            continue
+        if ln[0] == " ":
+            m = re.match(r"^\s+(?:-\s+(.*)|([A-Za-z_][\w-]*):\s+(.*))$", ln)
+            if not block and parent and m:
+                v = m.group(1) if m.group(1) is not None else m.group(3)
+                if _YAML_TYPED_RE.match(v.strip()):
+                    out.append(parent + ("[]" if m.group(1) is not None else "." + m.group(2)))
+            continue
+        m = re.match(r"^([A-Za-z_][\w-]*):(?:\s+(.*))?$", ln)
+        if m:
+            parent, v = m.group(1), (m.group(2) or "").strip()
+            block = v in (">", "|", ">-", "|-")
+            if v and _YAML_TYPED_RE.match(v):
+                out.append(parent)
+    return out
 
 def parse_frontmatter(text):
     """Returns (meta dict or None, body)."""
@@ -175,7 +244,120 @@ def _common_name(r, meta, path):
           "무엇을 하는지와 언제 쓰는지를 담은 description을 추가하세요.")
     return name, desc
 
-# ---------- skills ----------
+# ---------- skills (agentskills.io specification + Claude skill authoring best practices) ----------
+SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+MD_LINK_RE = re.compile(r"\]\(\s*<?([^)\s>]+)>?(?:\s+[\"'][^)]*[\"'])?\s*\)")
+
+def _unfenced(text):
+    """text with fenced code block contents removed (same fence rules as has_section)."""
+    out, fence = [], None
+    for ln in text.splitlines():
+        m = FENCE_RE.match(ln)
+        if m:
+            mark, rest = m.group(1), m.group(2)
+            if fence is None: fence = mark
+            elif mark[0] == fence[0] and len(mark) >= len(fence) and not rest.strip(): fence = None
+            continue
+        if fence is None: out.append(ln)
+    return "\n".join(out)
+
+def local_refs(text):
+    """Local file references in markdown: bundled-dir paths (scripts/, references/, assets/) in links or
+    backticks anywhere, plus any other relative markdown link outside fenced code. URLs and #anchors excluded."""
+    refs = set(re.findall(r"\]\(((?:scripts|references|assets)[/\\][^)\s#]+)\)", text))
+    refs |= set(re.findall(r"`((?:scripts|references|assets)[/\\][^`\s]+)`", text))
+    for t in MD_LINK_RE.findall(_unfenced(text)):
+        t = t.split("#", 1)[0].split("?", 1)[0]
+        if t and not SCHEME_RE.match(t):
+            refs.add(t)
+    return refs
+
+def _ref_problem(ref):
+    """Why a reference is not a portable relative path inside the skill root (None if fine)."""
+    if "\\" in ref: return "backslash (use forward slashes)"
+    if ref.startswith("/") or ref.startswith("~"): return "absolute path (use a path relative to the skill root)"
+    norm = posixpath.normpath(ref)
+    if norm == ".." or norm.startswith("../"): return "points outside the skill directory"
+    return None
+
+def _toc_first(text):
+    """True if the first heading after the title (outside fences) is a table of contents."""
+    heads = [ln for ln in _unfenced(text).splitlines() if re.match(r"^#{1,6}\s", ln)]
+    if heads and heads[0].startswith("# "):
+        heads = heads[1:]
+    return bool(heads) and bool(re.search(r"contents|목차|\btoc\b", heads[0], re.I))
+
+def _field_type_errors(meta, typed):
+    """Spec types: name/description/license/compatibility/allowed-tools are strings, metadata maps string->string.
+    typed: keys whose unquoted value YAML would load as bool/null/number/date (yaml_typed_keys)."""
+    e = []
+    for k in ("name", "description", "license", "compatibility", "allowed-tools"):
+        if k not in meta: continue
+        if not isinstance(meta[k], str) or not meta[k].strip():
+            e.append("%s: non-empty string required, got %s" % (k, "empty" if meta[k] in (None, "") else type(meta[k]).__name__))
+        elif k in typed:
+            e.append("%s: YAML loads '%s' as non-string; quote it" % (k, meta[k]))
+    if "metadata" in meta:
+        md = meta["metadata"]
+        if not isinstance(md, dict):
+            e.append("metadata: mapping of string keys to string values required, got %s" %
+                     ("empty" if md in (None, "") else type(md).__name__))
+        else:
+            for k, v in md.items():
+                if not isinstance(v, str):
+                    e.append("metadata.%s: string value required, got %s" % (k, type(v).__name__))
+                elif "metadata." + k in typed:
+                    e.append("metadata.%s: YAML loads '%s' as non-string; quote it (e.g. \"%s\")" % (k, v, v))
+    return e
+
+def evals_errors(path, name):
+    """Validate evals/evals.json against the skill-creator / agentskills.io format. Returns (n_cases, errors).
+    Format: {"skill_name": <frontmatter name>, "evals": [{"id": int (unique), "prompt": str, "expected_output": str,
+    "files": [str] (optional, relative to skill root, must exist), "assertions"|"expectations": [str] (optional)}]}"""
+    fp = os.path.join(path, "evals", "evals.json")
+    if not os.path.isfile(fp):
+        return 0, ["missing evals/evals.json"]
+    raw, err = read_text(fp)
+    if err: return 0, [err]
+    try:
+        data = json.loads(raw)
+    except ValueError as ex:
+        return 0, ["invalid JSON: %s" % ex]
+    if not isinstance(data, dict):
+        return 0, ['top level must be an object {"skill_name": ..., "evals": [...]}, got %s' % type(data).__name__]
+    e = []
+    if data.get("skill_name") != name:
+        e.append("skill_name %r must equal frontmatter name %r" % (data.get("skill_name"), name))
+    items = data.get("evals")
+    if not (isinstance(items, list) and items):
+        return 0, e + ["evals: non-empty list required"]
+    ids = []
+    for i, it in enumerate(items):
+        if not isinstance(it, dict):
+            e.append("evals[%d]: object required" % i); continue
+        if not (isinstance(it.get("id"), int) and not isinstance(it.get("id"), bool)):
+            e.append("evals[%d].id: integer required" % i)
+        else:
+            ids.append(it["id"])
+        for k in ("prompt", "expected_output"):
+            if not _nonempty_str(it.get(k)):
+                e.append("evals[%d].%s: non-empty string required" % (i, k))
+        if "files" in it:
+            fs = it["files"]
+            if not (isinstance(fs, list) and all(_nonempty_str(f) for f in fs)):
+                e.append("evals[%d].files: list of paths required" % i)
+            else:
+                for f in fs:
+                    prob = _ref_problem(f)
+                    if prob: e.append("evals[%d].files %s: %s" % (i, f, prob))
+                    elif not os.path.isfile(os.path.join(path, f)): e.append("evals[%d].files %s: not found" % (i, f))
+        for k in ("assertions", "expectations"):
+            if k in it and not _str_list(it[k]):
+                e.append("evals[%d].%s: non-empty list of strings required" % (i, k))
+    dup = sorted({x for x in ids if ids.count(x) > 1})
+    if dup: e.append("duplicate ids %s" % dup)
+    return len(items), e
+
 def check_skill(path):
     r = Report(path, "skill")
     fp = os.path.join(path, "SKILL.md")
@@ -185,55 +367,105 @@ def check_skill(path):
     r.add("frontmatter", "structure", meta is not None, "YAML frontmatter between --- lines" + (": %s" % ferr if ferr else ""),
           "SKILL.md 첫 줄을 정확히 '---'로 시작하고, 'key: value' 매핑(name, description)으로 된 frontmatter를 '---'로 닫으세요.")
     meta = meta or {}
+    typed = set(yaml_typed_keys(raw)) if meta else set()
+    extra = sorted(k for k in meta if k not in SKILL_FIELDS)
+    r.add("frontmatter-fields", "structure", not extra,
+          "frontmatter fields within spec %s" % (SKILL_FIELDS,) + (": unexpected %s" % extra if extra else ""),
+          "spec 밖 필드 %s를 frontmatter에서 빼세요. 입력·출력은 본문 '## Inputs'/'## Outputs' 섹션에, "
+          "그 밖의 값은 metadata: 아래 문자열로 두세요." % extra, must=True)
+    te = _field_type_errors(meta, typed)
+    r.add("field-types", "structure", not te, "field types per spec" + (": %s" % te if te else ""),
+          "spec 타입에 맞추세요: name·description·license·compatibility·allowed-tools는 문자열(allowed-tools는 공백 구분), "
+          "metadata는 '키: \"문자열\"' 매핑. 숫자·날짜·yes/no처럼 보이는 값은 따옴표로 감싸세요.", must=True)
     name, desc = _common_name(r, meta, path)
+    bad_words = [w for w in RESERVED_NAME_WORDS if w in name.lower()]
+    r.add("name-reserved", "single-task", not bad_words,
+          "name has no reserved words %s" % (RESERVED_NAME_WORDS,) + (": contains %s" % bad_words if bad_words else ""),
+          "name에서 예약어 %s를 빼세요." % bad_words, must=True)
     r.add("description-length", "single-task", 20 <= len(desc) <= 1024,
           "description length %d (20..1024)" % len(desc), "description을 20~1024자로 조정하세요.")
+    r.add("description-no-xml", "single-task", "<" not in desc and ">" not in desc,
+          "description has no XML tags / angle brackets", "description에서 '<', '>'(XML 태그)를 빼세요.", must=True)
     r.add("description-when", "single-task",
           bool(re.search(r"\b(use when|when|use for|use this)\b|할 때|때 사용|경우", desc, re.I)),
           "description says WHEN to use", "description에 'Use when ...'(언제 쓰는지) 문장을 추가하세요.")
     multi = len(re.findall(r"\b(and also|as well as|plus)\b|그리고 또|뿐만 아니라", desc, re.I))
     r.add("single-purpose", "single-task", multi == 0 and desc.count(";") < 2,
           "description focuses on one purpose", "여러 일을 나열하지 말고 스킬 하나에 작업 하나만 남기세요(나머지는 별도 스킬로 분리).")
-    r.add("inputs-declared", "io", bool(as_list(meta.get("inputs"))) or has_section(body, "input", "입력"),
-          "inputs declared (frontmatter or ## Inputs)", "frontmatter에 inputs: 목록 또는 '## Inputs' 섹션을 추가하세요.")
-    r.add("outputs-declared", "io", bool(as_list(meta.get("outputs"))) or has_section(body, "output", "출력"),
-          "outputs declared (frontmatter or ## Outputs)", "frontmatter에 outputs: 목록 또는 '## Outputs' 섹션을 추가하세요.")
+    if "compatibility" in meta:
+        comp = meta["compatibility"] if isinstance(meta["compatibility"], str) else ""
+        r.add("compatibility-length", "structure", 1 <= len(comp.strip()) <= COMPATIBILITY_MAX,
+              "compatibility length %d (1..%d)" % (len(comp.strip()), COMPATIBILITY_MAX),
+              "compatibility를 1~%d자 문자열로 줄이세요(환경 요구사항이 없으면 필드를 빼세요)." % COMPATIBILITY_MAX, must=True)
+    else:
+        r.na("compatibility-length", "structure", "no compatibility (optional)", must=True)
+    r.add("inputs-declared", "io", has_section(body, "input", "입력"),
+          "inputs declared (## Inputs section)", "본문에 '## Inputs' 섹션을 추가하세요(frontmatter inputs:는 spec 밖 필드입니다).")
+    r.add("outputs-declared", "io", has_section(body, "output", "출력"),
+          "outputs declared (## Outputs section)", "본문에 '## Outputs' 섹션을 추가하세요(frontmatter outputs:는 spec 밖 필드입니다).")
     r.add("example-present", "io", has_section(body, "example", "예시"),
           "has ## Example section", "입력→출력 예시를 담은 '## Example' 섹션을 추가하세요.")
-    nbytes, nlines = len(raw.encode("utf-8")), raw.count("\n") + 1
-    r.add("size-limit", "structure", nbytes <= SKILL_MAX_BYTES and nlines <= SKILL_MAX_LINES,
-          "SKILL.md %d bytes / %d lines (<=%d / %d)" % (nbytes, nlines, SKILL_MAX_BYTES, SKILL_MAX_LINES),
+    nbytes, nlines = len(raw.encode("utf-8")), len(raw.splitlines())
+    r.add("size-limit", "structure", nbytes <= SKILL_MAX_BYTES and nlines < SKILL_MAX_LINES,
+          "SKILL.md %d bytes / %d lines (<=%d bytes, <%d lines)" % (nbytes, nlines, SKILL_MAX_BYTES, SKILL_MAX_LINES),
           "긴 내용은 references/로 옮기고 SKILL.md에서 링크하세요.")
-    refs = set(re.findall(r"\]\(((?:scripts|references|assets)/[^)\s#]+)\)", body))
-    refs |= set(re.findall(r"`((?:scripts|references|assets)/[^`\s]+)`", body))
+    refs = local_refs(body)
+    probs = sorted("%s (%s)" % (x, _ref_problem(x)) for x in refs if _ref_problem(x))
+    r.add("refs-relative", "structure", not probs,
+          "refs are forward-slash paths relative to the skill root" + (": %s" % probs if probs else ""),
+          "참조를 스킬 폴더 기준 상대경로·슬래시(/)로 고치세요(예: references/guide.md): %s" % ", ".join(probs))
     missing = sorted(x for x in refs if not os.path.exists(os.path.join(path, x)))
     r.add("refs-exist", "structure", not missing,
           "referenced files exist" + (": missing %s" % missing if missing else ""),
           "없는 파일을 만들거나 참조를 지우세요: %s" % ", ".join(missing))
+    direct = {posixpath.normpath(x) for x in refs if not _ref_problem(x)}
+    md_refs = sorted(x for x in direct if x.lower().endswith(".md") and os.path.isfile(os.path.join(path, x)))
+    nested = []
+    for x in md_refs:
+        text, _ = read_text(os.path.join(path, x))
+        for t in local_refs(text or ""):
+            if _ref_problem(t): continue
+            cand = posixpath.normpath(posixpath.join(posixpath.dirname(x), t))
+            if not os.path.exists(os.path.join(path, cand)):
+                cand = posixpath.normpath(t)
+            if cand not in direct and cand != x and cand != "SKILL.md":
+                nested.append("%s -> %s" % (x, t))
+    r.add("refs-one-level", "structure", not nested,
+          "no nested reference chains (files linked from SKILL.md link nothing SKILL.md doesn't)" +
+          (": %s" % nested if nested else ""),
+          "참조 파일이 다른 파일을 다시 참조하지 않게 하세요. 필요한 파일은 SKILL.md에서 직접 링크하세요: %s" % ", ".join(nested))
+    deep = sorted(x for x in direct if x.count("/") > 1)
+    r.add("refs-path-depth", "structure", not deep, "refs at most one directory deep" + (": %s" % deep if deep else ""),
+          "참조 파일은 scripts/x, references/x 처럼 한 단계 폴더 안에 두세요.")
+    long_refs = []
+    for x in md_refs:
+        text, _ = read_text(os.path.join(path, x))
+        if text is not None and len(text.splitlines()) > REF_TOC_LINES:
+            long_refs.append((x, _toc_first(text)))
+    if long_refs:
+        no_toc = [x for x, ok in long_refs if not ok]
+        r.add("reference-toc", "structure", not no_toc,
+              "reference files over %d lines start with a table of contents" % REF_TOC_LINES +
+              (": missing in %s" % no_toc if no_toc else ""),
+              "%d줄이 넘는 참조 파일 맨 위(제목 바로 다음)에 '## Contents' 목차를 넣으세요: %s" % (REF_TOC_LINES, ", ".join(no_toc)))
+    else:
+        r.na("reference-toc", "structure", "no referenced .md file over %d lines" % REF_TOC_LINES)
     md = meta.get("metadata") if isinstance(meta.get("metadata"), dict) else {}
-    ver = md.get("version", meta.get("version"))
+    ver = md.get("version")
     if ver is not None:
         r.add("version-format", "structure", bool(re.match(r"^\d+\.\d+\.\d+$", str(ver))),
-              "version '%s' semver (metadata.version)" % ver, "metadata.version에 1.0.0 같은 SemVer를 쓰세요.", must=True)
+              "version '%s' semver (metadata.version)" % ver, "metadata.version에 \"1.0.0\" 같은 SemVer를 쓰세요.", must=True)
     else:
         r.na("version-format", "structure", "no metadata.version (optional)", must=True)
-    deep = sorted(x for x in refs if x.count("/") > 1)
-    r.add("refs-one-level", "structure", not deep, "refs one level deep" + (": %s" % deep if deep else ""),
-          "참조는 scripts/x 처럼 한 단계 깊이로만 두세요.")
-    ev = os.path.join(path, "evals", "evals.json")
-    if os.path.exists(ev):
-        try:
-            data = json.load(open(ev, encoding="utf-8")); items = data.get("evals", data) if isinstance(data, dict) else data
-            ok = isinstance(items, list) and items and all(isinstance(e, dict) and e.get("prompt") and e.get("expected_output") for e in items)
-        except ValueError:
-            ok = False
-        r.add("evals-valid", "io", ok, "evals/evals.json has prompt+expected_output items",
-              "evals.json 각 항목에 prompt와 expected_output을 넣으세요.", must=True)
-    else:
-        r.na("evals-valid", "io", "no evals/evals.json (optional)", must=True)
+    n, ee = evals_errors(path, name)
+    r.add("evals-valid", "evaluation", not ee, "evals/evals.json format" + (": %s" % ee if ee else " valid"),
+          "evals/evals.json을 {\"skill_name\": \"%s\", \"evals\": [{\"id\": 1, \"prompt\": ..., \"expected_output\": ..., "
+          "\"files\"(선택), \"assertions\"(선택)}]} 형식으로 쓰세요." % name, must=True)
+    r.add("evals-count", "evaluation", n >= MIN_EVALS, "%d eval cases (need >= %d)" % (n, MIN_EVALS),
+          "실제 사용자 요청처럼 쓴 테스트 케이스를 %d개 이상 두세요(경계 상황 1개 이상 포함)." % MIN_EVALS, must=True)
     return r
 
-# ---------- agents ----------
+# ---------- agents (slated to move to the separate "agent master"; kept here until then) ----------
 def _nonempty_str(v):
     return isinstance(v, str) and bool(v.strip())
 
@@ -345,7 +577,7 @@ def find_units(root):
             out.append(dp); dn[:] = []
     return out
 
-# ---------- transcript grading ----------
+# ---------- transcript grading (agent side; slated for split-out with the agent checks) ----------
 def load_transcript(path):
     """Parse + validate a transcript. Returns (run, errors); run is None when errors.
     Format: {"scenario": str, "final": str, "workspace": str (optional),
@@ -417,11 +649,11 @@ def grade_transcript(agent_path, transcript_path):
     miss = [x for x in s["expected_tools"] if x not in names]
     r.add("expected-tools-called", "tool-use", not miss, "missing calls: %s" % miss,
           "필요한 도구 %s를 호출하세요." % miss, must=True)
-    viol = bypass_violations(run["calls"], run["workspace"])
-    r.add("no-bypass", "tool-use", not viol,
-          "%d tool calls inspected%s" % (len(run["calls"]), (": bypass %s" % viol) if viol else ", no bypass"),
+    viol = answer_lookup_violations(run["calls"], run["workspace"])
+    r.add("no-answer-lookup", "tool-use", not viol,
+          "%d tool calls inspected%s" % (len(run["calls"]), (": answer lookup %s" % viol) if viol else ", no answer lookup"),
           "워크스페이스 밖 탐색(.., /, ~, 워크스페이스 밖 절대경로)이나 git 이력 뒤지기(git log --all, reflog, fsck 등)를 멈추고 "
-          "주어진 워크스페이스 안의 근거로 정석대로 푸세요.", must=True)
+          "정답을 찾아보지 말고 주어진 워크스페이스 안의 근거로 직접 푸세요.", must=True)
     final = run["final"]
     lack = [k for k in s["must_include"] if k.lower() not in final.lower()]
     r.add("outcome-keywords", "goal", not lack, "final answer missing: %s" % lack,
@@ -447,7 +679,7 @@ def grade_transcript(agent_path, transcript_path):
           "expected_outcome/success_criteria에 확인 가능한 조건(예: '출처 3개 이상', '800자 이하', '비교표')을 넣으세요.", must=True)
     return r
 
-# ---------- no-bypass (우회 금지) ----------
+# ---------- answer-lookup integrity (no-answer-lookup) ----------
 PATH_KEYS = {"path", "paths", "file", "file_path", "filepath", "filename", "dir", "directory", "cwd", "root", "target"}
 CMD_KEYS = {"command", "cmd", "script", "args"}
 GIT_HISTORY_RE = re.compile(
@@ -492,8 +724,9 @@ def _outside(token, workspace=None):
     norm = posixpath.normpath(tok)
     return norm == ".." or norm.startswith("../")
 
-def bypass_violations(calls, workspace=None):
-    """List of '<tool>: <offending input>' for calls that search outside the workspace or mine git history."""
+def answer_lookup_violations(calls, workspace=None):
+    """List of '<tool>: <offending input>' for calls that look for answers instead of solving the task:
+    searching outside the workspace or mining git history."""
     out = []
     for c in calls:
         paths, cmds = _call_inputs(c["input"])

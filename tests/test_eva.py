@@ -121,7 +121,7 @@ class TestOptionalChecks(unittest.TestCase):
     def test_absent_optional_is_na_and_excluded(self):
         r = eva.check(p("golden/skills/korean-proofreader"))
         na = {c["id"] for c in r.checks if c["passed"] is None}
-        self.assertTrue({"version-format", "evals-valid"} & na)
+        self.assertTrue({"compatibility-length", "reference-toc"} <= na)
         app = r.applicable
         self.assertEqual(r.score, round(sum(c["passed"] for c in app) / len(app), 3))
         self.assertLess(len(app), len(r.checks))
@@ -229,7 +229,7 @@ class TestRequiredToolChecks(TmpMixin, unittest.TestCase):
     def test_checks_marked_must(self):
         r = eva.grade_transcript(RA, p("transcripts/research-followup-cited.json"))
         must = {c["id"] for c in r.checks if c["must"]}
-        self.assertTrue({"only-declared-tools", "expected-tools-called", "outcome-keywords", "no-bypass"} <= must)
+        self.assertTrue({"only-declared-tools", "expected-tools-called", "outcome-keywords", "no-answer-lookup"} <= must)
 
 class TestCodeReviewer(TmpMixin, unittest.TestCase):
     """Task 2: code-reviewer criteria are machine-checkable and graded."""
@@ -427,10 +427,10 @@ class TestFencedSections(unittest.TestCase):
         finally:
             shutil.rmtree(tmp)
 
-class TestNoBypass(TmpMixin, unittest.TestCase):
+class TestNoAnswerLookup(TmpMixin, unittest.TestCase):
     """Task 6: searching outside the workspace or mining git history fails the run."""
     def v(self, inp, workspace=None):
-        return eva.bypass_violations(run_of([{"tool": "bash", "input": inp}])["calls"], workspace)
+        return eva.answer_lookup_violations(run_of([{"tool": "bash", "input": inp}])["calls"], workspace)
     def test_commands_flagged(self):
         for cmd in ("find .. -name '*.py'", "find / -name answer.md", "find ~ -name x", "ls ../other",
                     "cat ../solution/answer.txt", "grep -r foo ../../", "git log --all --oneline", "git fsck --lost-found",
@@ -449,11 +449,11 @@ class TestNoBypass(TmpMixin, unittest.TestCase):
                     {"path": "src/../tests"}, {"query": "find .. tricks"}, {"command": "git diff HEAD"}):
             self.assertEqual(self.v(inp), [], inp)
         self.assertEqual(self.v({"file_path": "/work/repo/src/a.py"}, workspace="/work/repo"), [])
-    def test_bad_bypass_fixture_fails_only_on_no_bypass(self):
-        r = eva.grade_transcript(CR, p("transcripts/bad/code-reviewer-bypass.json"))
+    def test_bad_fixture_fails_only_on_no_answer_lookup(self):
+        r = eva.grade_transcript(CR, p("transcripts/bad/code-reviewer-answer-lookup.json"))
         self.assertEqual(r.verdict, "FAIL")
-        self.assertEqual(self.ids(r, "critical_failed"), {"no-bypass"})
-    def test_shell_bypass_transcript_fails(self):
+        self.assertEqual(self.ids(r, "critical_failed"), {"no-answer-lookup"})
+    def test_shell_answer_lookup_transcript_fails(self):
         a = os.path.join(self.tmp, "a"); os.makedirs(os.path.join(a, "scenarios"))
         wtext(os.path.join(a, "AGENT.md"), "---\nname: a\ndescription: d. Use when x.\ngoal: do the one thing well\n"
               "tools: [bash]\nsuccess_criteria:\n  - 파일 변경 0건\n---\n")
@@ -464,15 +464,199 @@ class TestNoBypass(TmpMixin, unittest.TestCase):
         for cmd in ("git log --all -p", "git fsck --unreachable", "git reflog show", "find .. -name '*.md'", "find / -name x"):
             bad = json.loads(json.dumps(ok)); bad["tool_calls"].append({"tool": "bash", "input": {"command": cmd}, "result": ""})
             r = eva.grade_transcript(a, self.transcript(bad))
-            self.assertEqual(r.verdict, "FAIL", cmd); self.assertEqual(self.ids(r, "critical_failed"), {"no-bypass"}, cmd)
+            self.assertEqual(r.verdict, "FAIL", cmd); self.assertEqual(self.ids(r, "critical_failed"), {"no-answer-lookup"}, cmd)
 
 class TestDocs(unittest.TestCase):
-    def test_no_bypass_principle_documented(self):
+    def test_principle_and_integrity_check_documented(self):
         readme = open(p("README.md"), encoding="utf-8").read()
-        self.assertIn("No-bypass principle (우회 금지/정석)", readme)
-        self.assertIn("no-bypass", readme)
+        self.assertIn("## 원칙: 정석으로 (우회하지 않고)", readme)
+        self.assertIn("부정행위를 막자는 말이 아닙니다", readme)
+        for url in ("https://agentskills.io/specification", "https://agentskills.io/skill-creation/evaluating-skills.md",
+                    "https://agentskills.io/skill-creation/optimizing-descriptions.md",
+                    "https://raw.githubusercontent.com/anthropics/skills/main/skills/skill-creator/SKILL.md",
+                    "https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices",
+                    "https://developers.openai.com/api/docs/guides/evaluation-best-practices"):
+            self.assertIn(url, readme)
+        self.assertIn("정답 조회 무결성 검사 (`no-answer-lookup`", readme)
+        self.assertNotIn("no-bypass", readme)
+        self.assertIn("agent master", readme); self.assertIn("업계 표준 대비 아직 없는 스킬 기능", readme)
         loop = open(p("LOOP.md"), encoding="utf-8").read()
-        self.assertIn("tool_results", loop); self.assertIn("result", loop)
+        self.assertIn("tool_results", loop); self.assertIn("no-answer-lookup", loop); self.assertNotIn("no-bypass", loop)
+    def test_every_skill_check_documented(self):
+        readme = open(p("README.md"), encoding="utf-8").read()
+        for c in eva.check(p("golden/skills/pdf-summarizer")).checks:
+            self.assertIn("`%s`" % c["id"], readme, c["id"])
+
+GOOD_FM = ("---\nname: {name}\ndescription: Counts words in one text file. Use when the user wants a word count.\n"
+           "{extra}---\n# Word Count\n## Inputs\n- text_path\n## Outputs\n- word_count\n## Example\n입력: `a.txt` → 출력: `42`\n{body}")
+GOOD_EVALS = [{"id": i, "prompt": "p%d" % i, "expected_output": "o%d" % i} for i in (1, 2, 3)]
+
+class SkillMixin(TmpMixin):
+    def skill(self, name="word-count", extra="", body="", evals="default", files=None, raw=None):
+        d = os.path.join(self.tmp, name); os.makedirs(os.path.join(d, "evals"), exist_ok=True)
+        wtext(os.path.join(d, "SKILL.md"), raw if raw is not None else GOOD_FM.format(name=name, extra=extra, body=body))
+        if evals == "default": evals = {"skill_name": name, "evals": GOOD_EVALS}
+        if isinstance(evals, str): wtext(os.path.join(d, "evals", "evals.json"), evals)
+        elif evals is not None: wjson(os.path.join(d, "evals", "evals.json"), evals)
+        for rel, text in (files or {}).items():
+            fp = os.path.join(d, rel); os.makedirs(os.path.dirname(fp), exist_ok=True); wtext(fp, text)
+        return eva.check(d)
+    def status(self, r, cid):
+        return next(c["passed"] for c in r.checks if c["id"] == cid)
+
+class TestSkillSpecFrontmatter(SkillMixin, unittest.TestCase):
+    """agentskills.io specification: fields, types, name/description/compatibility rules."""
+    def test_base_skill_passes(self):
+        r = self.skill(); self.assertEqual(r.verdict, "PASS", r.failed)
+    def test_unknown_top_level_fields_fail(self):
+        for extra in ("inputs: [a]\n", "version: 1.0.0\n", "tags: [x]\n", "author: me\n"):
+            r = self.skill(extra=extra)
+            self.assertIn("frontmatter-fields", self.ids(r, "critical_failed"), extra)
+            self.assertEqual(r.verdict, "FAIL")
+    def test_frontmatter_inputs_no_longer_count_as_declared(self):
+        raw = "---\nname: word-count\ndescription: Counts words in one file. Use when asked.\ninputs: [a]\noutputs: [b]\n---\n## Example\nx\n"
+        r = self.skill(raw=raw)
+        self.assertTrue({"inputs-declared", "outputs-declared", "frontmatter-fields"} <= self.ids(r))
+    def test_optional_fields_allowed(self):
+        r = self.skill(extra="license: Apache-2.0\ncompatibility: Requires Python 3.9+\nallowed-tools: Bash(git:*) Read\n"
+                             "metadata:\n  author: example-org\n  version: \"1.0.0\"\n")
+        self.assertEqual(r.verdict, "PASS", r.failed)
+    def test_field_types(self):
+        for extra in ("allowed-tools: [Read, Bash]\n", "metadata: v1\n", "license:\n", "metadata:\n  version: 1.0\n",
+                      "metadata:\n  tags: [a, b]\n", "compatibility: 3\n", "metadata:\n  released: 2025-01-01\n",
+                      "metadata:\n  beta: yes\n"):
+            r = self.skill(extra=extra)
+            self.assertIn("field-types", self.ids(r, "critical_failed"), extra)
+        self.assertTrue(self.status(self.skill(extra="metadata:\n  version: \"1.0\"\n"), "field-types"))
+        self.assertTrue(self.status(self.skill(extra="metadata:\n  version: 1.0.0\n"), "field-types"))
+        r = self.skill(raw=GOOD_FM.format(name="word-count", extra="", body="").replace("name: word-count", "name: 123"))
+        self.assertIn("field-types", self.ids(r, "critical_failed"))
+    def test_yaml_plain_scalar_rules(self):
+        for line in ("description: Counts words: fast. Use when asked.", "description: Counts words #1. Use when asked.",
+                     "description: *alias", "description: @handle use when", "description: - item", "description: [a, b"):
+            raw = GOOD_FM.format(name="word-count", extra="", body="").replace(
+                "description: Counts words in one text file. Use when the user wants a word count.", line)
+            meta, _, err = eva.parse_frontmatter_ex(raw)
+            self.assertIsNone(meta, line); self.assertIn("quote", err)
+        self.assertIsNone(eva.parse_frontmatter_ex("---\nmetadata:\n\tversion: \"1\"\n---\n")[0])
+        meta, _, err = eva.parse_frontmatter_ex('---\ndescription: "Counts words: fast. Use when asked."\nurl: a:b\n---\n')
+        self.assertIsNone(err); self.assertEqual(meta["description"], "Counts words: fast. Use when asked.")
+    def test_yaml_typed_keys_match_pyyaml(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        for v in ("yes", "No", "on", "true", "~", "null", "0", "12", "-3", "1_000", "017", "0x1F", "0b101", "1.0", ".5",
+                  "1e5", "1.0e+5", "-.5", ".inf", ".nan", "2024-01-01", "2024-01-01 10:00:00", "1:30", "y", "n", ".",
+                  "2024-1-1", "1.0.0", "v1", "abc", "1.2.3-beta", "08"):
+            typed = not isinstance(yaml.safe_load("k: %s" % v)["k"], str)
+            self.assertEqual(eva.yaml_typed_keys("---\nk: %s\nm:\n  k: %s\n---\n" % (v, v)) == ["k", "m.k"], typed, v)
+    def test_name_rules(self):
+        for bad in ("Word-Count", "-word", "word-", "word--count", "a" * 65, "word_count"):
+            r = self.skill(raw=GOOD_FM.format(name=bad, extra="", body=""), name="x-" + str(len(bad)))
+            self.assertIn("name-format", self.ids(r, "critical_failed"), bad)
+        self.assertEqual(self.skill(name="a" * 64).verdict, "PASS")
+    def test_reserved_name_words(self):
+        for name in ("claude-helper", "my-anthropic-tools"):
+            r = self.skill(name=name)
+            self.assertEqual(self.ids(r, "critical_failed"), {"name-reserved"}, name)
+    def test_description_no_xml(self):
+        raw = GOOD_FM.format(name="word-count", extra="", body="").replace("one text file", "one <file> tag")
+        self.assertEqual(self.ids(self.skill(raw=raw), "critical_failed"), {"description-no-xml"})
+    def test_compatibility_length(self):
+        self.assertIsNone(self.status(self.skill(), "compatibility-length"))
+        self.assertTrue(self.status(self.skill(extra="compatibility: %s\n" % ("x" * 500)), "compatibility-length"))
+        r = self.skill(extra="compatibility: %s\n" % ("x" * 501))
+        self.assertEqual(self.ids(r, "critical_failed"), {"compatibility-length"})
+    def test_size_limit_under_500_lines(self):
+        head = GOOD_FM.format(name="word-count", extra="", body="")
+        pad = 499 - len(head.splitlines())
+        self.assertTrue(self.status(self.skill(raw=head + "x\n" * pad), "size-limit"))
+        self.assertFalse(self.status(self.skill(raw=head + "x\n" * (pad + 1)), "size-limit"))
+
+class TestSkillSpecReferences(SkillMixin, unittest.TestCase):
+    """File references: relative, existing, one level deep (no chains), TOC for long reference files."""
+    def test_generic_relative_links_checked(self):
+        r = self.skill(body="See [forms](FORMS.md) and [docs](https://example.org/x.md) and [top](#example).\n")
+        self.assertIn("FORMS.md", next(c["reason"] for c in r.failed if c["id"] == "refs-exist"))
+        r = self.skill(body="See [forms](FORMS.md#fill).\n", files={"FORMS.md": "# Forms\n"})
+        self.assertTrue(self.status(r, "refs-exist"))
+    def test_links_inside_fences_ignored(self):
+        self.assertTrue(self.status(self.skill(body="```md\n[x](missing.md)\n```\n"), "refs-exist"))
+    def test_refs_relative(self):
+        for ref in ("references\\\\guide.md", "/abs/guide.md", "../other-skill/guide.md", "~/guide.md"):
+            r = self.skill(body="See [g](%s).\n" % ref)
+            self.assertFalse(self.status(r, "refs-relative"), ref)
+        self.assertFalse(self.status(self.skill(body="Run `scripts\\\\run.py`.\n"), "refs-relative"))
+        self.assertTrue(self.status(self.skill(body="See [g](references/guide.md).\n",
+                                               files={"references/guide.md": "# G\n"}), "refs-relative"))
+    def test_nested_reference_chain_fails(self):
+        files = {"references/advanced.md": "# A\nSee [details](references/details.md).\n", "references/details.md": "# D\n"}
+        r = self.skill(body="See [advanced](references/advanced.md).\n", files=files)
+        self.assertFalse(self.status(r, "refs-one-level"))
+        self.assertIn("references/advanced.md -> references/details.md",
+                      next(c["reason"] for c in r.failed if c["id"] == "refs-one-level"))
+        r = self.skill(body="See [advanced](references/advanced.md).\n",
+                       files={"references/advanced.md": "# A\nSee [details](details.md).\n", "references/details.md": "# D\n"})
+        self.assertFalse(self.status(r, "refs-one-level"))  # relative to the referencing file
+    def test_chain_ok_when_also_linked_from_skill(self):
+        files = {"references/advanced.md": "# A\nSee [details](references/details.md).\n", "references/details.md": "# D\n"}
+        r = self.skill(body="See [advanced](references/advanced.md) and [details](references/details.md).\n", files=files)
+        self.assertTrue(self.status(r, "refs-one-level"))
+    def test_path_depth_still_enforced(self):
+        r = self.skill(body="See [g](references/a/guide.md).\n", files={"references/a/guide.md": "# G\n"})
+        self.assertFalse(self.status(r, "refs-path-depth"))
+        self.assertTrue(self.status(r, "refs-one-level"))
+    def test_reference_toc(self):
+        long_body = "\n".join("line %d" % i for i in range(eva.REF_TOC_LINES))
+        self.assertIsNone(self.status(self.skill(body="See [g](references/g.md).\n",
+                                                 files={"references/g.md": "# G\n" + "x\n" * 50}), "reference-toc"))
+        r = self.skill(body="See [g](references/g.md).\n", files={"references/g.md": "# G\n## Setup\n" + long_body})
+        self.assertFalse(self.status(r, "reference-toc"))
+        r = self.skill(body="See [g](references/g.md).\n",
+                       files={"references/g.md": "# G\n## Contents\n- Setup\n## Setup\n" + long_body})
+        self.assertTrue(self.status(r, "reference-toc"))
+        r = self.skill(body="See [g](references/g.md).\n",
+                       files={"references/g.md": "# G\n## Setup\n## Contents\n" + long_body})
+        self.assertFalse(self.status(r, "reference-toc"))  # TOC must come first
+
+class TestSkillEvals(SkillMixin, unittest.TestCase):
+    """evals/evals.json per skill-creator / agentskills.io; required with >= MIN_EVALS cases."""
+    def test_missing_evals_fails(self):
+        r = self.skill(evals=None)
+        self.assertEqual(r.verdict, "FAIL")
+        self.assertEqual(self.ids(r, "critical_failed"), {"evals-valid", "evals-count"})
+    def test_too_few_cases_fails(self):
+        r = self.skill(evals={"skill_name": "word-count", "evals": GOOD_EVALS[:2]})
+        self.assertEqual(self.ids(r, "critical_failed"), {"evals-count"})
+    def evals_err(self, evals, files=None):
+        r = self.skill(evals=evals, files=files)
+        self.assertIn("evals-valid", self.ids(r, "critical_failed"), evals)
+        return next(c["reason"] for c in r.failed if c["id"] == "evals-valid")
+    def test_format_errors(self):
+        self.assertIn("top level must be an object", self.evals_err(GOOD_EVALS))
+        self.assertIn("skill_name", self.evals_err({"skill_name": "other", "evals": GOOD_EVALS}))
+        self.assertIn("skill_name", self.evals_err({"evals": GOOD_EVALS}))
+        bad = lambda **kw: {"skill_name": "word-count", "evals": [dict(GOOD_EVALS[0], **kw)] + GOOD_EVALS[1:]}
+        self.assertIn("id: integer", self.evals_err(bad(id="1")))
+        self.assertIn("id: integer", self.evals_err(bad(id=True)))
+        self.assertIn("duplicate ids [2]", self.evals_err(bad(id=2)))
+        self.assertIn("prompt", self.evals_err(bad(prompt="")))
+        self.assertIn("expected_output", self.evals_err(bad(expected_output=None)))
+        self.assertIn("not found", self.evals_err(bad(files=["evals/files/missing.csv"])))
+        self.assertIn("outside", self.evals_err(bad(files=["../x.csv"])))
+        self.assertIn("assertions", self.evals_err(bad(assertions="x")))
+        self.assertIn("expectations", self.evals_err(bad(expectations=[])))
+        self.assertIn("invalid JSON", self.evals_err("{oops"))
+    def test_valid_files_and_assertions(self):
+        ev = {"skill_name": "word-count", "evals": [dict(GOOD_EVALS[0], files=["evals/files/a.txt"], assertions=["count is 2"]),
+                                                    dict(GOOD_EVALS[1], expectations=["x"]), GOOD_EVALS[2]]}
+        r = self.skill(evals=ev, files={"evals/files/a.txt": "two words"})
+        self.assertEqual(r.verdict, "PASS", r.failed)
+    def test_goldens_have_real_evals(self):
+        for d in ("csv-cleaner", "korean-proofreader", "pdf-summarizer"):
+            n, err = eva.evals_errors(p("golden/skills", d), d)
+            self.assertEqual(err, [], d); self.assertGreaterEqual(n, eva.MIN_EVALS, d)
 
 if __name__ == "__main__":
     unittest.main()

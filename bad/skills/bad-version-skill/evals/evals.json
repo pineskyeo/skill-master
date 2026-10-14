@@ -1,0 +1,20 @@
+{
+  "skill_name": "bad-version-skill",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "notes.txt 단어 몇 개야?",
+      "expected_output": "단어 수 하나"
+    },
+    {
+      "id": 2,
+      "prompt": "빈 파일 empty.txt 단어 수 세줘",
+      "expected_output": "0"
+    },
+    {
+      "id": 3,
+      "prompt": "README.md 단어 수 알려줘, 코드 블록도 포함해서",
+      "expected_output": "코드 블록을 포함한 단어 수"
+    }
+  ]
+}

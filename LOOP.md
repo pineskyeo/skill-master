@@ -28,7 +28,7 @@ run.json 형식 (JSON 객체):
 - `tool_calls` 항목은 도구 이름 문자열, 또는 `{"tool": str, "input": str|object(선택), "result": str(선택)}` 객체. 그 밖의 필드나 타입은 형식 오류.
 - 도구 결과는 각 호출의 `result`에 붙이거나, 최상위 `tool_results`(문자열 목록)에 모아 둔다. 둘 다 써도 된다.
 - 출처 조건에서는 **도구 결과에 실제로 나온 URL만** 센다. 결과에 없는 URL(지어낸 URL)은 세지 않는다.
-- `workspace`가 있으면 그 밖의 절대경로 접근도 `no-bypass` 위반이다.
+- `workspace`가 있으면 그 밖의 절대경로 접근도 `no-answer-lookup` 위반이다.
 - 형식이 틀리면 `transcript-valid` [필수] 실패로 FAIL 보고서가 나온다(예외로 죽지 않음).
 
-→ 잡는 것(모두 [필수]): 선언 안 된 도구 사용, 기대 도구 누락, 시나리오 `must_include` 키워드 누락, 우회(`no-bypass`: 워크스페이스 밖 탐색, git 이력 뒤지기), 그리고 success_criteria/expected_outcome 결과 미달(예: 검증된 출처 URL 개수, 파일:줄 근거 개수, 파일 변경 0건, 글자 수, 비교표).
+→ 잡는 것(모두 [필수]): 선언 안 된 도구 사용, 기대 도구 누락, 시나리오 `must_include` 키워드 누락, 정답 조회(`no-answer-lookup`: 워크스페이스 밖 탐색, git 이력 뒤지기), 그리고 success_criteria/expected_outcome 결과 미달(예: 검증된 출처 URL 개수, 파일:줄 근거 개수, 파일 변경 0건, 글자 수, 비교표).
