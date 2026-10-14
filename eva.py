@@ -10,6 +10,10 @@ SKILL_MAX_LINES = 500    # spec: "Keep your main SKILL.md under 500 lines" -> li
 NAME_MAX = 64
 # agentskills.io/specification: the only frontmatter fields (skills-ref and skill-creator quick_validate reject others)
 SKILL_FIELDS = ("name", "description", "license", "compatibility", "metadata", "allowed-tools")
+# Host-specific allowance (not in the agentskills.io spec): fields documented in the Claude Code skills frontmatter
+# reference (https://code.claude.com/docs/en/skills). Other hosts' validators (skills-ref, quick_validate) reject them.
+HOST_SKILL_FIELDS = ("argument-hint", "disable-model-invocation")
+EVAL_LAYERS = ("static", "llm", "human")  # optional evals[].layer: how the case is graded
 RESERVED_NAME_WORDS = ("anthropic", "claude")  # Claude skill authoring best practices: name "cannot contain"
 COMPATIBILITY_MAX = 500
 REF_TOC_LINES = 100  # Claude best practices: reference files longer than 100 lines get a table of contents
@@ -86,6 +90,62 @@ def desc_person_words(desc):
     text = _unquoted(desc)
     roman = {m.end() - 1 for m in _ROMAN_I_RE.finditer(text)}
     return sorted(set(m.group(0) for m in DESC_PERSON_RE.finditer(text) if m.start() not in roman))
+
+# single-purpose (house heuristic, scored, not required): count the distinct English task verbs that open a
+# coordinated item ('Summarizes PDFs, cleans CSVs and sends emails' -> summarize, clean, send). An item starts at the
+# text start, after . ; : ! ? , ( ) or a joiner (and, or, then, also, plus, to, as well as, &), so swapping ';' for ','
+# or 'and' does not hide the list. Verbs come from TASK_VERBS in base, -s/-es/-ies or -ing form. Words that are often
+# nouns (AMBIGUOUS_TASK_VERBS: 'report', 'schedule', 'format') count only as '-ing' or right after 'to'.
+# Not counted: quoted text, sentences that are an English trigger clause (desc_when_clause: the 'Use when ...'
+# condition lists request phrasings, not the skill's tasks) or exclude uses ('Do NOT use for ...'), a verb followed by 'this' ('Read this skill'), hyphenated
+# compounds ('find-and-replace'), verbs outside the lexicon, and Korean verbs (only the phrases in MULTI_PURPOSE_RE).
+TASK_VERBS = """add aggregate analyze annotate archive audit automate backup benchmark build bundle calculate chart check
+clean classify code combine commit compare compile compose compress compute configure convert copy count crawl create crop
+debug decrypt delete deploy design detect diff draft draw edit email encrypt enrich estimate evaluate export extract fetch
+fill filter find fix forecast format generate grade import index inspect install label lint list load manage map merge
+migrate minify modify monitor move normalize notify optimize order organize parse patch plan plot post predict print process
+profile proofread publish query rank read rebase record refactor release remove rename render reorder repair replace report
+resize restore review rewrite rotate run sanitize scan scrape schedule score search send share sign simulate sort split
+summarize synthesize tag test track train transcribe transform translate trim update upload validate verify visualize
+watermark write""".split()
+AMBIGUOUS_TASK_VERBS = set("""report email chart plan index list record order tag label post profile map design draft query
+patch release schedule test code score print format process review track search update export import run rank estimate
+forecast benchmark""".split())
+SINGLE_PURPOSE_MAX_VERBS = 2  # 'Removes duplicate rows and trims whitespace' (2) passes; 3+ distinct task verbs fail
+MULTI_PURPOSE_RE = re.compile(r"\b(?:and also|as well as|plus)\b|그리고 또|뿐만 아니라", re.I)
+
+def _verb_forms(v):
+    f = {v, v + "s", v + "es", v + "ing"}
+    if v.endswith("e"): f.add(v[:-1] + "ing")
+    if v.endswith("y"): f.add(v[:-1] + "ies")
+    if re.search(r"[^aeiou][aeiou][bdgmnprt]$", v): f.add(v + v[-1] + "ing")  # split -> splitting
+    return f
+
+TASK_VERB_FORMS = {f: v for v in TASK_VERBS for f in _verb_forms(v)}
+TASK_TOKEN_RE = re.compile(r"[A-Za-z]+(?:[-/][A-Za-z]+)*|[.;:!?,()&]")
+# 'Do NOT use for PDFs, spreadsheets, or coding': a sentence that excludes uses lists what the skill does not do
+TASK_EXCLUSION_RE = re.compile(r"\b(?:do\s+not|don['’]t|never|not)\s+(?:use|trigger|invoke)\b|\bnot\s+for\b", re.I)
+TASK_JOINERS = {"and", "or", "then", "also", "plus", "to"}
+
+def desc_task_verbs(desc):
+    """Distinct task verbs (base form, in order) that open a coordinated item outside trigger sentences."""
+    out = []
+    for sent in DESC_SENTENCE_RE.split(_unquoted(desc)):
+        if desc_when_clause(sent) is not None or TASK_EXCLUSION_RE.search(sent):
+            continue
+        toks = TASK_TOKEN_RE.findall(re.sub(r"\bas\s+well\s+as\b", " and ", sent, flags=re.I))
+        start, after_to = True, False
+        for i, t in enumerate(toks):
+            w = t.lower()
+            if not w[0].isalpha():
+                start, after_to = True, False; continue
+            v = TASK_VERB_FORMS.get(w)
+            nxt = toks[i + 1].lower() if i + 1 < len(toks) else ""
+            if start and v and nxt != "this" and v not in out and \
+                    (v not in AMBIGUOUS_TASK_VERBS or w.endswith("ing") or after_to):
+                out.append(v)
+            start, after_to = w in TASK_JOINERS, w == "to"
+    return out
 
 # ---------- frontmatter (minimal YAML subset) ----------
 def _quoted_end(v):
@@ -472,7 +532,7 @@ def _common_name(r, meta, path):
     r.add("name-format", "single-task", not ne,
           "name '%s' (skills-ref rules: NFKC, lowercase letters/digits/'-', <=%d)%s" % (name, NAME_MAX, (": %s" % ne) if ne else ""),
           "name을 소문자·숫자·하이픈(예: pdf-summarizer)으로, %d자 이하로 바꾸세요." % NAME_MAX)
-    folder = unicodedata.normalize("NFKC", os.path.basename(os.path.normpath(path)))
+    folder = unicodedata.normalize("NFKC", os.path.basename(os.path.realpath(path)))  # '.', 'x/', symlinks
     r.add("name-matches-folder", "structure", name == folder,
           "name '%s' vs folder '%s'" % (name, folder), "frontmatter name을 폴더 이름 '%s'과 같게 맞추세요." % folder)
     desc = _str_field(meta, "description")
@@ -564,6 +624,23 @@ def _ref_problem(ref):
     if norm == ".." or norm.startswith("../"): return "points outside the skill directory"
     return None
 
+def git_root(path):
+    """Nearest enclosing git work tree root of path (a directory holding '.git', dir or worktree file), or None."""
+    d = os.path.realpath(path)
+    while True:
+        if os.path.exists(os.path.join(d, ".git")): return d
+        up = os.path.dirname(d)
+        if up == d: return None
+        d = up
+
+def repo_root_ref(path, ref):
+    """True if ref, missing from the skill folder, is a file relative to the enclosing git repo root and stays inside
+    it (after resolving symlinks). Refs with a _ref_problem ('..', absolute, backslash) never qualify."""
+    root = git_root(path)
+    if root is None or _ref_problem(ref): return False
+    target = os.path.realpath(os.path.join(root, ref))
+    return os.path.commonpath([root, target]) == root and os.path.exists(target)
+
 def _toc_first(text):
     """True if the first heading after the title (outside fences) is a table of contents."""
     heads = headings(text)
@@ -594,12 +671,19 @@ def _field_type_errors(meta, typed):
             for k, v in md.items():
                 if not isinstance(v, str):
                     e.append("metadata.%s: string value required, got %s" % (k, type(v).__name__))
+    if "argument-hint" in meta and not _nonempty_str(meta["argument-hint"]):
+        e.append("argument-hint: non-empty string required")
+    if "disable-model-invocation" in meta:
+        v = meta["disable-model-invocation"]
+        if not (isinstance(v, str) and v.lower() in ("true", "false") and "disable-model-invocation" in typed):
+            e.append("disable-model-invocation: unquoted boolean true/false required, got %r" % (v,))
     return e
 
 def evals_errors(path, name):
     """Validate evals/evals.json against the skill-creator / agentskills.io format. Returns (n_cases, errors).
     Format: {"skill_name": <frontmatter name>, "evals": [{"id": int (unique), "prompt": str, "expected_output": str,
-    "files": [str] (optional, relative to skill root, must exist), "assertions"|"expectations": [str] (optional)}]}"""
+    "files": [str] (optional, relative to skill root, must exist), "assertions"|"expectations": [str] (optional),
+    "layer": "static"|"llm"|"human" (optional; exact lowercase, no layer is required to be present)}]}"""
     fp = os.path.join(path, "evals", "evals.json")
     if not os.path.isfile(fp):
         return 0, ["missing evals/evals.json"]
@@ -640,6 +724,8 @@ def evals_errors(path, name):
         for k in ("assertions", "expectations"):
             if k in it and not _str_list(it[k]):
                 e.append("evals[%d].%s: non-empty list of strings required" % (i, k))
+        if "layer" in it and it["layer"] not in EVAL_LAYERS:
+            e.append("evals[%d].layer: must be one of %s (lowercase), got %r" % (i, "|".join(EVAL_LAYERS), it["layer"]))
     dup = sorted({x for x in ids if ids.count(x) > 1})
     if dup: e.append("duplicate ids %s" % dup)
     return len(items), e
@@ -654,9 +740,11 @@ def check_skill(path):
           "SKILL.md 첫 줄을 정확히 '---'로 시작하고, 'key: value' 매핑(name, description)으로 된 frontmatter를 '---'로 닫으세요.")
     meta = meta or {}
     typed = set(yaml_typed_keys(raw)) if meta else set()
-    extra = sorted(k for k in meta if k not in SKILL_FIELDS)
+    extra = sorted(k for k in meta if k not in SKILL_FIELDS + HOST_SKILL_FIELDS)
+    host = sorted(k for k in meta if k in HOST_SKILL_FIELDS)
     r.add("frontmatter-fields", "structure", not extra,
-          "frontmatter fields within spec %s" % (SKILL_FIELDS,) + (": unexpected %s" % extra if extra else ""),
+          "frontmatter fields within spec %s" % (SKILL_FIELDS,) +
+          (" + Claude Code host-specific %s" % host if host else "") + (": unexpected %s" % extra if extra else ""),
           "spec 밖 필드 %s를 frontmatter에서 빼세요. 입력·출력은 본문 '## Inputs'/'## Outputs' 섹션에, "
           "그 밖의 값은 metadata: 아래 문자열로 두세요." % extra, must=True)
     te = _field_type_errors(meta, typed)
@@ -690,9 +778,13 @@ def check_skill(path):
           "description has no first/second-person wording" + (": %s" % pov if pov else ""),
           "description을 3인칭으로 쓰세요(예: 'I can help you...'/'You can use this...' 대신 'Processes Excel files...'). "
           "1·2인칭 표현 %s를 빼세요." % pov, must=True)
-    multi = len(re.findall(r"\b(and also|as well as|plus)\b|그리고 또|뿐만 아니라", desc, re.I))
-    r.add("single-purpose", "single-task", multi == 0 and desc.count(";") < 2,
-          "description focuses on one purpose", "여러 일을 나열하지 말고 스킬 하나에 작업 하나만 남기세요(나머지는 별도 스킬로 분리).")
+    multi = sorted({m.group(0).lower() for m in MULTI_PURPOSE_RE.finditer(desc)})
+    verbs = desc_task_verbs(desc)
+    r.add("single-purpose", "single-task", not multi and len(verbs) <= SINGLE_PURPOSE_MAX_VERBS,
+          "description focuses on one purpose (distinct task verbs %d, max %d; add-on phrases %d)%s" % (
+              len(verbs), SINGLE_PURPOSE_MAX_VERBS, len(multi),
+              ": task verbs %s%s" % (verbs, ", phrases %s" % multi if multi else "") if verbs or multi else ""),
+          "여러 일을 나열하지 말고 스킬 하나에 작업 하나만 남기세요(나머지는 별도 스킬로 분리). 찾은 작업 동사: %s" % verbs)
     if "compatibility" in meta:
         comp = meta["compatibility"] if isinstance(meta["compatibility"], str) else ""
         r.add("compatibility-length", "structure", 1 <= len(comp.strip()) <= COMPATIBILITY_MAX,
@@ -715,10 +807,20 @@ def check_skill(path):
     r.add("refs-relative", "structure", not probs,
           "refs are forward-slash paths relative to the skill root" + (": %s" % probs if probs else ""),
           "참조를 스킬 폴더 기준 상대경로·슬래시(/)로 고치세요(예: references/guide.md): %s" % ", ".join(probs))
-    missing = sorted(x for x in refs if not os.path.exists(os.path.join(path, x)))
-    r.add("refs-exist", "structure", not missing,
-          "referenced files exist" + (": missing %s" % missing if missing else ""),
-          "없는 파일을 만들거나 참조를 지우세요: %s" % ", ".join(missing))
+    absent = sorted(x for x in refs if not os.path.exists(os.path.join(path, x)))
+    repo_refs = [x for x in absent if repo_root_ref(path, x)]
+    missing = [x for x in absent if x not in repo_refs]
+    if missing or not repo_refs:
+        r.add("refs-exist", "structure", not missing,
+              "referenced files exist" + (": missing %s" % missing if missing else "") +
+              ("; repo-root-relative reference, not bundled: %s" % repo_refs if repo_refs else ""),
+              "없는 파일을 만들거나 참조를 지우세요: %s" % ", ".join(missing))
+    else:
+        r.review("refs-exist", "structure",
+                 "repo-root-relative reference, not bundled: %s (found from the enclosing git repo root, not the skill "
+                 "folder; works only when the skill runs inside that repo)" % repo_refs,
+                 "스킬을 리포 밖에서도 쓰려면 파일을 스킬 폴더(scripts/ 등)에 넣으세요. 리포 안에서만 쓰는 스킬이면 "
+                 "본문에 '리포 루트 기준 경로'라고 밝히고 사람이 확인하세요: %s" % ", ".join(repo_refs))
     direct = {posixpath.normpath(x) for x in refs if not _ref_problem(x)}
     md_refs = sorted(x for x in direct if x.lower().endswith(".md") and os.path.isfile(os.path.join(path, x)))
     nested = []

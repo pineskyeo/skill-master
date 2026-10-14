@@ -1456,5 +1456,143 @@ class TestRunnerParity(unittest.TestCase):
         cfg = configparser.ConfigParser(); cfg.read(p("pytest.ini"), encoding="utf-8")
         self.assertEqual(cfg.get("pytest", "testpaths").split(), ["tests"])
 
+class TestRound7HostFields(SkillMixin, unittest.TestCase):
+    """Claude Code documented fields argument-hint / disable-model-invocation are a host-specific allowance."""
+    def test_host_fields_allowed(self):
+        r = self.skill(extra="argument-hint: \"[file]\"\ndisable-model-invocation: true\n")
+        self.assertEqual(r.verdict, "PASS", r.failed)
+        self.assertIn("host-specific", next(c["reason"] for c in r.checks if c["id"] == "frontmatter-fields"))
+        self.assertTrue(self.status(self.skill(extra="disable-model-invocation: false\n"), "field-types"))
+    def test_other_fields_still_fail(self):
+        for extra in ("user-invocable: false\n", "model: opus\n", "inputs: x\n"):
+            self.assertIn("frontmatter-fields", self.ids(self.skill(extra=extra), "critical_failed"), extra)
+    def test_host_field_types(self):
+        for extra in ("disable-model-invocation: \"true\"\n", "disable-model-invocation: maybe\n",
+                      "disable-model-invocation:\n", "argument-hint:\n"):
+            r = self.skill(extra=extra)
+            self.assertFalse(self.status(r, "field-types"), extra)
+            self.assertTrue(self.status(r, "frontmatter-fields"), extra)
+    def test_readme_marks_host_allowance(self):
+        readme = open(p("README.md"), encoding="utf-8").read()
+        row = next(ln for ln in readme.splitlines() if ln.startswith("| `frontmatter-fields`"))
+        self.assertIn("argument-hint", row); self.assertIn("disable-model-invocation", row); self.assertIn("호스트", row)
+
+class TestRound7RepoRootRefs(TmpMixin, unittest.TestCase):
+    """refs-exist: a ref found only from the enclosing git repo root is needs-review, never a silent pass."""
+    def make(self, body, git=True, root_files=()):
+        repo = os.path.join(self.tmp, "repo"); d = os.path.join(repo, "skills", "word-count")
+        os.makedirs(os.path.join(d, "evals"), exist_ok=True)
+        if git: os.makedirs(os.path.join(repo, ".git"))
+        for rel in root_files:
+            fp = os.path.join(repo, rel); os.makedirs(os.path.dirname(fp), exist_ok=True); wtext(fp, "x")
+        wtext(os.path.join(d, "SKILL.md"), GOOD_FM.format(name="word-count", extra="", body=body))
+        wjson(os.path.join(d, "evals", "evals.json"), {"skill_name": "word-count", "evals": GOOD_EVALS})
+        return eva.check(d), repo
+    def check_of(self, r):
+        return next(c for c in r.checks if c["id"] == "refs-exist")
+    def test_repo_root_ref_is_review(self):
+        r, _ = self.make("Run `scripts/check_skills.py`.\n", root_files=["scripts/check_skills.py"])
+        c = self.check_of(r)
+        self.assertEqual(c["status"], "needs-review"); self.assertIn("repo-root-relative reference, not bundled", c["reason"])
+        self.assertEqual(r.verdict, "REVIEW", r.failed)
+        self.assertEqual(eva.EXIT_CODES[r.verdict], 3)
+    def test_missing_everywhere_fails(self):
+        r, _ = self.make("Run `scripts/check_skills.py`.\n")
+        self.assertFalse(self.check_of(r)["passed"])
+        r, _ = self.make("Run `scripts/check_skills.py`.\n", git=False, root_files=["scripts/check_skills.py"])
+        self.assertFalse(self.check_of(r)["passed"])  # no git repo: no repo root to resolve against
+    def test_mixed_missing_and_repo_ref_fails(self):
+        r, _ = self.make("Run `scripts/a.py` and `scripts/b.py`.\n", root_files=["scripts/a.py"])
+        c = self.check_of(r)
+        self.assertFalse(c["passed"]); self.assertIn("scripts/b.py", c["reason"]); self.assertIn("not bundled", c["reason"])
+    def test_escape_via_symlink_rejected(self):
+        outside = os.path.join(self.tmp, "outside.py"); wtext(outside, "x")
+        repo = os.path.join(self.tmp, "repo"); os.makedirs(os.path.join(repo, "scripts"))
+        os.symlink(outside, os.path.join(repo, "scripts", "esc.py"))
+        r, _ = self.make("Run `scripts/esc.py`.\n")
+        self.assertFalse(self.check_of(r)["passed"])
+    def test_dotdot_never_repo_root(self):
+        r, repo = self.make("See [x](../../README.md).\n", root_files=["README.md"])
+        self.assertFalse(eva.repo_root_ref(os.path.join(repo, "skills", "word-count"), "../../README.md"))
+        self.assertFalse(eva.repo_root_ref(os.path.join(repo, "skills", "word-count"), "/etc/hosts"))
+        self.assertFalse(self.status_of(r, "refs-relative"))
+    def status_of(self, r, cid):
+        return next(c["passed"] for c in r.checks if c["id"] == cid)
+
+class TestRound7FolderName(SkillMixin, unittest.TestCase):
+    """name-matches-folder resolves '.', relative paths and trailing slashes via realpath."""
+    def test_dot_relative_and_trailing_slash(self):
+        self.skill()
+        d = os.path.join(self.tmp, "word-count"); cwd = os.getcwd()
+        try:
+            os.chdir(d)
+            for arg in (".", "./", "../word-count", "../word-count/"):
+                self.assertTrue(self.status(eva.check(arg), "name-matches-folder"), arg)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(eva.main(["check", "."]), 0)
+            os.chdir(self.tmp)
+            self.assertTrue(self.status(eva.check("word-count/"), "name-matches-folder"))
+        finally:
+            os.chdir(cwd)
+    def test_symlink_uses_real_folder(self):
+        self.skill(); link = os.path.join(self.tmp, "alias")
+        os.symlink(os.path.join(self.tmp, "word-count"), link)
+        self.assertTrue(self.status(eva.check(link), "name-matches-folder"))
+
+class TestRound7SinglePurpose(SkillMixin, unittest.TestCase):
+    """single-purpose counts distinct task verbs that open coordinated items, so ';' -> ',' does not dodge it."""
+    def sp(self, d):
+        return self.status(self.skill(raw=GOOD_FM.replace(
+            "Counts words in one text file. Use when the user wants a word count.", json.dumps(d)).format(name="word-count", extra="", body="")),
+            "single-purpose")
+    def test_separator_swap_does_not_dodge(self):
+        for d in ("Summarizes PDFs; cleans CSVs; sends emails. Use when the user wants help with files.",
+                  "Summarizes PDFs, cleans CSVs, sends emails. Use when the user wants help with files.",
+                  "Summarizes PDFs and cleans CSVs and sends emails. Use when the user wants help with files.",
+                  "Summarizes PDFs - then translates them / or cleans CSVs, and sends emails. Use when the user wants help.",
+                  "Handles files: reading, parsing, or extracting text, editing slides, and combining decks. Use when files arrive."):
+            self.assertFalse(self.sp(d), d)
+    def test_add_on_phrases_still_fail(self):
+        self.assertFalse(self.sp("Summarizes PDFs as well as charts. Use when the user wants a summary."))
+        self.assertFalse(self.sp("Summarizes PDFs and also tables. Use when the user wants a summary."))
+    def test_single_or_two_tasks_pass(self):
+        for d in ("Counts words in one text file. Use when the user wants a word count.",
+                  "Removes duplicate rows and trims whitespace in one CSV file. Use when a CSV has messy rows.",
+                  "Controls the desktop; its tools are named x; before setup there is only y. Use when the user asks for desktop control.",
+                  "Exports a Word file for a document, page, report or memo. Use when the user wants a .docx file.",
+                  "Summarizes a PDF. Use when the user asks to summarize, translate, or email a PDF."):
+            self.assertTrue(self.sp(d), d)
+    def test_task_verbs_listed_in_reason(self):
+        self.assertEqual(eva.desc_task_verbs("Summarizes PDFs, cleans CSVs, sends emails, translates text."),
+                         ["summarize", "clean", "send", "translate"])
+        self.assertEqual(eva.desc_task_verbs("Generates schedules and reports."), ["generate"])  # nouns, not verbs
+        self.assertEqual(eva.desc_task_verbs("Read this skill before editing. \"Merge, split, rotate\"."), [])
+        self.assertEqual(eva.desc_task_verbs("Edits Word files. Do NOT use for PDFs, coding, or translating."), ["edit"])
+    def test_golden_still_pass_and_bad_still_fails(self):
+        for u in eva.find_units(p("golden", "skills")):
+            self.assertTrue(next(c["passed"] for c in eva.check(u).checks if c["id"] == "single-purpose"), u)
+        self.assertFalse(next(c["passed"] for c in eva.check(p("bad/skills/DoEverything")).checks if c["id"] == "single-purpose"))
+    def test_scored_not_required(self):
+        r = self.skill(raw=GOOD_FM.replace("Counts words in one text file.", "Counts words, sorts lines, merges files.")
+                       .format(name="word-count", extra="", body=""))
+        c = next(c for c in r.checks if c["id"] == "single-purpose")
+        self.assertFalse(c["passed"]); self.assertFalse(c["must"]); self.assertEqual(r.verdict, "PASS", r.failed)
+
+class TestRound7EvalLayer(SkillMixin, unittest.TestCase):
+    """evals[].layer is optional; when present it must be exactly static|llm|human."""
+    def with_layers(self, *layers):
+        evals = [dict(e) for e in GOOD_EVALS]
+        for e, layer in zip(evals, layers):
+            if layer != "<absent>": e["layer"] = layer
+        return self.skill(evals={"skill_name": "word-count", "evals": evals})
+    def test_valid_layers(self):
+        for layers in (("static", "llm", "human"), ("llm",), ("static", "static"), ("<absent>", "human"), ()):
+            r = self.with_layers(*layers); self.assertTrue(self.status(r, "evals-valid"), (layers, r.failed))
+    def test_invalid_layers_fail(self):
+        for bad in ("LLM", "Static", "unit", "", "none", 1, ["llm"], None):
+            r = self.with_layers(bad)
+            self.assertFalse(self.status(r, "evals-valid"), bad)
+            self.assertIn("layer", next(c["reason"] for c in r.failed if c["id"] == "evals-valid"))
+
 if __name__ == "__main__":
     unittest.main()
