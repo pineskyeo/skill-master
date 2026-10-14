@@ -756,7 +756,10 @@ class TestCitedLinesExist(TmpMixin, unittest.TestCase):
         run = run_of([{"tool": "read_file", "input": {"path": "src/app.py"}}], results=["src/app.py"])
         self.assertFalse(eva.outcome_evidence("파일:줄 근거 1개 이상", "src/app.py:3", run)[1])
     def test_numbered_formats(self):
-        for res in ("     3\tx = 1", "3→x = 1", "3: x = 1", "3 x = 1"):
+        # Round 5: 'N text' (space separator) is indistinguishable from raw content ('200 OK') and no longer counts
+        self.assertFalse(eva.outcome_evidence("파일:줄 근거 1개 이상", "src/app.py:3", run_of(
+            [{"tool": "read_file", "input": {"file_path": "/work/repo/src/app.py"}, "result": "3 x = 1"}], workspace="/work/repo"))[1])
+        for res in ("     3\tx = 1", "3→x = 1", "3: x = 1"):
             run = run_of([{"tool": "read_file", "input": {"file_path": "/work/repo/src/app.py"}, "result": res}], workspace="/work/repo")
             self.assertTrue(eva.outcome_evidence("파일:줄 근거 1개 이상", "src/app.py:3", run)[1], res)
             self.assertFalse(eva.outcome_evidence("파일:줄 근거 1개 이상", "src/app.py:4", run)[1], res)
@@ -886,8 +889,10 @@ class TestCitationSingleFile(unittest.TestCase):
     def test_wc_style_line_on_path_tool_rejected(self):
         calls = [{"tool": "wc", "input": {"path": "src/a.py"}, "result": "42 src/a.py"}]
         self.assertFalse(cites_ok("src/a.py:42", calls))
-        calls = [{"tool": "read_file", "input": {"path": "src/a.py"}, "result": "42 return src/a.py"}]
+        calls = [{"tool": "read_file", "input": {"path": "src/a.py"}, "result": "42\treturn src/a.py"}]
         self.assertTrue(cites_ok("src/a.py:42", calls))  # real content that merely mentions a path still counts
+        calls = [{"tool": "read_file", "input": {"path": "src/a.py"}, "result": "42\tsrc/a.py"}]
+        self.assertFalse(cites_ok("src/a.py:42", calls))  # 'N<tab>path' is a count
     def test_multi_file_grep_rejected(self):
         # Round 4: a line counts only from a call that read exactly that one file (was: path-prefixed grep lines counted)
         calls = [{"tool": "bash", "input": {"command": "grep -n foo src/a.py src/b.py"}, "result": "src/a.py:3:foo\nsrc/b.py:9:foo"}]
@@ -978,7 +983,7 @@ class TestDescriptionChecks(SkillMixin, unittest.TestCase):
     def test_verb_forms_free(self):
         for d in ("Counts words in one text file. Use when the user wants a word count.",
                   "Count words in one text file. Use this skill when the user wants a word count.",
-                  "Word counting for one text file, used when the user wants a word count.",
+                  "Word counting for one text file. Used when the user wants a word count.",
                   "한국어 글의 낱말 수를 센다. 낱말 수를 물을 때 사용한다. Use when the user wants a word count.",
                   "Counts words (I/O safe). Use when the user wants a word count."):
             r = self.desc(d); self.assertEqual(r.verdict, "PASS", (d, r.failed))
@@ -1300,6 +1305,108 @@ class TestRound4PyYamlRequired(unittest.TestCase):
     def test_no_silent_skips_in_suite(self):
         src = open(os.path.abspath(__file__), encoding="utf-8").read()
         self.assertEqual(src.count("skipTest" + "("), 1)  # only inside require_yaml
+
+class TestRound5Citations(unittest.TestCase):
+    """Round 5 (1): every line of a cited range must be shown, start <= end, and only line-numbered results count."""
+    def read(self, res, path="src/a.py"):
+        return [{"tool": "Read", "input": {"file_path": path}, "result": res}]
+    def test_every_line_of_range_shown(self):
+        grep = [{"tool": "bash", "input": {"command": "grep -n -A3 foo src/a.py"}, "result": "10:foo\n13-baz"}]
+        self.assertTrue(cites_ok("src/a.py:10", grep)); self.assertTrue(cites_ok("src/a.py:13", grep))
+        self.assertFalse(cites_ok("src/a.py:10-13", grep))  # 11, 12 never shown (was: only both ends checked)
+        full = self.read("    10\ta\n    11\tb\n    12\tc\n    13\td")
+        self.assertTrue(cites_ok("src/a.py:10-13", full)); self.assertTrue(cites_ok("src/a.py:11-11", full))
+        self.assertFalse(cites_ok("src/a.py:10-14", full))
+        split = self.read("    10\ta") + self.read("    13\td")  # two reads showing only the ends
+        self.assertFalse(cites_ok("src/a.py:10-13", split))
+    def test_reversed_range_rejected(self):
+        calls = self.read("\n".join("%6d\tx" % n for n in range(1, 50)))
+        self.assertTrue(cites_ok("src/a.py:3-42", calls))
+        self.assertFalse(cites_ok("src/a.py:42-3", calls))  # reviewer repro
+        ev = eva.outcome_evidence("파일:줄 근거 1개 이상", "src/a.py:42-3", run_of(calls))
+        self.assertIn("src/a.py:42-3", ev[2])
+    def test_huge_range_stops_early(self):
+        self.assertFalse(cites_ok("src/a.py:1-999999999", self.read("     1\tx")))
+    def test_raw_content_yields_no_lines(self):
+        for res in ("200 OK\n404 Not Found",  # reviewer repro
+                    "200 OK", "42 x", "1 | a\n2 | b", "    10\ta\n    12\tc",  # gap: not consecutive
+                    "    10\ta\n    11→b",  # mixed separators
+                    "    10\ta\nplain line\n    11\tb", "    11\ta\n    10\tb"):
+            for ln in (1, 2, 10, 11, 12, 42, 200, 404):
+                self.assertFalse(cites_ok("src/a.py:%d" % ln, self.read(res)), (res, ln))
+        for res, ln in (("%6d\thello" % 200, 200), ("200→OK\n201→Created", 201), ("200: OK\n201: x", 200),
+                        ("    10\ta\n    11\t\n    12\tc\n", 12)):  # empty file line '    11\t', trailing newline
+            self.assertTrue(cites_ok("src/a.py:%d" % ln, self.read(res)), (res, ln))
+    def test_raw_content_via_shell_read_yields_no_lines(self):
+        calls = [{"tool": "bash", "input": {"command": "cat -n src/a.py"}, "result": "200 OK\n404 Not Found"}]
+        self.assertFalse(cites_ok("src/a.py:200", calls)); self.assertFalse(cites_ok("src/a.py:404", calls))
+    def test_grep_output_must_be_consistent(self):
+        g = lambda res: [{"tool": "bash", "input": {"command": "grep -n -C1 foo src/a.py"}, "result": res}]
+        self.assertTrue(cites_ok("src/a.py:42", g("41-x\n42:foo\n43-y\n--\n90-z\n91:foo")))
+        for res in ("42:foo\n200 OK", "42:foo\n7:bar", "42:foo\n42:foo", "Binary file matches\n42:foo"):
+            self.assertFalse(cites_ok("src/a.py:42", g(res)), res)
+
+class TestRound5DescriptionWhen(SkillMixin, unittest.TestCase):
+    """Round 5 (2): sentence-initial use clause, 'this skill ... when', or 'Read this skill before|when';
+    quoted text, passive/participle and negative forms do not count."""
+    def desc(self, d):
+        raw = GOOD_FM.format(name="word-count", extra="", body="").replace(
+            "description: Counts words in one text file. Use when the user wants a word count.", "description: %s" % d)
+        return self.skill(raw=raw)
+    def test_quoted_trigger_ignored(self):
+        for d in ('Counts words. Replies "Use when the user wants a word count" to greetings.',
+                  "Counts words. Prints `Use when the user wants a word count` as help text.",
+                  "Counts words. Says 'Use this skill when the user wants a count' on start.",
+                  "Counts words. Shows “Use when the user wants a word count” in the banner."):
+            self.assertIsNone(eva.desc_when_clause(d), d)
+            r = self.desc(d); self.assertEqual(self.ids(r, "critical_failed"), {"description-when"}, d)
+        # quotes inside a real condition only drop the quoted words
+        self.assertTrue(self.status(self.desc('Fixes code. Use when the user says "fix my code".'), "description-when"))
+    def test_passive_participle_rejected(self):
+        for d in ("Config files loaded when the session starts.", "Lifecycle hooks called when the agent exits.",
+                  "Applies to Python files when the user edits them.", "Word counting for one text file, used when the user wants a word count.",
+                  "Counts words in files triggered when a commit lands.", "Counts words, invoked when the user pastes text."):
+            self.assertIsNone(eva.desc_when_clause(d), d)
+            r = self.desc(d); self.assertEqual(self.ids(r, "critical_failed"), {"description-when"}, d)
+    def test_negative_forms_rejected(self):
+        for d in ("Counts words. Do not use when the user wants a summary.", "Counts words. Don't use when the file is binary.",
+                  "Counts words. Never use when the file is binary.", "Counts words. Don’t use this skill when the file is binary.",
+                  "Counts words. Do not use this skill when the file is binary.", "Counts words. This skill should not be used when the file is binary.",
+                  "Counts words. Never use this skill whenever the input is binary."):
+            self.assertIsNone(eva.desc_when_clause(d), d)
+            r = self.desc(d); self.assertEqual(self.ids(r, "critical_failed"), {"description-when"}, d)
+        r = self.desc("Counts words. Use when the user wants a word count. Do not use when the file is binary.")
+        self.assertEqual(r.verdict, "PASS", r.failed)
+    def test_accepted_forms(self):
+        for d in ("Counts words. Use when the user wants a word count.", "Counts words. Use this skill when the user wants a word count.",
+                  "Counts words. Used when the user wants a word count.", "Counts words. Invoke when the user asks for a word count.",
+                  "Counts words. Trigger when the user asks for a word count.", "Use when the user wants a word count of a file.",
+                  "Counts words. Claude should use this skill when the user wants a word count.",
+                  "Counts words. This skill applies when the user wants a word count.",
+                  "Counts words. Read this skill before counting words in any document.",
+                  "Counts words. Read this skill when the user wants a word count.",
+                  "Counts words. Use this when the user wants a word count.",  # accepted before Round 5, kept
+                  "Counts words. Use it when the user wants a word count."):
+            r = self.desc(d); self.assertEqual(r.verdict, "PASS", (d, r.failed))
+        # a line break starts a sentence (folded '|' block descriptions)
+        self.assertEqual(eva.desc_when_clause("Counts words\nUse when the user wants a word count"), "the user wants a word count")
+    def test_read_this_skill_needs_substance(self):
+        for d in ("Counts words. Read this skill before use.", "Counts words. Read this skill before it is needed.",
+                  "Counts words. Read this skill.", "Counts words. Read this skill when needed."):
+            r = self.desc(d); self.assertEqual(self.ids(r, "critical_failed"), {"description-when"}, d)
+    def test_use_clause_must_start_sentence(self):
+        for d in ("Counts words; use when the user wants a count.", "Counts words and the tools use when the user asks."):
+            self.assertIsNone(eva.desc_when_clause(d), d)
+    def test_korean_only_still_fails(self):
+        for d in ("한국어 글의 낱말 수를 센다. 사용자가 낱말 수를 물을 때 사용한다.", "낱말 수를 센다. 이 스킬은 사용자가 물을 때 읽는다."):
+            r = self.desc(d); self.assertEqual(self.ids(r, "critical_failed"), {"description-when"}, d)
+
+class TestRound5Docs(unittest.TestCase):
+    """Round 5 (3): README no longer claims path-prefixed grep lines count from any result."""
+    def test_no_stale_any_result_claim(self):
+        readme = open(p("README.md"), encoding="utf-8").read()
+        self.assertNotIn("어느 결과에 있어도 됨", readme)
+        self.assertNotIn("줄<탭|→|:|공백>", readme)
 
 if __name__ == "__main__":
     unittest.main()

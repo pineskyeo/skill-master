@@ -16,16 +16,22 @@ REF_TOC_LINES = 100  # Claude best practices: reference files longer than 100 li
 MIN_EVALS = 3        # Claude best practices checklist: "At least three evaluations created"
 DESCRIPTION_MAX = 1024  # spec + best practices: description "Max 1024 characters"
 DESCRIPTION_MIN = 20    # house rule: the spec only requires non-empty
-# Spec: description "Should describe ... when to use it". Only an English trigger clause counts: a use verb in any
-# form ('Use', 'Used', 'Invoke', 'Trigger', ...), optionally 'this skill' / 'for|to <task>', then 'when'/'whenever'
-# and a substantive condition (DESC_WHEN_MIN_WORDS words, not only vague ones). A bare 'when' elsewhere
-# ('Counts words when files change'), 'Use this.' and Korean conditionals ('...할 때 사용한다') do not count.
-DESC_WHEN_RE = re.compile(
-    r"\b(?:use[sd]?|using|invoke[sd]?|invoking|trigger(?:s|ed)?|activate[sd]?|apply|applies|applied|call(?:ed)?"
-    r"|load(?:ed)?|choose|chosen|select(?:ed)?|consult(?:ed)?)"
-    r"(?:\s+(?:this|the|it))?(?:\s+(?:skill|tool))?(?:\s+[A-Za-z]+ly)?"
-    r"(?:\s+(?:for|to)\b[^.;!?\n]{1,150}?)?"
-    r"\s+(?:when|whenever)\b([^.;!?\n]*)", re.I)
+# Spec: description "Should describe ... when to use it". Only an English trigger clause outside quotes/backticks
+# counts, followed by a substantive condition (DESC_WHEN_MIN_WORDS words, not only vague ones):
+#   - a sentence that starts with 'Use' / 'Used' / 'Invoke' / 'Trigger' (optionally 'this|the|it [skill|tool]', an '-ly' adverb,
+#     'for|to <task>') and then 'when'/'whenever' ('Use when ...', 'Use this skill when ...', 'Used when ...');
+#   - a clause with 'this skill' as subject or object ('... this skill when ...', 'This skill should be used when ...');
+#   - a sentence 'Read this skill before|when ...'.
+# Not counted: a 'when' after any other words ('Counts words when files change', 'files loaded when',
+# 'hooks called when', 'Applies to X when', '..., used when'), negated clauses ('Do not use when', "Don't use this
+# skill when", 'Never use when'), 'Use this.', Korean conditionals ('...할 때 사용한다') and quoted text.
+DESC_USE_START_RE = re.compile(
+    r"(?:use|used|invoke|trigger)(?:\s+(?:this|the|it))?(?:\s+(?:skill|tool))?(?:\s+[A-Za-z]+ly)?(?:\s+(?:for|to)\b[^;]{1,150}?)?"
+    r"\s+(?:when|whenever)\b([^;]*)", re.I)
+DESC_THIS_SKILL_RE = re.compile(r"\bthis\s+skill(?:\s+[A-Za-z]+){0,4}?\s+(?:when|whenever)\b([^;]*)", re.I)
+DESC_READ_RE = re.compile(r"read\s+this\s+skill\s+(?:before|when|whenever)\b([^;]*)", re.I)
+DESC_NEGATION_RE = re.compile(r"\b(?:not|never)\b|n['’]t\b", re.I)
+DESC_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 DESC_WHEN_MIN_WORDS = 2
 DESC_WHEN_VAGUE = {"a", "an", "the", "it", "is", "are", "be", "this", "that", "there", "you", "user", "users", "someone",
                    "needed", "need", "necessary", "appropriate", "required", "relevant", "useful", "helpful", "asked",
@@ -34,11 +40,16 @@ DESC_WHEN_VAGUE = {"a", "an", "the", "it", "is", "are", "be", "this", "that", "t
 
 def desc_when_clause(desc):
     """The condition text of the first substantive English trigger clause in desc ('the user wants a word count'
-    from 'Use when the user wants a word count.'), else None."""
-    for m in DESC_WHEN_RE.finditer(desc):
-        words = re.findall(r"[A-Za-z][A-Za-z'-]*", m.group(1))
-        if len(words) >= DESC_WHEN_MIN_WORDS and any(w.lower() not in DESC_WHEN_VAGUE for w in words):
-            return m.group(1).strip()
+    from 'Use when the user wants a word count.'), else None. Quoted text is blanked first (_unquoted)."""
+    for sent in DESC_SENTENCE_RE.split(_unquoted(desc)):
+        sent = sent.strip().lstrip("-*•(").strip()
+        for m in (DESC_USE_START_RE.match(sent), DESC_READ_RE.match(sent), DESC_THIS_SKILL_RE.search(sent)):
+            if m is None or DESC_NEGATION_RE.search(sent[:m.start(1)]):
+                continue
+            cond = " ".join(m.group(1).split()).rstrip(".!?")
+            words = re.findall(r"[A-Za-z][A-Za-z'-]*", cond)
+            if len(words) >= DESC_WHEN_MIN_WORDS and any(w.lower() not in DESC_WHEN_VAGUE for w in words):
+                return cond
     return None
 
 # Best practices: "Always write in third person" (avoid "I can help you...", "You can use this...").
@@ -656,10 +667,12 @@ def check_skill(path):
           "description has no XML tags / angle brackets", "description에서 '<', '>'(XML 태그)를 빼세요.", must=True)
     when = desc_when_clause(desc)
     r.add("description-when", "single-task", when is not None,
-          "description has an English trigger clause ('Use when ...', 'Used when ...', 'Use this skill when ...', "
-          "'Use for/to ... when ...', 'Invoke when ...') with a concrete condition" + (": when %s" % when if when else ""),
-          "description에 영어 사용 조건 문장(예: 'Use when the user asks to summarize a PDF.')을 넣으세요. "
-          "'when' 뒤에 구체적인 조건(%d단어 이상)을 쓰세요. 'Use this.'나 한국어 조건문('…할 때 사용한다')만으로는 "
+          "description has an English trigger clause outside quotes (sentence-initial 'Use when ...', 'Used when ...', "
+          "'Use this skill when ...', 'Use for/to ... when ...', 'Invoke when ...', 'Trigger when ...', "
+          "'... this skill when ...', 'Read this skill before ...') with a concrete condition" + (": %s" % when if when else ""),
+          "description에 영어 사용 조건 문장(예: 'Use when the user asks to summarize a PDF.')을 문장 첫머리에 넣으세요. "
+          "'when'/'before' 뒤에 구체적인 조건(%d단어 이상)을 쓰세요. 'Use this.', 수동형('files loaded when', "
+          "'Applies to X when'), 부정형('Do not use when'), 따옴표 안 문장, 한국어 조건문('…할 때 사용한다')만으로는 "
           "인정하지 않습니다." % DESC_WHEN_MIN_WORDS, must=True)
     pov = desc_person_words(desc)
     r.add("description-pov", "single-task", not pov,
@@ -1035,9 +1048,11 @@ def answer_lookup_violations(calls, workspace=None):
 URL_RE = re.compile(r"https?://[^\s<>()\[\]|\"'`]+")
 TABLE_RE = re.compile(r"^[ \t]*\|?.*\|.*\n[ \t]*\|?[ \t]*:?-{3,}:?[ \t]*(\|[ \t]*:?-{3,}:?[ \t]*)*\|?[ \t]*$", re.M)
 FILELINE_RE = re.compile(r"(?<![\w/.:-])((?:[\w.-]+/)*[\w-][\w.-]*\.[A-Za-z0-9]+):(\d+)(?:-(\d+))?(?![\d])")
-# Line-numbered tool output that proves a line was read: cat -n / nl / Read-tool style "N<tab|→|:|space>text",
-# attributed to the one file that call read (_read_call); single-file grep -n output is parsed in lines_seen.
-NUMBERED_LINE_RE = re.compile(r"^[ \t]*(\d+)(?:\t|→|:|\||[ ])", re.M)
+# Line-numbered tool output that proves a line was read: cat -n / nl / Read-tool style "N<tab|→|:>text"
+# (cat -n '%6d\t', Read tool 'N→'), attributed to the one file that call read (_read_call). Only a result that is
+# line-numbered throughout counts (see _numbered_lines); single-file grep -n output is parsed in _grep_lines.
+NUMBERED_LINE_RE = re.compile(r"^[ \t]*(\d+)(\t|→|:)")
+GREP_LINE_RE = re.compile(r"^(\d+)[:-]")
 FILELINE_CRIT_RE = re.compile(r"파일\s*[:·/]\s*줄|file\s*:\s*line|file[- ]line", re.I)
 NO_WRITE_CRIT_RE = re.compile(r"(?:파일\s*)?(?:변경|수정|쓰기)\s*0\s*건|읽기\s*전용|read[- ]only|"
                               r"no\s+(?:file\s+)?(?:writes?|edits?|changes|modifications)|zero\s+(?:file\s+)?(?:writes|edits|changes)", re.I)
@@ -1169,33 +1184,61 @@ def _read_call(call, workspace=None):
 
 def lines_seen(run):
     """{line number: {canonical file paths}} for lines a tool call showed with their real line numbers.
-    A line counts only from the result of a call that read exactly that one file (_read_call): 'N<sep>line' for a
-    read tool / 'cat -n' / 'nl -ba', 'N:line' or 'N-line' (or 'FILE:N:line' for that same FILE) for single-file
-    'grep -n'. Top-level tool_results and path-prefixed lines from any other call ('echo src/a.py:42:x', multi-file
+    A line counts only from the result of a call that read exactly that one file (_read_call) and only when the whole
+    result has that call's line-numbered shape: 'N<sep>line' for a read tool / 'cat -n' / 'nl -ba' (_numbered_lines),
+    'N:line' or 'N-line' (or 'FILE:N:line' for that same FILE) for single-file 'grep -n' (_grep_lines). Top-level tool_results and path-prefixed lines from any other call ('echo src/a.py:42:x', multi-file
     grep) are not attributable to a read and do not count."""
     seen = {}
     if not run: return seen
     ws = run.get("workspace")
-    def mark(path, ln): seen.setdefault(int(ln), set()).add(path)
     for c in run["calls"]:
         if not c["result"]: continue
         rc = _read_call(c, ws)
         if rc is None: continue
         kind, printed, target = rc
-        if kind == "grep":
-            for line in c["result"].split("\n"):
-                for pre in (printed + ":", printed + "-"):
-                    if line.startswith(pre) and re.match(r"^\d+%s" % re.escape(pre[-1]), line[len(pre):]):
-                        line = line[len(pre):]; break
-                m = re.match(r"^(\d+)[:-]", line)
-                if m: mark(target, m.group(1))
-            continue
-        for m in NUMBERED_LINE_RE.finditer(c["result"]):
-            rest = c["result"][m.end():].split("\n", 1)[0].strip()
-            if rest and (_norm_path(rest) == _norm_path(printed) or _norm_path(rest, None, ws) == target):
-                continue  # 'wc -l' style "N path": a count, not line N
-            mark(target, m.group(1))
+        nums = _grep_lines(c["result"], printed) if kind == "grep" else _numbered_lines(c["result"], printed, target, ws)
+        for ln in nums:
+            seen.setdefault(ln, set()).add(target)
     return seen
+
+def _result_lines(result):
+    """Lines of a tool result without the trailing empty lines a final newline leaves."""
+    lines = [ln.rstrip("\r") for ln in result.split("\n")]
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return lines
+
+def _numbered_lines(result, printed, target, ws=None):
+    """Line numbers of a read result that is line-numbered throughout: every line is 'N<sep>text' with one separator
+    (tab, '→' or ':') for the whole result and consecutive numbers N, N+1, ... Raw file content ('200 OK\\n404 Not
+    Found', a '42 x' line) yields []. A 'wc -l' style 'N path' line is a count, not line N, and yields no number."""
+    parsed = [(NUMBERED_LINE_RE.match(ln), ln) for ln in _result_lines(result)]
+    if not parsed or any(m is None for m, _ in parsed): return []
+    if len({m.group(2) for m, _ in parsed}) != 1: return []
+    nums = [int(m.group(1)) for m, _ in parsed]
+    if any(b != a + 1 for a, b in zip(nums, nums[1:])): return []
+    out = []
+    for n, (m, ln) in zip(nums, parsed):
+        rest = ln[m.end():].strip()
+        if rest and (_norm_path(rest) == _norm_path(printed) or _norm_path(rest, None, ws) == target):
+            continue
+        out.append(n)
+    return out
+
+def _grep_lines(result, printed):
+    """Line numbers of single-file 'grep -n' output: every line is 'N:text' (match) or 'N-text' (context),
+    optionally prefixed 'FILE:' / 'FILE-' for the read FILE (-H), or a '--' group separator, with increasing numbers.
+    Any other line means the result is not that grep's output and yields []."""
+    out = []
+    for line in _result_lines(result):
+        if line == "--": continue
+        for pre in (printed + ":", printed + "-"):
+            if line.startswith(pre) and re.match(r"^\d+%s" % re.escape(pre[-1]), line[len(pre):]):
+                line = line[len(pre):]; break
+        m = GREP_LINE_RE.match(line)
+        if not m or (out and int(m.group(1)) <= out[-1]): return []
+        out.append(int(m.group(1)))
+    return out
 
 def outcome_evidence(crit, final, run=None):
     """Map one criterion to checkable evidence on the final answer (and the run's tool calls/results).
@@ -1212,13 +1255,15 @@ def outcome_evidence(crit, final, run=None):
         seen, ws = lines_seen(run), (run or {}).get("workspace")
         cites = sorted({(f, int(a), int(b) if b else int(a)) for f, a, b in FILELINE_RE.findall(final)})
         shown = lambda f, ln: _norm_path(f, None, ws) in seen.get(ln, ())
-        ok_cites = [c for c in cites if shown(c[0], c[1]) and shown(c[0], c[2])]
+        # a range 'a-b' needs a <= b and every line a..b shown (all() stops at the first unseen line)
+        ok_cites = [c for c in cites if c[1] <= c[2] and all(shown(c[0], ln) for ln in range(c[1], c[2] + 1))]
         bad = [("%s:%d" % c[:2]) + ("-%d" % c[2] if c[2] != c[1] else "") for c in cites if c not in ok_cites]
         return ("file-lines", len(ok_cites) >= n,
                 "%d file:line citations whose lines appear in captured read results (need >= %d)%s" % (len(ok_cites), n,
                 ("; cited lines never shown by a tool: %s" % bad) if bad else ""),
                 "그 파일 하나만 읽은 도구 호출(Read 도구, cat -n FILE, nl -ba FILE, grep -n PATTERN FILE)의 결과에 줄 번호와 "
-                "함께 나온 줄만 '경로:줄'(예: src/app.py:42)로 인용하세요. 경로는 읽은 경로와 정확히 같아야 합니다. "
+                "함께 나온 줄만 '경로:줄'(예: src/app.py:42)로 인용하세요. 범위 '경로:시작-끝'은 시작 <= 끝이고 그 사이 모든 줄이 "
+                "나왔어야 합니다. 경로는 읽은 경로와 정확히 같아야 합니다. "
                 "%d개 이상 필요 (현재 확인된 것 %d개). 없는 줄·읽지 않은 줄은 세지 않습니다." % (n, len(ok_cites)))
     if n is not None and re.search(r"출처|인용|링크|source|citation|cite|reference|url|link", crit, re.I):
         urls = sorted(set(_norm_url(u) for u in URL_RE.findall(final)))
