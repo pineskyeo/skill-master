@@ -1,0 +1,1 @@
+{"id":"two","turns":[{"user":"ephemeral 뜻"}],"expected_tools":["dict_lookup"],"must_include":["ephemeral"],"expected_outcome":"출처 1개 이상의 뜻 설명"}

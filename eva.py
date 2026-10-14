@@ -3,6 +3,7 @@
 import argparse, json, os, re, sys
 
 PASS_THRESHOLD = 0.8
+CATEGORY_FLOOR = 0.5  # every category with applicable checks needs >=1 pass and pass rate >= this
 SKILL_MAX_BYTES = 20000
 SKILL_MAX_LINES = 500
 NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
@@ -66,23 +67,50 @@ def has_section(body, *words):
     return False
 
 class Report:
+    """checks: passed True/False, or None for N/A (excluded from score and category floor)."""
     def __init__(self, path, kind):
         self.path, self.kind, self.checks = path, kind, []
-    def add(self, cid, category, ok, reason, fix=""):
+    def add(self, cid, category, ok, reason, fix="", must=False):
         self.checks.append({"id": cid, "category": category, "passed": bool(ok),
-                            "reason": reason, "fix": "" if ok else fix})
+                            "must": must or cid in CRITICAL, "reason": reason, "fix": "" if ok else fix})
+    def na(self, cid, category, reason, must=False):
+        self.checks.append({"id": cid, "category": category, "passed": None,
+                            "must": must or cid in CRITICAL, "reason": "N/A: " + reason, "fix": ""})
+    @property
+    def applicable(self):
+        return [c for c in self.checks if c["passed"] is not None]
+    @property
+    def failed(self):
+        return [c for c in self.checks if c["passed"] is False]
     @property
     def score(self):
-        return round(sum(c["passed"] for c in self.checks) / len(self.checks), 3) if self.checks else 0.0
+        app = self.applicable
+        return round(sum(c["passed"] for c in app) / len(app), 3) if app else 0.0
     @property
     def critical_failed(self):
-        return [c for c in self.checks if not c["passed"] and c["id"] in CRITICAL]
+        """Failed checks that fail the unit regardless of score (CRITICAL + present optional checks + outcomes)."""
+        return [c for c in self.failed if c["must"]]
+    @property
+    def categories(self):
+        out = {}
+        for c in self.applicable:
+            s = out.setdefault(c["category"], {"passed": 0, "total": 0})
+            s["passed"] += c["passed"]; s["total"] += 1
+        return out
+    @property
+    def category_failed(self):
+        """Categories with zero passes or a pass rate below CATEGORY_FLOOR."""
+        return sorted(k for k, s in self.categories.items()
+                      if s["passed"] == 0 or s["passed"] / s["total"] < CATEGORY_FLOOR)
     @property
     def verdict(self):
-        return "PASS" if self.score >= PASS_THRESHOLD and not self.critical_failed else "FAIL"
+        ok = self.applicable and self.score >= PASS_THRESHOLD and not self.critical_failed and not self.category_failed
+        return "PASS" if ok else "FAIL"
     def to_dict(self):
         return {"path": self.path, "kind": self.kind, "score": self.score,
-                "threshold": PASS_THRESHOLD, "verdict": self.verdict, "checks": self.checks}
+                "threshold": PASS_THRESHOLD, "category_floor": CATEGORY_FLOOR,
+                "categories": self.categories, "category_failed": self.category_failed,
+                "verdict": self.verdict, "checks": self.checks}
 
 CRITICAL = {"frontmatter", "name-format", "name-matches-folder", "description-present",
             "goal-present", "tools-declared"}
@@ -142,7 +170,9 @@ def check_skill(path):
     ver = md.get("version", meta.get("version"))
     if ver is not None:
         r.add("version-format", "structure", bool(re.match(r"^\d+\.\d+\.\d+$", str(ver))),
-              "version '%s' semver (metadata.version)" % ver, "metadata.version에 1.0.0 같은 SemVer를 쓰세요.")
+              "version '%s' semver (metadata.version)" % ver, "metadata.version에 1.0.0 같은 SemVer를 쓰세요.", must=True)
+    else:
+        r.na("version-format", "structure", "no metadata.version (optional)", must=True)
     deep = sorted(x for x in refs if x.count("/") > 1)
     r.add("refs-one-level", "structure", not deep, "refs one level deep" + (": %s" % deep if deep else ""),
           "참조는 scripts/x 처럼 한 단계 깊이로만 두세요.")
@@ -153,7 +183,10 @@ def check_skill(path):
             ok = isinstance(items, list) and items and all(isinstance(e, dict) and e.get("prompt") and e.get("expected_output") for e in items)
         except ValueError:
             ok = False
-        r.add("evals-valid", "io", ok, "evals/evals.json has prompt+expected_output items", "evals.json 각 항목에 prompt와 expected_output을 넣으세요.")
+        r.add("evals-valid", "io", ok, "evals/evals.json has prompt+expected_output items",
+              "evals.json 각 항목에 prompt와 expected_output을 넣으세요.", must=True)
+    else:
+        r.na("evals-valid", "io", "no evals/evals.json (optional)", must=True)
     return r
 
 # ---------- agents ----------
@@ -240,11 +273,61 @@ def grade_transcript(agent_path, transcript_path):
     r.add("only-declared-tools", "tool-use", not illegal, "illegal tools: %s" % illegal, "선언되지 않은 도구 %s 사용을 멈추세요." % illegal)
     miss = [x for x in s.get("expected_tools", []) if x not in calls]
     r.add("expected-tools-called", "tool-use", not miss, "missing calls: %s" % miss, "필요한 도구 %s를 호출하세요." % miss)
-    final = t.get("final", "").lower()
+    final = str(t.get("final", ""))
     kws = [k.lower() for k in s.get("must_include", [])]
-    lack = [k for k in kws if k not in final]
+    lack = [k for k in kws if k not in final.lower()]
     r.add("outcome-keywords", "goal", not lack, "final answer missing: %s" % lack, "최종 답에 %s를 포함하세요." % lack)
+    # outcome: every machine-checkable criterion must hold on the final answer (must-pass)
+    sources = [("criteria", c) for c in as_list((meta or {}).get("success_criteria"))]
+    sources += [("criteria", c) for c in as_list(s.get("success_criteria"))]
+    sources += [("expected", c) for c in as_list(s.get("expected_outcome"))]
+    seen, checked = {}, 0
+    for origin, crit in sources:
+        crit = str(crit)
+        ev = outcome_evidence(crit, final)
+        base = "%s-%s" % (origin, ev[0] if ev else "unchecked")
+        seen[base] = seen.get(base, 0) + 1
+        cid = base if seen[base] == 1 else "%s-%d" % (base, seen[base])
+        if ev is None:
+            r.na(cid, "goal", "not machine-checkable: '%s'" % crit)
+            continue
+        checked += 1
+        _, ok, got, fix = ev
+        r.add(cid, "goal", ok, "'%s' -> %s" % (crit, got), fix, must=True)
+    r.add("outcome-evidence", "goal", checked > 0, "%d checkable outcome criteria" % checked,
+          "expected_outcome/success_criteria에 확인 가능한 조건(예: '출처 3개 이상', '800자 이하', '비교표')을 넣으세요.", must=True)
     return r
+
+URL_RE = re.compile(r"https?://[^\s<>()\[\]|\"'`]+")
+TABLE_RE = re.compile(r"^[ \t]*\|?.*\|.*\n[ \t]*\|?[ \t]*:?-{3,}:?[ \t]*(\|[ \t]*:?-{3,}:?[ \t]*)*\|?[ \t]*$", re.M)
+
+def _min_count(text):
+    m = (re.search(r"(\d+)\s*(?:개|건|곳)?\s*이상", text) or re.search(r"at\s+least\s+(\d+)", text, re.I)
+         or re.search(r">=\s*(\d+)", text) or re.search(r"(\d+)\s*\+", text))
+    return int(m.group(1)) if m else None
+
+def _max_chars(text):
+    m = (re.search(r"(\d+)\s*자\s*(?:이하|이내)", text)
+         or re.search(r"(?:at\s+most|no\s+more\s+than|<=|under)\s*(\d+)\s*(?:chars?|characters)", text, re.I))
+    return int(m.group(1)) if m else None
+
+def outcome_evidence(crit, final):
+    """Map one criterion to checkable evidence on the final answer.
+    Returns (kind, ok, observed, fix) or None if the criterion is not machine-checkable."""
+    n = _min_count(crit)
+    if n is not None and re.search(r"출처|인용|링크|source|citation|cite|reference|url|link", crit, re.I):
+        urls = sorted(set(u.rstrip(".,;:") for u in URL_RE.findall(final)))
+        return ("sources", len(urls) >= n, "%d unique URLs (need >= %d)" % (len(urls), n),
+                "최종 답에 서로 다른 출처 URL을 %d개 이상 인용하세요 (현재 %d개)." % (n, len(urls)))
+    mx = _max_chars(crit)
+    if mx is not None:
+        return ("length", len(final) <= mx, "%d chars (max %d)" % (len(final), mx),
+                "최종 답을 %d자 이하로 줄이세요 (현재 %d자)." % (mx, len(final)))
+    if re.search(r"비교표|표로|표 형식|\btable\b", crit, re.I):
+        ok = bool(TABLE_RE.search(final))
+        return ("table", ok, "markdown table %s" % ("found" if ok else "not found"),
+                "최종 답에 헤더와 구분선(|---|)이 있는 마크다운 표를 넣으세요.")
+    return None
 
 # ---------- feedback / index ----------
 def feedback_md(r, rnd=None):
@@ -252,14 +335,19 @@ def feedback_md(r, rnd=None):
     lines = ["# Eva Feedback: %s" % os.path.basename(os.path.normpath(r.path)), "",
              "- kind: %s / score: %.0f%% / verdict: **%s**%s" % (d["kind"], d["score"] * 100, d["verdict"],
              (" / round %s" % rnd) if rnd else ""), ""]
-    fails = [c for c in d["checks"] if not c["passed"]]
+    fails = r.failed
+    if d["category_failed"]:
+        lines += ["## 카테고리 하한 미달 (각 카테고리 통과율 %.0f%% 이상, 1개 이상 통과 필요)" % (CATEGORY_FLOOR * 100), ""]
+        for k in d["category_failed"]:
+            lines.append("- %s: %d/%d 통과" % (k, d["categories"][k]["passed"], d["categories"][k]["total"]))
+        lines.append("")
     if not fails:
         lines.append("모든 검사를 통과했습니다. 수정할 것이 없습니다.")
     else:
         lines += ["## 고쳐야 할 것 (중요도 순)", ""]
-        fails.sort(key=lambda c: c["id"] not in CRITICAL)
+        fails.sort(key=lambda c: not c["must"])
         for i, c in enumerate(fails, 1):
-            tag = " [필수]" if c["id"] in CRITICAL else ""
+            tag = " [필수]" if c["must"] else ""
             lines += ["%d. `%s`%s (%s)" % (i, c["id"], tag, c["category"]),
                       "   - 이유: %s" % c["reason"], "   - 수정: %s" % c["fix"]]
     lines += ["", "다 고친 뒤 `python3 eva.py check %s`로 다시 제출하세요." % r.path]
@@ -285,7 +373,10 @@ def print_report(r):
     d = r.to_dict()
     print("[%s] %s (%s) score=%.2f threshold=%.2f" % (d["verdict"], r.path, d["kind"], d["score"], PASS_THRESHOLD))
     for c in d["checks"]:
-        print("  %s %-22s %-11s %s" % ("✓" if c["passed"] else "✗", c["id"], c["category"], c["reason"]))
+        mark = "-" if c["passed"] is None else ("✓" if c["passed"] else "✗")
+        print("  %s %-22s %-11s %s" % (mark, c["id"], c["category"], c["reason"]))
+    if d["category_failed"]:
+        print("  category below floor %.2f: %s" % (CATEGORY_FLOOR, d["category_failed"]))
 
 def main(argv=None):
     p = argparse.ArgumentParser(prog="eva", description="Eva skill/agent evaluator")
@@ -306,7 +397,7 @@ def main(argv=None):
         else:
             for r in reps: print("[%s] %.2f %s" % (r.verdict, r.score, r.path))
             print("total=%d pass=%d fail=%d" % (len(reps), sum(r.verdict == "PASS" for r in reps), sum(r.verdict == "FAIL" for r in reps)))
-        return 0
+        return 1 if any(r.verdict == "FAIL" for r in reps) else 0
     if a.cmd == "feedback":
         r = check(a.path)
         open(os.path.join(a.path, "FEEDBACK.md"), "w", encoding="utf-8").write(feedback_md(r, a.round))

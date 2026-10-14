@@ -7,8 +7,8 @@
 5. **종료**: PASS면 `golden/` 또는 운영 폴더로 옮기고 `eva.py index`로 색인 갱신. 3라운드 후에도 FAIL이면 사람에게 넘긴다.
 
 자동화: `python3 loop.py <path> --builder "<빌더 실행 명령>" --max-rounds 3`
-(빌더는 환경변수 `EVA_FEEDBACK`, `EVA_ROUND`를 받는다.)
+(빌더는 환경변수 `EVA_FEEDBACK`, `EVA_ROUND`를 받는다. 빌더가 0이 아닌 코드로 끝나면 루프를 멈추고 종료코드 2로 실패를 알린다.)
 
 실행 기록 채점: `python3 eva.py check <agent_path> --transcript run.json`
 run.json 형식: `{"scenario": "<id>", "tool_calls": [...], "final": "<최종 답>"}`
-→ 선언 안 된 도구 사용, 기대 도구 누락, 시나리오 `must_include` 키워드 누락을 잡는다.
+→ 선언 안 된 도구 사용, 기대 도구 누락, 시나리오 `must_include` 키워드 누락, 그리고 success_criteria/expected_outcome 결과 미달(예: 출처 URL 개수, 글자 수, 비교표)을 잡는다.

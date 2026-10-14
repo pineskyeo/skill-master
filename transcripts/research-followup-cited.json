@@ -1,0 +1,1 @@
+{"scenario": "followup", "tool_calls": ["web_search", "web_fetch", "write_file"], "final": "Hermes Agent와 LangChain 비교표 (앞 턴 조사 이어받음)\n\n| 항목 | Hermes Agent | LangChain |\n|---|---|---|\n| 출처 | https://example.org/hermes-agent | https://example.org/langchain |\n\n비교 기준 출처: https://example.org/agent-frameworks"}
