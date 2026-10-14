@@ -1,0 +1,3 @@
+{"id": "followup", "turns": [{"user": "Hermes Agent 조사해줘"}, {"user": "아까 거 LangChain이랑 비교해줘"}],
+ "expected_tools": ["web_search", "write_file"], "must_include": ["langchain", "hermes"],
+ "expected_outcome": "앞 턴 주제를 이어받은 비교표"}

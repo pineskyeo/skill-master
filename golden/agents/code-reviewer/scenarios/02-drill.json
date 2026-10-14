@@ -1,0 +1,1 @@
+{"id":"drill","turns":[{"user":"개요 알려줘"},{"user":"방금 말한 테스트 폴더 자세히"}],"expected_tools":["grep","read_file"],"must_include":["test"],"expected_outcome":"앞 턴 맥락을 쓴 상세 설명"}

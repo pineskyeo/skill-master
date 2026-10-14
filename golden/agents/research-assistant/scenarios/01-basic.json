@@ -1,0 +1,3 @@
+{"id": "basic", "turns": [{"user": "Hermes Agent가 뭔지 조사해줘"}],
+ "expected_tools": ["web_search", "web_fetch"], "must_include": ["nous research"],
+ "expected_outcome": "출처 3개 이상의 요약"}
