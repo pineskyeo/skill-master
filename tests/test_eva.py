@@ -1594,5 +1594,75 @@ class TestRound7EvalLayer(SkillMixin, unittest.TestCase):
             self.assertFalse(self.status(r, "evals-valid"), bad)
             self.assertIn("layer", next(c["reason"] for c in r.failed if c["id"] == "evals-valid"))
 
+class TestRound8EscapingRefs(TmpMixin, unittest.TestCase):
+    """refs-exist: absolute / backslash / escaping refs fail (required) even if the target exists."""
+    def make(self, body, git=True, files=None, links=None):
+        repo = os.path.join(self.tmp, "repo"); d = os.path.join(repo, "skills", "word-count")
+        os.makedirs(os.path.join(d, "evals"), exist_ok=True)
+        if git: os.makedirs(os.path.join(repo, ".git"), exist_ok=True)
+        for rel, text in (files or {}).items():
+            fp = os.path.join(self.tmp, rel); os.makedirs(os.path.dirname(fp), exist_ok=True); wtext(fp, text)
+        for rel, target in (links or {}).items():
+            fp = os.path.join(d, rel); os.makedirs(os.path.dirname(fp), exist_ok=True)
+            os.symlink(os.path.join(self.tmp, target), fp)
+        wtext(os.path.join(d, "SKILL.md"), GOOD_FM.format(name="word-count", extra="", body=body))
+        wjson(os.path.join(d, "evals", "evals.json"), {"skill_name": "word-count", "evals": GOOD_EVALS})
+        return eva.check(d)
+    def refs_exist(self, r):
+        return next(c for c in r.checks if c["id"] == "refs-exist")
+    def assert_escape_fails(self, r, ref):
+        c = self.refs_exist(r)
+        self.assertEqual(c["status"], "fail", c); self.assertTrue(c["must"], c)
+        self.assertIn(repr(ref), c["reason"]); self.assertEqual(r.verdict, "FAIL", r.failed)
+    def test_baseline_passes(self):
+        self.assertEqual(self.make("").verdict, "PASS")
+    def test_etc_hosts_fails_overall(self):
+        self.assertTrue(os.path.exists("/etc/hosts"))
+        for git in (True, False):
+            self.assert_escape_fails(self.make("See [hosts](/etc/hosts).\n", git=git), "/etc/hosts")
+    def test_absolute_home_and_windows_fail(self):
+        home = os.path.join(self.tmp, "repo", "skills", "word-count", "SKILL.md")  # exists, inside the skill folder
+        for ref in (home, "~/notes.md", "C:/Windows/hosts", "C:\\Windows\\hosts", "scripts\\run.py"):
+            self.assert_escape_fails(self.make("See [x](%s).\n" % ref), ref)
+    def test_dotdot_escape_fails(self):
+        r = self.make("See [x](../../../outside.md).\n", files={"outside.md": "x"})
+        self.assert_escape_fails(r, "../../../outside.md")
+    def test_dotdot_inside_repo_is_review(self):
+        r = self.make("See [x](../../README.md).\n", files={"repo/README.md": "x"})
+        c = self.refs_exist(r)
+        self.assertEqual(c["status"], "needs-review", c); self.assertIn("inside the git repo", c["reason"])
+        self.assertEqual(r.verdict, "REVIEW", r.failed)
+    def test_symlink_outside_fails(self):
+        r = self.make("Run `scripts/esc.py`.\n", files={"outside.py": "x"}, links={"scripts/esc.py": "outside.py"})
+        self.assert_escape_fails(r, "scripts/esc.py")
+    def test_symlink_inside_repo_is_review(self):
+        r = self.make("Run `scripts/shared.py`.\n", files={"repo/tools/shared.py": "x"},
+                      links={"scripts/shared.py": "repo/tools/shared.py"})
+        self.assertEqual(self.refs_exist(r)["status"], "needs-review"); self.assertEqual(r.verdict, "REVIEW")
+    def test_repo_root_ref_still_review_and_bundled_pass(self):
+        r = self.make("Run `scripts/root.py`.\n", files={"repo/scripts/root.py": "x"})
+        c = self.refs_exist(r)
+        self.assertEqual(c["status"], "needs-review"); self.assertIn("repo-root-relative reference, not bundled", c["reason"])
+        r = self.make("Run `scripts/own.py`.\n", files={"repo/skills/word-count/scripts/own.py": "x"})
+        self.assertEqual(self.refs_exist(r)["status"], "pass"); self.assertEqual(r.verdict, "PASS", r.failed)
+    def test_ref_targets_unit(self):
+        d = os.path.join(self.tmp, "repo", "skills", "word-count"); self.make("")
+        self.assertEqual(eva.ref_targets(d, {"/etc/hosts", "SKILL.md", "nope.md"}), (["nope.md"], [], [], ["/etc/hosts"]))
+
+class TestRound8ArgumentHintString(SkillMixin, unittest.TestCase):
+    """argument-hint must be a YAML string: unquoted bool/null/number scalars fail field-types."""
+    def test_unquoted_typed_scalars_fail(self):
+        for v in ("true", "false", "yes", "no", "on", "off", "True", "NO", "null", "~", "42", "3.5", "-1", "0x1f"):
+            r = self.skill(extra="argument-hint: %s\n" % v)
+            self.assertFalse(self.status(r, "field-types"), v)
+            self.assertIn("argument-hint", next(c["reason"] for c in r.failed if c["id"] == "field-types"), v)
+            self.assertEqual(r.verdict, "FAIL", v)
+    def test_quoted_and_plain_strings_pass(self):
+        for v in ('"true"', "'42'", '"~"', "'null'", "[file]".join('""'), "file-path", "<file> [--dry-run]".join("''")):
+            r = self.skill(extra="argument-hint: %s\n" % v)
+            self.assertTrue(self.status(r, "field-types"), (v, r.failed))
+    def test_unquoted_list_fails(self):
+        self.assertFalse(self.status(self.skill(extra="argument-hint: [file]\n"), "field-types"))
+
 if __name__ == "__main__":
     unittest.main()

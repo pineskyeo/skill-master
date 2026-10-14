@@ -542,6 +542,7 @@ def _common_name(r, meta, path):
 
 # ---------- skills (agentskills.io specification + Claude skill authoring best practices) ----------
 SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+WIN_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
 MD_LINK_RE = re.compile(r"\]\(\s*<?([^)\s>]+)>?(?:\s+[\"'][^)]*[\"'])?\s*\)")
 
 # Spec bundled directories (agentskills.io "Directory structure"); a path into one of them is a file reference
@@ -606,7 +607,7 @@ def local_refs(text):
     refs = set()
     for t in MD_LINK_RE.findall(prose):
         t = t.split("#", 1)[0].split("?", 1)[0]
-        if t and not SCHEME_RE.match(t):
+        if t and (not SCHEME_RE.match(t) or WIN_DRIVE_RE.match(t)):  # 'C:\x' / 'C:/x' is a path, not a URL scheme
             refs.add(t)
     found = [(m.group(1), len(prose[:m.start()]) - len(prose[:m.start()].rstrip("*")))
              for m in BUNDLED_REF_RE.finditer(prose)]
@@ -619,7 +620,7 @@ def local_refs(text):
 def _ref_problem(ref):
     """Why a reference is not a portable relative path inside the skill root (None if fine)."""
     if "\\" in ref: return "backslash (use forward slashes)"
-    if ref.startswith("/") or ref.startswith("~"): return "absolute path (use a path relative to the skill root)"
+    if ref.startswith("/") or ref.startswith("~") or WIN_DRIVE_RE.match(ref): return "absolute path (use a path relative to the skill root)"
     norm = posixpath.normpath(ref)
     if norm == ".." or norm.startswith("../"): return "points outside the skill directory"
     return None
@@ -640,6 +641,28 @@ def repo_root_ref(path, ref):
     if root is None or _ref_problem(ref): return False
     target = os.path.realpath(os.path.join(root, ref))
     return os.path.commonpath([root, target]) == root and os.path.exists(target)
+
+def _within(root, target):
+    return root is not None and os.path.commonpath([root, target]) == root
+
+def ref_targets(path, refs):
+    """Sort refs by where they resolve (after '..' normalization and symlinks). Returns sorted lists
+    (missing, repo_refs, up_refs, escaped): missing = found nowhere; repo_refs = absent from the skill folder but found
+    from the git repo root (repo_root_ref); up_refs = exist outside the skill folder but inside the repo;
+    escaped = absolute / '~' / backslash paths, or targets outside both the skill folder and the repo, even if they
+    exist. Refs that resolve to an existing file inside the skill folder (bundled) are in none of the lists."""
+    skill, repo = os.path.realpath(path), git_root(path)
+    missing, repo_refs, up_refs, escaped = [], [], [], []
+    for x in sorted(refs):
+        if "\\" in x or x.startswith(("/", "~")) or WIN_DRIVE_RE.match(x):
+            escaped.append(x); continue  # absolute or backslash: never a portable skill reference
+        target = os.path.realpath(os.path.join(skill, x))
+        if os.path.exists(target):
+            if _within(skill, target): continue
+            (up_refs if _within(repo, target) else escaped).append(x)
+        elif repo_root_ref(path, x): repo_refs.append(x)
+        else: missing.append(x)
+    return missing, repo_refs, up_refs, escaped
 
 def _toc_first(text):
     """True if the first heading after the title (outside fences) is a table of contents."""
@@ -671,8 +694,11 @@ def _field_type_errors(meta, typed):
             for k, v in md.items():
                 if not isinstance(v, str):
                     e.append("metadata.%s: string value required, got %s" % (k, type(v).__name__))
-    if "argument-hint" in meta and not _nonempty_str(meta["argument-hint"]):
-        e.append("argument-hint: non-empty string required")
+    if "argument-hint" in meta:
+        if not _nonempty_str(meta["argument-hint"]):
+            e.append("argument-hint: non-empty string required")
+        elif "argument-hint" in typed:  # raw scalar: unquoted true/no/on/~/null/42/3.5 is not a YAML string
+            e.append("argument-hint: YAML loads unquoted '%s' as non-string; quote it" % meta["argument-hint"])
     if "disable-model-invocation" in meta:
         v = meta["disable-model-invocation"]
         if not (isinstance(v, str) and v.lower() in ("true", "false") and "disable-model-invocation" in typed):
@@ -807,20 +833,26 @@ def check_skill(path):
     r.add("refs-relative", "structure", not probs,
           "refs are forward-slash paths relative to the skill root" + (": %s" % probs if probs else ""),
           "참조를 스킬 폴더 기준 상대경로·슬래시(/)로 고치세요(예: references/guide.md): %s" % ", ".join(probs))
-    absent = sorted(x for x in refs if not os.path.exists(os.path.join(path, x)))
-    repo_refs = [x for x in absent if repo_root_ref(path, x)]
-    missing = [x for x in absent if x not in repo_refs]
-    if missing or not repo_refs:
-        r.add("refs-exist", "structure", not missing,
+    missing, repo_refs, up_refs, escaped = ref_targets(path, refs)
+    if missing or escaped or not (repo_refs or up_refs):
+        r.add("refs-exist", "structure", not (missing or escaped),
               "referenced files exist" + (": missing %s" % missing if missing else "") +
-              ("; repo-root-relative reference, not bundled: %s" % repo_refs if repo_refs else ""),
-              "없는 파일을 만들거나 참조를 지우세요: %s" % ", ".join(missing))
+              ("; outside the skill folder and the git repo (absolute, backslash or escaping path): %s" % escaped
+               if escaped else "") +
+              ("; repo-root-relative reference, not bundled: %s" % repo_refs if repo_refs else "") +
+              ("; outside the skill folder, inside the git repo, not bundled: %s" % up_refs if up_refs else ""),
+              "없는 파일을 만들거나 참조를 지우세요: %s" % ", ".join(missing) if not escaped else
+              "스킬 폴더·리포 밖을 가리키는 참조(절대경로, 역슬래시, '..'·심볼릭 링크 탈출)를 지우거나 파일을 스킬 폴더 "
+              "안에 넣고 상대경로로 링크하세요: %s" % ", ".join(escaped + missing), must=bool(escaped))
     else:
         r.review("refs-exist", "structure",
-                 "repo-root-relative reference, not bundled: %s (found from the enclosing git repo root, not the skill "
-                 "folder; works only when the skill runs inside that repo)" % repo_refs,
+                 "; ".join(s for s in (
+                     "repo-root-relative reference, not bundled: %s (found from the enclosing git repo root, not the "
+                     "skill folder)" % repo_refs if repo_refs else "",
+                     "outside the skill folder, inside the git repo, not bundled: %s" % up_refs if up_refs else "") if s) +
+                 " (works only when the skill runs inside that repo)",
                  "스킬을 리포 밖에서도 쓰려면 파일을 스킬 폴더(scripts/ 등)에 넣으세요. 리포 안에서만 쓰는 스킬이면 "
-                 "본문에 '리포 루트 기준 경로'라고 밝히고 사람이 확인하세요: %s" % ", ".join(repo_refs))
+                 "본문에 '리포 루트 기준 경로'라고 밝히고 사람이 확인하세요: %s" % ", ".join(repo_refs + up_refs))
     direct = {posixpath.normpath(x) for x in refs if not _ref_problem(x)}
     md_refs = sorted(x for x in direct if x.lower().endswith(".md") and os.path.isfile(os.path.join(path, x)))
     nested = []
