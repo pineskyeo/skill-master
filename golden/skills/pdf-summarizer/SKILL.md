@@ -1,7 +1,9 @@
 ---
 name: pdf-summarizer
 description: Summarizes a single PDF document into a Korean one-page brief. Use when the user hands over a PDF and asks for a summary.
-version: 1.0.0
+license: MIT
+metadata:
+  version: 1.0.0
 inputs:
   - pdf_path (string) - PDF file path
 outputs:

@@ -1,0 +1,1 @@
+{"skill_name":"pdf-summarizer","evals":[{"id":1,"prompt":"report.pdf 요약해줘","expected_output":"제목, 핵심 3줄, 결론이 있는 summary.md"}]}

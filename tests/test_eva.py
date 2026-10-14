@@ -10,6 +10,9 @@ class TestParser(unittest.TestCase):
         m, b = eva.parse_frontmatter("---\nname: a-b\nlist: [x, y]\nitems:\n  - one\n  - two\ndesc: >\n  hello\n  world\n---\nbody")
         self.assertEqual(m["name"], "a-b"); self.assertEqual(m["list"], ["x", "y"])
         self.assertEqual(m["items"], ["one", "two"]); self.assertEqual(m["desc"], "hello world"); self.assertEqual(b, "body")
+    def test_nested_metadata(self):
+        m, _ = eva.parse_frontmatter("---\nname: a\nmetadata:\n  version: 1.2.0\n---\n")
+        self.assertEqual(m["metadata"]["version"], "1.2.0")
     def test_no_frontmatter(self):
         self.assertIsNone(eva.parse_frontmatter("# x")[0])
 

@@ -35,6 +35,9 @@ def parse_frontmatter(text):
             s = ln.strip()
             if block is not None:
                 meta[key] = (meta[key] + " " + s).strip()
+            elif re.match(r"^[A-Za-z_][\w-]*:\s*\S", s) and not isinstance(meta.get(key), list):
+                if not isinstance(meta.get(key), dict): meta[key] = {}
+                k2, v2 = s.split(":", 1); meta[key][k2.strip()] = _scalar(v2)
             elif s.startswith("- "):
                 if not isinstance(meta.get(key), list): meta[key] = []
                 meta[key].append(_scalar(s[2:]))
@@ -135,9 +138,22 @@ def check_skill(path):
     r.add("refs-exist", "structure", not missing,
           "referenced files exist" + (": missing %s" % missing if missing else ""),
           "없는 파일을 만들거나 참조를 지우세요: %s" % ", ".join(missing))
-    if meta.get("version") is not None:
-        r.add("version-format", "structure", bool(re.match(r"^\d+\.\d+\.\d+$", str(meta["version"]))),
-              "version semver", "version을 1.0.0 같은 semver로 쓰세요.")
+    md = meta.get("metadata") if isinstance(meta.get("metadata"), dict) else {}
+    ver = md.get("version", meta.get("version"))
+    if ver is not None:
+        r.add("version-format", "structure", bool(re.match(r"^\d+\.\d+\.\d+$", str(ver))),
+              "version '%s' semver (metadata.version)" % ver, "metadata.version에 1.0.0 같은 SemVer를 쓰세요.")
+    deep = sorted(x for x in refs if x.count("/") > 1)
+    r.add("refs-one-level", "structure", not deep, "refs one level deep" + (": %s" % deep if deep else ""),
+          "참조는 scripts/x 처럼 한 단계 깊이로만 두세요.")
+    ev = os.path.join(path, "evals", "evals.json")
+    if os.path.exists(ev):
+        try:
+            data = json.load(open(ev, encoding="utf-8")); items = data.get("evals", data) if isinstance(data, dict) else data
+            ok = isinstance(items, list) and items and all(isinstance(e, dict) and e.get("prompt") and e.get("expected_output") for e in items)
+        except ValueError:
+            ok = False
+        r.add("evals-valid", "io", ok, "evals/evals.json has prompt+expected_output items", "evals.json 각 항목에 prompt와 expected_output을 넣으세요.")
     return r
 
 # ---------- agents ----------
@@ -256,7 +272,7 @@ def build_index(root):
         meta, _ = parse_frontmatter(open(os.path.join(u, "SKILL.md" if kind == "skill" else "AGENT.md"), encoding="utf-8").read())
         meta = meta or {}
         rep = check(u)
-        reg.append({"kind": kind, "name": meta.get("name", ""), "version": meta.get("version", ""),
+        reg.append({"kind": kind, "name": meta.get("name", ""), "version": (meta.get("metadata") or {}).get("version", meta.get("version", "")) if isinstance(meta.get("metadata", {}), dict) else meta.get("version", ""),
                     "description": meta.get("description", ""), "path": os.path.relpath(u, root),
                     "verdict": rep.verdict, "score": rep.score})
     md = ["# INDEX", "", "| kind | name | version | verdict | score | path | description |", "|---|---|---|---|---|---|---|"]

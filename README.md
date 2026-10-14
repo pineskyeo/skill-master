@@ -15,7 +15,7 @@ python3 -m unittest discover -s tests -v                # 테스트
 ```
 
 ## 구조
-- 스킬: `<name>/SKILL.md` (frontmatter: name, description, 선택 version·inputs·outputs) + 선택 `scripts/`, `references/`, `assets/`
+- 스킬: `<name>/SKILL.md` (frontmatter: name, description, 선택 license·compatibility·allowed-tools·metadata.version(SemVer)·inputs·outputs) + 선택 `scripts/`, `references/`, `assets/`, `evals/evals.json`(skill-creator 방식)
 - 에이전트: `<name>/AGENT.md` (frontmatter: name, description, goal, tools, success_criteria) + `scenarios/*.json`
   - 시나리오: `{"id", "turns":[...], "expected_tools":[...], "must_include":[...], "expected_outcome"}`
 - `golden/` 좋은 예시(스킬 3, 에이전트 2), `bad/` 일부러 틀린 예시, `transcripts/` 실행 기록 예시
@@ -24,7 +24,7 @@ python3 -m unittest discover -s tests -v                # 테스트
 **스킬**
 - 단일 작업: name kebab-case(64자 이하), description 존재·20~1024자·"언제 쓰는지" 포함, 여러 일 나열 금지
 - 명확한 입출력: inputs, outputs 선언, `## Example`
-- 구조: frontmatter, name = 폴더명, SKILL.md 500줄·20KB 이하, 참조한 scripts/references/assets 파일 존재, version은 semver
+- 구조: frontmatter, name = 폴더명, SKILL.md 500줄·20KB 이하, 참조 파일 존재·한 단계 깊이, metadata.version은 SemVer, evals.json 형식
 
 **에이전트**
 - 목표 달성: goal, 측정 가능한 success_criteria, 시나리오 2개 이상·각각 expected_outcome

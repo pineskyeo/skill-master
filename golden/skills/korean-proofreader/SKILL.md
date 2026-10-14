@@ -1,7 +1,9 @@
 ---
 name: korean-proofreader
 description: 한국어 문서의 맞춤법과 띄어쓰기를 교정한다. 사용자가 한국어 글의 교정을 요청할 때 사용한다.
-version: 1.0.0
+license: MIT
+metadata:
+  version: 1.0.0
 ---
 # 한국어 교정
 ## Inputs

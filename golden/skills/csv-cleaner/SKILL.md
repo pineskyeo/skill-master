@@ -1,7 +1,9 @@
 ---
 name: csv-cleaner
 description: Removes duplicate rows and trims whitespace in one CSV file. Use when a CSV has messy rows before analysis.
-version: 1.0.0
+license: MIT
+metadata:
+  version: 1.0.0
 inputs: [csv_path]
 outputs: [cleaned_csv_path]
 ---
