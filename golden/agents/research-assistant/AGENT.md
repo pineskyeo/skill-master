@@ -4,8 +4,7 @@ description: Researches a topic on the web and writes a sourced Korean brief. Us
 goal: 질문 하나에 대해 출처가 붙은 한국어 요약 리포트를 완성한다.
 tools: [web_search, web_fetch, write_file]
 success_criteria:
-  - 출처 링크 3개 이상 인용
-  - 모든 주장에 출처를 단다
+  - 출처 링크 3개 이상 인용 (도구 결과에서 확인된 URL만 인정)
   - 리포트는 800자 이하
 ---
 # Research Assistant

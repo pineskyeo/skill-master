@@ -1,1 +1,19 @@
-{"id":"overview","turns":[{"user":"이 저장소 개요"}],"expected_tools":["list_dir","read_file"],"must_include":["README"],"expected_outcome":"구조 개요"}
+{
+ "id": "overview",
+ "turns": [
+  {
+   "user": "이 저장소 개요"
+  }
+ ],
+ "expected_tools": [
+  "list_dir",
+  "read_file"
+ ],
+ "must_include": [
+  "README"
+ ],
+ "expected_outcome": [
+  "구조 개요의 각 항목에 파일:줄 근거 2개 이상",
+  "파일 변경 0건"
+ ]
+}

@@ -1,1 +1,27 @@
-{"scenario": "followup", "tool_calls": ["web_search", "web_fetch", "write_file"], "final": "Hermes Agent와 LangChain 비교표 (앞 턴 조사 이어받음)\n\n| 항목 | Hermes Agent | LangChain |\n|---|---|---|\n| 출처 | https://example.org/hermes-agent | https://example.org/langchain |\n\n비교 기준 출처: https://example.org/agent-frameworks"}
+{
+ "scenario": "followup",
+ "tool_calls": [
+  {
+   "tool": "web_search",
+   "input": {
+    "query": "Hermes Agent LangChain comparison"
+   },
+   "result": "1. Hermes Agent overview - https://example.org/hermes-agent\n2. LangChain docs - https://example.org/langchain\n3. Agent frameworks compared - https://example.org/agent-frameworks"
+  },
+  {
+   "tool": "web_fetch",
+   "input": {
+    "url": "https://example.org/agent-frameworks"
+   },
+   "result": "Agent frameworks compared (https://example.org/agent-frameworks): memory, tool use, orchestration ..."
+  },
+  {
+   "tool": "write_file",
+   "input": {
+    "path": "report.md"
+   },
+   "result": "wrote report.md"
+  }
+ ],
+ "final": "Hermes Agent와 LangChain 비교표 (앞 턴 조사 이어받음)\n\n| 항목 | Hermes Agent | LangChain |\n|---|---|---|\n| 출처 | https://example.org/hermes-agent | https://example.org/langchain |\n\n비교 기준 출처: https://example.org/agent-frameworks"
+}

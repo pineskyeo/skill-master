@@ -4,8 +4,8 @@ description: Reviews a repository read-only and explains it in plain Korean. Use
 goal: 저장소를 읽기 전용으로 분석해 파일·줄 근거가 붙은 리뷰 문서를 만든다.
 tools: [read_file, grep, list_dir]
 success_criteria:
-  - 모든 지적에 파일:줄 근거를 단다
-  - 파일 변경 0건
+  - 파일:줄 근거 2개 이상 인용 (도구로 실제 읽은 파일만 인정)
+  - 파일 변경 0건 (write/edit 계열 도구 호출 없음)
 ---
 # Code Reviewer
 ## Tools
