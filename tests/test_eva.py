@@ -10,11 +10,27 @@ def rjson(path):
     with open(path, encoding="utf-8") as f: return json.load(f)
 def wtext(path, text):
     with open(path, "w", encoding="utf-8") as f: f.write(text)
-def run_of(calls=(), results=()):
+def run_of(calls=(), results=(), workspace=None):
     """Normalized run as produced by eva.load_transcript."""
     calls = [{"tool": c, "input": None, "result": None} if isinstance(c, str) else
              {"tool": c["tool"], "input": c.get("input"), "result": c.get("result")} for c in calls]
-    return {"calls": calls, "results": [c["result"] for c in calls if c["result"]] + list(results)}
+    return {"calls": calls, "results": [c["result"] for c in calls if c["result"]] + list(results), "workspace": workspace}
+
+PYYAML_OPT_OUT = "EVA_ALLOW_NO_PYYAML"
+
+def require_yaml(tc):
+    """PyYAML for the parity tests. Missing PyYAML fails the test loudly; only an explicit opt-out
+    (EVA_ALLOW_NO_PYYAML=1) turns it into a skip, with a warning printed to stderr."""
+    try:
+        import yaml
+        return yaml
+    except ImportError:
+        if os.environ.get(PYYAML_OPT_OUT) == "1":
+            print("WARNING: PyYAML not installed; YAML parity test %s SKIPPED because %s=1" % (tc.id(), PYYAML_OPT_OUT),
+                  file=sys.stderr)
+            tc.skipTest("PyYAML not installed (%s=1)" % PYYAML_OPT_OUT)
+        tc.fail("PyYAML is required for the YAML parity tests: pip install pyyaml "
+                "(or set %s=1 to skip them with a warning)" % PYYAML_OPT_OUT)
 
 class TestParser(unittest.TestCase):
     def test_frontmatter(self):
@@ -275,7 +291,7 @@ class TestCodeReviewer(TmpMixin, unittest.TestCase):
         self.assertTrue({"only-declared-tools", "criteria-no-writes", "expected-no-writes"} <= self.ids(r, "critical_failed"))
     def test_file_line_count(self):
         run = run_of([{"tool": "read_file", "input": {"path": "src/app.py"}, "result": "     1\timport os\n     2\tx = 1"},
-                      {"tool": "grep", "result": "lib/util.go:7:x\nlib/util.go-8-y\nlib/util.go:9:z"}])
+                      {"tool": "bash", "input": {"command": "grep -n -A1 x lib/util.go"}, "result": "7:x\n8-y\n9:z"}])
         kind, ok, got, _ = eva.outcome_evidence("파일:줄 근거 3개 이상", "src/app.py:1, src/app.py:1, lib/util.go:7", run)
         self.assertEqual(kind, "file-lines"); self.assertFalse(ok, got)  # duplicates counted once
         self.assertTrue(eva.outcome_evidence("at least 2 file:line citations", "src/app.py:1 lib/util.go:7-9", run)[1])
@@ -570,10 +586,7 @@ class TestSkillSpecFrontmatter(SkillMixin, unittest.TestCase):
         self.assertIsNone(err)
         self.assertEqual((meta["name"], meta["d"], meta["metadata"]["v"], meta["u"]), ("a", "x #y", "1", "a#b"))
     def test_yaml_typed_keys_match_pyyaml(self):
-        try:
-            import yaml
-        except ImportError:
-            self.skipTest("PyYAML not installed")
+        yaml = require_yaml(self)
         for v in ("yes", "No", "on", "true", "~", "null", "0", "12", "-3", "1_000", "017", "0x1F", "0b101", "1.0", ".5",
                   "1e5", "1.0e+5", "-.5", ".inf", ".nan", "2024-01-01", "2024-01-01 10:00:00", "1:30", "y", "n", ".",
                   "2024-1-1", "1.0.0", "v1", "abc", "1.2.3-beta", "08"):
@@ -744,18 +757,20 @@ class TestCitedLinesExist(TmpMixin, unittest.TestCase):
         self.assertFalse(eva.outcome_evidence("파일:줄 근거 1개 이상", "src/app.py:3", run)[1])
     def test_numbered_formats(self):
         for res in ("     3\tx = 1", "3→x = 1", "3: x = 1", "3 x = 1"):
-            run = run_of([{"tool": "read_file", "input": {"file_path": "/work/repo/src/app.py"}, "result": res}])
+            run = run_of([{"tool": "read_file", "input": {"file_path": "/work/repo/src/app.py"}, "result": res}], workspace="/work/repo")
             self.assertTrue(eva.outcome_evidence("파일:줄 근거 1개 이상", "src/app.py:3", run)[1], res)
             self.assertFalse(eva.outcome_evidence("파일:줄 근거 1개 이상", "src/app.py:4", run)[1], res)
             self.assertFalse(eva.outcome_evidence("파일:줄 근거 1개 이상", "src/other.py:3", run)[1], res)
     def test_grep_lines_and_ranges(self):
-        run = run_of([{"tool": "grep", "input": {"command": "grep -rn -A1 foo src"}, "result": "src/a.py:10:foo\nsrc/a.py-11-bar"}])
+        run = run_of([{"tool": "bash", "input": {"command": "grep -n -A1 foo src/a.py"}, "result": "10:foo\n11-bar"}])
         ev = lambda final: eva.outcome_evidence("파일:줄 근거 1개 이상", final, run)[1]
         self.assertTrue(ev("src/a.py:10")); self.assertTrue(ev("src/a.py:10-11"))
         self.assertFalse(ev("src/a.py:10-12")); self.assertFalse(ev("src/b.py:10"))
-        # top-level tool_results: grep lines carry their path and count; bare numbered lines cannot be attributed
+        # Round 4: recursive grep reads many files, and top-level tool_results belong to no read call -> never count
+        run = run_of([{"tool": "bash", "input": {"command": "grep -rn -A1 foo src"}, "result": "src/a.py:10:foo\nsrc/a.py-11-bar"}])
+        self.assertFalse(eva.outcome_evidence("파일:줄 근거 1개 이상", "src/a.py:10", run)[1])
         run = run_of(["grep"], results=["src/a.py:10:foo", "7: bar"])
-        self.assertTrue(eva.outcome_evidence("파일:줄 근거 1개 이상", "src/a.py:10", run)[1])
+        self.assertFalse(eva.outcome_evidence("파일:줄 근거 1개 이상", "src/a.py:10", run)[1])
         self.assertFalse(eva.outcome_evidence("파일:줄 근거 1개 이상", "src/a.py:7", run)[1])
 
 class TestNeedsReview(TmpMixin, unittest.TestCase):
@@ -873,9 +888,10 @@ class TestCitationSingleFile(unittest.TestCase):
         self.assertFalse(cites_ok("src/a.py:42", calls))
         calls = [{"tool": "read_file", "input": {"path": "src/a.py"}, "result": "42 return src/a.py"}]
         self.assertTrue(cites_ok("src/a.py:42", calls))  # real content that merely mentions a path still counts
-    def test_grep_lines_with_paths_still_count_across_files(self):
+    def test_multi_file_grep_rejected(self):
+        # Round 4: a line counts only from a call that read exactly that one file (was: path-prefixed grep lines counted)
         calls = [{"tool": "bash", "input": {"command": "grep -n foo src/a.py src/b.py"}, "result": "src/a.py:3:foo\nsrc/b.py:9:foo"}]
-        self.assertTrue(cites_ok("src/a.py:3 src/b.py:9", calls, 2))
+        self.assertFalse(cites_ok("src/a.py:3", calls)); self.assertFalse(cites_ok("src/b.py:9", calls))
         self.assertFalse(cites_ok("src/a.py:9", calls))
 
 class TestRefDetectionRound3(SkillMixin, unittest.TestCase):
@@ -926,10 +942,7 @@ class TestYamlParity(unittest.TestCase):
              'k: "a#b"', 'k: a#b', 'k: "x" # c', 'k: plain # c', "k: '#not comment'", 'k: "#not comment"',
              'k: "say \\"hi\\""', 'k: "\\x41"', 'k: "\\/"']
     def test_scalar_values_match_pyyaml(self):
-        try:
-            import yaml
-        except ImportError:
-            self.skipTest("PyYAML not installed")
+        yaml = require_yaml(self)
         for line in self.CASES:
             want = yaml.safe_load(line)["k"]
             meta, _, err = eva.parse_frontmatter_ex(_fm(line))
@@ -938,10 +951,7 @@ class TestYamlParity(unittest.TestCase):
             self.assertIsNone(err, line)
             self.assertEqual(meta["m"]["k"], yaml.safe_load("m:\n  " + line)["m"]["k"], line)
     def test_errors_match_pyyaml(self):
-        try:
-            import yaml
-        except ImportError:
-            self.skipTest("PyYAML not installed")
+        yaml = require_yaml(self)
         for line in ('k: "unterminated', 'k: "a" b', "k: 'a' b", 'k: "bad \\q escape"', 'k: "a \\"'):
             with self.assertRaises(yaml.YAMLError, msg=line): yaml.safe_load(line)
             meta, _, err = eva.parse_frontmatter_ex(_fm(line))
@@ -969,7 +979,7 @@ class TestDescriptionChecks(SkillMixin, unittest.TestCase):
         for d in ("Counts words in one text file. Use when the user wants a word count.",
                   "Count words in one text file. Use this skill when the user wants a word count.",
                   "Word counting for one text file, used when the user wants a word count.",
-                  "한국어 글의 낱말 수를 센다. 사용자가 낱말 수를 물을 때 사용한다.",
+                  "한국어 글의 낱말 수를 센다. 낱말 수를 물을 때 사용한다. Use when the user wants a word count.",
                   "Counts words (I/O safe). Use when the user wants a word count."):
             r = self.desc(d); self.assertEqual(r.verdict, "PASS", (d, r.failed))
     def test_person_wording_fails(self):
@@ -1081,6 +1091,215 @@ class TestDocsHouseRules(unittest.TestCase):
         for c in eva.check(p("golden/skills/pdf-summarizer")).checks:
             if c["id"] in ("description-length", "description-when", "description-pov"):
                 self.assertTrue(c["must"], c["id"])
+
+class TestRound4Citations(unittest.TestCase):
+    """Round 4 (1): a cited line counts only from a call that read exactly that one file, exact path match."""
+    def test_echo_printf_faked_output_rejected(self):
+        for cmd in ("echo src/a.py:42:hello", "printf 'src/a.py:42:hello\\n'", "echo '42:hello'", "printf '    42\\thello'"):
+            for res in ("src/a.py:42:hello", "42:hello", "    42\thello"):
+                calls = [{"tool": "bash", "input": {"command": cmd}, "result": res}]
+                self.assertFalse(cites_ok("src/a.py:42", calls), (cmd, res))
+    def test_path_key_non_read_tools_rejected(self):
+        for tool, res in (("wc", "42 lines"), ("stat", "42 blocks"), ("write_file", "42 bytes written"),
+                          ("search", "42: match"), ("grep", "42:hello"), ("list_dir", "42 entries"), ("Edit", "42\tx")):
+            calls = [{"tool": tool, "input": {"path": "src/a.py"}, "result": res}]
+            self.assertFalse(cites_ok("src/a.py:42", calls), tool)
+        self.assertTrue(cites_ok("src/a.py:42", [{"tool": "Read", "input": {"file_path": "src/a.py"}, "result": "42\thello"}]))
+    def test_exact_path_match_no_suffix(self):
+        read = lambda path, ws=None: run_of([{"tool": "read_file", "input": {"path": path}, "result": "     5\tx"}], workspace=ws)
+        ev = lambda final, run: eva.outcome_evidence("파일:줄 근거 1개 이상", final, run)[1]
+        self.assertFalse(ev("docs/README.md:5", read("README.md")))
+        self.assertFalse(ev("README.md:5", read("docs/README.md")))
+        self.assertFalse(ev("src/app.py:5", read("/work/repo/src/app.py")))  # no workspace: no suffix guess
+        self.assertTrue(ev("src/app.py:5", read("/work/repo/src/app.py", "/work/repo")))
+        self.assertFalse(ev("src/app.py:5", read("/other/src/app.py", "/work/repo")))
+        self.assertTrue(ev("src/app.py:5", read("./src/app.py")))
+        self.assertTrue(ev("src/app.py:5", read("src/../src/app.py")))
+    def test_path_prefixed_lines_need_read_of_that_file(self):
+        # a read of b.py whose result contains a grep-like line for a.py proves nothing about a.py
+        calls = [{"tool": "read_file", "input": {"path": "src/b.py"}, "result": "src/a.py:42:hello"}]
+        self.assertFalse(cites_ok("src/a.py:42", calls))
+        calls = [{"tool": "read_file", "input": {"path": "src/a.py"}, "result": "src/a.py:42:hello"}]
+        self.assertFalse(cites_ok("src/a.py:42", calls))  # not a numbered line of the read
+        calls = [{"tool": "grep", "input": {"pattern": "hello", "path": "src"}, "result": "src/a.py:42:hello"}]
+        self.assertFalse(cites_ok("src/a.py:42", calls))
+    def test_single_file_grep_n(self):
+        ok = (("grep -n hello src/a.py", "42:hello"), ("grep -n -e hello src/a.py", "42:hello"),
+              ("grep -in hello src/a.py", "42:Hello"), ("grep --line-number hello src/a.py", "42:hello"),
+              ("grep -nH hello src/a.py", "src/a.py:42:hello"), ("grep -n -B1 hello src/a.py", "41-x\n42:hello"),
+              ("grep -n -C 1 hello ./src/a.py", "41-x\n42:hello\n43-y"))
+        for cmd, res in ok:
+            calls = [{"tool": "bash", "input": {"command": cmd}, "result": res}]
+            self.assertTrue(cites_ok("src/a.py:42", calls), cmd)
+            self.assertFalse(cites_ok("src/b.py:42", calls), cmd)
+            self.assertFalse(cites_ok("src/a.py:44", calls), cmd)
+        bad = (("grep hello src/a.py", "42:hello"), ("grep -rn hello src/a.py", "42:hello"), ("grep -cn hello src/a.py", "42"),
+               ("grep -n hello src/a.py src/b.py", "src/a.py:42:hello"), ("grep -n hello", "42:hello"),
+               ("grep -n hello src/a.py | head", "42:hello"), ("grep -n hello src/a.py; echo 42:x", "42:x"),
+               ("grep -ln hello src/a.py", "42:hello"), ("grep -n -f pats src/a.py", "42:hello"),
+               ("grep -nH hello src/a.py", "src/b.py:42:hello"))
+        for cmd, res in bad:
+            self.assertFalse(cites_ok("src/a.py:42", [{"tool": "bash", "input": {"command": cmd}, "result": res}]), cmd)
+    def test_cwd_key(self):
+        call = lambda cwd: [{"tool": "bash", "input": {"command": "cat -n a.py", "cwd": cwd}, "result": "     5\tx"}]
+        ev = lambda final, calls, ws=None: eva.outcome_evidence("파일:줄 근거 1개 이상", final, run_of(calls, workspace=ws))[1]
+        self.assertTrue(ev("src/a.py:5", call("/repo/src"), "/repo"))
+        self.assertTrue(ev("a.py:5", call("/repo"), "/repo"))  # reviewer repro: {"command": "cat -n a.py", "cwd": "/repo"}
+        self.assertFalse(ev("a.py:5", call("/repo/src"), "/repo"))
+        self.assertTrue(ev("src/a.py:5", call("src")))
+        self.assertFalse(ev("src/a.py:5", call("/repo/src")))  # absolute cwd and no workspace: cannot relate
+        calls = [{"tool": "read_file", "input": {"path": "a.py", "cwd": "/repo/src"}, "result": "5\tx"}]
+        self.assertTrue(ev("src/a.py:5", calls, "/repo"))
+        calls = [{"tool": "read_file", "input": {"path": "a.py", "dir": "src"}, "result": "5\tx"}]
+        self.assertFalse(ev("src/a.py:5", calls)); self.assertFalse(ev("a.py:5", calls))  # 'dir' is a second path
+    def test_tool_shape_must_match(self):
+        for call in ({"tool": "echo", "input": {"command": "cat -n src/a.py"}, "result": "5\tx"},  # not a shell tool
+                     {"tool": "bash", "input": {"command": "cat -n src/a.py", "path": "src/a.py"}, "result": "5\tx"},
+                     {"tool": "read_file", "input": {"command": "cat -n src/a.py"}, "result": "5\tx"},
+                     {"tool": "bash", "input": {"command": ["cat -n src/a.py", "cat -n src/a.py"]}, "result": "5\tx"}):
+            self.assertFalse(cites_ok("src/a.py:5", [call]), call)
+    def test_drill_still_verified(self):
+        r = eva.grade_transcript(CR, p("transcripts/code-reviewer-drill.json"))
+        self.assertEqual(r.failed, []); self.assertEqual(r.verdict, "REVIEW")
+
+class TestRound4Yaml(unittest.TestCase):
+    """Round 4 (2): out-of-range \\U is a reported error, '#' lines inside block scalars are content (PyYAML)."""
+    def test_out_of_range_escape_is_error_not_crash(self):
+        for v in ('"\\UFFFFFFFF"', '"\\U00110000"', '"ok \\UFFFFFFFF ok"'):
+            meta, _, err = eva.parse_frontmatter_ex(_fm("description: %s" % v))
+            self.assertIsNone(meta, v); self.assertIn("U+10FFFF", err, v)
+            meta, _, err = eva.parse_frontmatter_ex(_fm("metadata:\n  k: %s" % v))
+            self.assertIsNone(meta, v); self.assertTrue(err, v)
+        d = tempfile.mkdtemp()
+        try:
+            s = os.path.join(d, "x-skill"); os.makedirs(s)
+            wtext(os.path.join(s, "SKILL.md"), '---\nname: x-skill\ndescription: "\\UFFFFFFFF"\n---\n# X\n')
+            r = eva.check(s)  # must not raise
+            self.assertEqual(r.verdict, "FAIL"); self.assertIn("frontmatter", {c["id"] for c in r.critical_failed})
+        finally:
+            shutil.rmtree(d)
+        meta, _, err = eva.parse_frontmatter_ex(_fm('k: "\\U0010FFFF"'))
+        self.assertIsNone(err); self.assertEqual(meta["k"], "\U0010ffff")
+    BLOCKS = ["k: |\n  a\n  # b\n  c", "k: >\n  a\n  # b\n\n  c\n   d\n  e", "k: >-\n  a\n  # b", "k: |-\n  # only",
+              "k: >\n  a\n# c\nj: x", "j: x\nk: |\n\n  a\n\n", "k: >\n  # first\n  second\nj: x", "k: |\n  a\n\n\n  b",
+              "k: >\n  a\n  b\n\n\n  c", "k: >\n", "k: |\n  x  # not a comment", "k: |\n  a\nj: x", "k: >\n  a\n\nj: x",
+              "k: |\n  a\n"]
+    def test_block_scalars_match_pyyaml(self):
+        yaml = require_yaml(self)
+        for text in self.BLOCKS:
+            meta, _, err = eva.parse_frontmatter_ex(_fm(text))
+            self.assertIsNone(err, text); self.assertEqual(meta, yaml.safe_load(text), text)
+    def test_block_scalar_errors_match_pyyaml(self):
+        yaml = require_yaml(self)
+        for text in ("k: >\n  a\n# c\n  b", "k: >\n    a\n  b"):
+            with self.assertRaises(yaml.YAMLError, msg=text): yaml.safe_load(text)
+            meta, _, err = eva.parse_frontmatter_ex(_fm(text))
+            self.assertIsNone(meta, text); self.assertTrue(err, text)
+    def test_hash_line_in_block_description_kept(self):
+        meta, _, err = eva.parse_frontmatter_ex(_fm("description: >\n  Counts words.\n  # not a comment\n  Use when asked."))
+        self.assertIsNone(err); self.assertIn("# not a comment", meta["description"])
+
+class TestRound4Description(SkillMixin, unittest.TestCase):
+    """Round 4 (3)(4): English trigger clause only; first/second person any case, quotes and identifiers skipped."""
+    def desc(self, d):
+        raw = GOOD_FM.format(name="word-count", extra="", body="").replace(
+            "description: Counts words in one text file. Use when the user wants a word count.", "description: %s" % d)
+        return self.skill(raw=raw)
+    def test_when_requires_trigger_clause(self):
+        for d in ("Counts words in a text file. Use this.", "Counts words in a text file when files change.",
+                  "Counts words in a text file. Use when needed.", "Counts words in a text file. Use when asked.",
+                  "Counts words in a text file. Use this skill.", "Counts words in a text file and reports when done.",
+                  "Counts words in a text file. Use for word counts.", "Counts words in a text file. Use when it is needed.",
+                  "한국어 글의 낱말 수를 센다. 사용자가 낱말 수를 물을 때 사용한다.", "Counts words. 사용자가 낱말 수를 물으면 쓴다.",
+                  "Counts words in a text file. Use when 사용자가 낱말 수를 물을 때."):
+            r = self.desc(d)
+            self.assertEqual(r.verdict, "FAIL", d); self.assertEqual(self.ids(r, "critical_failed"), {"description-when"}, d)
+    def test_when_verb_forms(self):
+        for d in ("Counts words in a text file. Use when the user wants a word count.",
+                  "Counts words in a text file. Used when the user wants a word count.",
+                  "Counts words in a text file. Use this skill when the user wants a word count.",
+                  "Counts words in a text file. Use for word counting when the user pastes text.",
+                  "Counts words in a text file. Use to count words when a file is given.",
+                  "Counts words in a text file. Invoke when the user asks for a word count.",
+                  "Counts words in a text file. Trigger when the user asks for a word count.",
+                  "Counts words in a text file. This skill should be used when the user asks for a word count.",
+                  "Counts words in a text file. USE WHEN the user asks for a word count.",
+                  "Counts words in a text file. Use proactively when the user pastes a long text.",
+                  "한국어 글의 낱말 수를 센다. Use when the user asks for a Korean word count."):
+            r = self.desc(d); self.assertEqual(r.verdict, "PASS", (d, r.failed))
+    def test_pov_case_insensitive(self):
+        for d, word in (("YOU can count words with this. Use when the user wants a count.", "YOU"),
+                        ("WE count words in a file. Use when the user wants a count.", "WE"),
+                        ("Counts words in YOUR files. Use when the user wants a count.", "YOUR"),
+                        ("My counter for words in a file. Use when the user wants a count.", "My"),
+                        ("Counts words for us. Use when the user wants a count.", "us"),
+                        ("i count words in a file. Use when the user wants a count.", "i"),
+                        ("Counts words; I'm fast. Use when the user wants a count.", "I"),
+                        ("Counts the user's words and it's quick, I think. Use when the user wants a count.", "I")):
+            r = self.desc(d)
+            self.assertIn("description-pov", self.ids(r, "critical_failed"), d)
+            self.assertIn(word, next(c["reason"] for c in r.failed if c["id"] == "description-pov"), d)
+    def test_pov_quotes_and_identifiers_ignored(self):
+        for d in ('Fixes code. Use when the user says "fix my code".', "Fixes code. Use when the user says 'fix my code'.",
+                  "Fixes code. Use when the user says “can you fix my code”.", "Fixes code. Use when the user says ‘fix my code’.",
+                  "Builds the `my-app` bundle. Use when the user wants a release build.",
+                  "Builds my-app releases. Use when the user wants a release build.",
+                  "Plans Phase I work. Use when the user starts a new project.",
+                  "Explains Type I errors. Use when the user asks about statistics.",
+                  "Handles I/O errors. Use when the user reports a failing read.",
+                  "Converts US dollars. Use when the user asks for a currency conversion.",
+                  "Reads the user's notes. Use when the user's file is a log, i.e. a text file."):
+            r = self.desc(d)
+            self.assertTrue(self.status(r, "description-pov"), (d, r.failed)); self.assertEqual(r.verdict, "PASS", (d, r.failed))
+
+class TestRound4FencedRefs(SkillMixin, unittest.TestCase):
+    """Round 4 (5): every command of a fenced line is checked; globs and file listings are not references."""
+    def test_every_command_on_a_line(self):
+        for line, refs in (("python scripts/a.py && bash scripts/b.sh", {"scripts/a.py", "scripts/b.sh"}),
+                           ("cd x; python scripts/a.py | tee out.txt", {"scripts/a.py"}),
+                           ("python scripts/a.py || sh scripts/c.sh", {"scripts/a.py", "scripts/c.sh"}),
+                           ("make && ./scripts/run.sh", {"scripts/run.sh"}),
+                           ("LANG=C python scripts/a.py", {"scripts/a.py"}),
+                           ("cat in.txt | node scripts/x.js | sort", {"scripts/x.js"})):
+            self.assertEqual(eva.local_refs("```bash\n%s\n```\n" % line), refs, line)
+        r = self.skill(body="```bash\npython scripts/a.py && bash scripts/b.sh\n```\n", files={"scripts/a.py": "print(1)\n"})
+        self.assertFalse(self.status(r, "refs-exist"))
+        self.assertIn("scripts/b.sh", next(c["reason"] for c in r.failed if c["id"] == "refs-exist"))
+    def test_glob_star_not_stripped(self):
+        for body in ("Icons: assets/icon*\n", "Icons: `assets/icon*`\n", "Icons: assets/icon*.\n", "Icons: assets/icon*를 쓴다.\n",
+                     "```bash\npython scripts/gen*.py\n```\n"):
+            self.assertEqual(eva.local_refs(body), set(), body)
+            self.assertTrue(self.status(self.skill(body=body), "refs-exist"), body)
+        self.assertEqual(eva.local_refs("Run *scripts/x.py* now.\n"), {"scripts/x.py"})  # emphasis still stripped
+    def test_file_listings_not_run_commands(self):
+        for body in ("```\nscripts/extract.py   # helper\n```\n", "```bash\nscripts/extract.py  # helper\n```\n",
+                     "```\nmy-skill/\n├── SKILL.md\n└── scripts/extract.py\n```\n",
+                     "```\nmy-skill/\n  SKILL.md\n  scripts/extract.py\n```\n",
+                     "```\n# python scripts/x.py; bash scripts/y.sh\n```\n"):
+            self.assertEqual(eva.local_refs(body), set(), body)
+        for body, ref in (("```bash\nscripts/run.sh --in a.csv\n```\n", "scripts/run.sh"),
+                          ("```\n./scripts/run.sh  # helper\n```\n", "scripts/run.sh"),
+                          ("```\nmy-skill/\n├── SKILL.md\n```\n```bash\npython scripts/x.py\n```\n", "scripts/x.py")):
+            self.assertEqual(eva.local_refs(body), {ref}, body)
+
+class TestRound4PyYamlRequired(unittest.TestCase):
+    """Round 4 (6): missing PyYAML fails the parity tests unless explicitly opted out (then a printed warning)."""
+    def test_missing_pyyaml_fails_or_warns(self):
+        from unittest import mock
+        tc = TestYamlParity("test_scalar_values_match_pyyaml")
+        with mock.patch.dict(sys.modules, {"yaml": None}):
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop(PYYAML_OPT_OUT, None)
+                with self.assertRaises(tc.failureException):
+                    require_yaml(tc)
+            with mock.patch.dict(os.environ, {PYYAML_OPT_OUT: "1"}):
+                with contextlib.redirect_stderr(io.StringIO()) as err:
+                    with self.assertRaises(unittest.SkipTest):
+                        require_yaml(tc)
+                self.assertIn("WARNING", err.getvalue()); self.assertIn("SKIPPED", err.getvalue())
+    def test_no_silent_skips_in_suite(self):
+        src = open(os.path.abspath(__file__), encoding="utf-8").read()
+        self.assertEqual(src.count("skipTest" + "("), 1)  # only inside require_yaml
 
 if __name__ == "__main__":
     unittest.main()

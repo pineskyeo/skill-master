@@ -16,14 +16,54 @@ REF_TOC_LINES = 100  # Claude best practices: reference files longer than 100 li
 MIN_EVALS = 3        # Claude best practices checklist: "At least three evaluations created"
 DESCRIPTION_MAX = 1024  # spec + best practices: description "Max 1024 characters"
 DESCRIPTION_MIN = 20    # house rule: the spec only requires non-empty
-# Spec: description "Should describe ... when to use it". Any verb form counts (Use when / Used when / Use this skill when).
-DESC_WHEN_RE = re.compile(r"\b(use when|when|use for|use this)\b|할 때|때 사용|경우", re.I)
+# Spec: description "Should describe ... when to use it". Only an English trigger clause counts: a use verb in any
+# form ('Use', 'Used', 'Invoke', 'Trigger', ...), optionally 'this skill' / 'for|to <task>', then 'when'/'whenever'
+# and a substantive condition (DESC_WHEN_MIN_WORDS words, not only vague ones). A bare 'when' elsewhere
+# ('Counts words when files change'), 'Use this.' and Korean conditionals ('...할 때 사용한다') do not count.
+DESC_WHEN_RE = re.compile(
+    r"\b(?:use[sd]?|using|invoke[sd]?|invoking|trigger(?:s|ed)?|activate[sd]?|apply|applies|applied|call(?:ed)?"
+    r"|load(?:ed)?|choose|chosen|select(?:ed)?|consult(?:ed)?)"
+    r"(?:\s+(?:this|the|it))?(?:\s+(?:skill|tool))?(?:\s+[A-Za-z]+ly)?"
+    r"(?:\s+(?:for|to)\b[^.;!?\n]{1,150}?)?"
+    r"\s+(?:when|whenever)\b([^.;!?\n]*)", re.I)
+DESC_WHEN_MIN_WORDS = 2
+DESC_WHEN_VAGUE = {"a", "an", "the", "it", "is", "are", "be", "this", "that", "there", "you", "user", "users", "someone",
+                   "needed", "need", "necessary", "appropriate", "required", "relevant", "useful", "helpful", "asked",
+                   "requested", "wanted", "desired", "possible", "applicable", "suitable", "something", "anything",
+                   "so", "as", "if", "or", "and", "in", "to", "of", "for"}
+
+def desc_when_clause(desc):
+    """The condition text of the first substantive English trigger clause in desc ('the user wants a word count'
+    from 'Use when the user wants a word count.'), else None."""
+    for m in DESC_WHEN_RE.finditer(desc):
+        words = re.findall(r"[A-Za-z][A-Za-z'-]*", m.group(1))
+        if len(words) >= DESC_WHEN_MIN_WORDS and any(w.lower() not in DESC_WHEN_VAGUE for w in words):
+            return m.group(1).strip()
+    return None
+
 # Best practices: "Always write in third person" (avoid "I can help you...", "You can use this...").
-# Explicit pronouns only: Korean often drops the subject, so pronoun-less first/second person is not detected.
+# Explicit pronouns only, any letter case; quoted text ("fix my code", `my-app`) is the user's words, not the
+# description's voice, and is skipped (_unquoted). Korean often drops the subject, so pronoun-less first/second
+# person is not detected.
+_ROMAN_I_BEFORE = r"(?:phase|part|type|chapter|level|stage|class|tier|section|volume|vol\.?|appendix|war|step|grade|act|book|round|schedule|article|title|figure|table)"
 DESC_PERSON_RE = re.compile(
-    r"(?<![\w/])I(?![\w/-])"  # 'I', "I'm" (not 'I/O')
-    r"|\b(?:[Mm]e|[Mm]y|[Mm]ine|[Ww]e|[Oo]ur|[Oo]urs|[Uu]s|[Yy]ou|[Yy]our|[Yy]ours|[Yy]ourself|[Yy]ourselves)\b"
-    r"|(?<!\w)(?:저는|제가|저희|나는|내가|우리는|우리가|우리의|당신|너는|네가|여러분)")
+    r"(?<![\w/.(-])(?-i:I)(?![\w/)-]|\.\w)"     # 'I', "I'm" (not 'I/O', 'I-II', '(I)')
+    r"|(?<![\w/.-])(?-i:i)(?=\s|['’])"          # lowercase pronoun 'i ' / "i'm" (not 'i.e.')
+    r"|(?<![\w/.-])(?:me|my|mine|we|our|ours|you|your|yours|yourself|yourselves)(?![\w/-])"
+    r"|(?<![\w/.-])(?-i:us|Us|uS)(?![\w/-])"    # all-caps 'US' is the country/acronym
+    r"|(?<!\w)(?:저는|제가|저희|나는|내가|우리는|우리가|우리의|당신|너는|네가|여러분)", re.I)
+_ROMAN_I_RE = re.compile(r"\b%s\s+I(?![\w/-])" % _ROMAN_I_BEFORE, re.I)
+_QUOTED_RE = re.compile(r"\"[^\"\n]*\"|“[^”\n]*”|‘[^’\n]*’|`[^`\n]*`|(?<![\w])'[^'\n]*'(?![\w])")
+
+def _unquoted(text):
+    """text with quoted spans ("...", '...', “...”, ‘...’, `...`) blanked out; apostrophes ("it's") are not quotes."""
+    return _QUOTED_RE.sub(lambda m: " " * len(m.group(0)), text)
+
+def desc_person_words(desc):
+    """First/second-person words in desc outside quotes, Roman numeral 'Phase I' style excluded."""
+    text = _unquoted(desc)
+    roman = {m.end() - 1 for m in _ROMAN_I_RE.finditer(text)}
+    return sorted(set(m.group(0) for m in DESC_PERSON_RE.finditer(text) if m.start() not in roman))
 
 # ---------- frontmatter (minimal YAML subset) ----------
 def _quoted_end(v):
@@ -73,7 +113,10 @@ def _unquote(v):
         if e in _DQ_ESCAPES:
             out.append(_DQ_ESCAPES[e]); i += 2
         elif e in _DQ_HEX and re.match(r"^[0-9A-Fa-f]{%d}$" % _DQ_HEX[e], s[i + 2:i + 2 + _DQ_HEX[e]]):
-            out.append(chr(int(s[i + 2:i + 2 + _DQ_HEX[e]], 16))); i += 2 + _DQ_HEX[e]
+            code = int(s[i + 2:i + 2 + _DQ_HEX[e]], 16)
+            if code > 0x10FFFF:  # chr() would raise (PyYAML itself crashes with OverflowError/ValueError here)
+                return None, "escape '\\%s%s' is beyond U+10FFFF" % (e, s[i + 2:i + 2 + _DQ_HEX[e]])
+            out.append(chr(code)); i += 2 + _DQ_HEX[e]
         else:
             return None, "invalid escape '\\%s' in double-quoted value" % e
     return "".join(out), None
@@ -112,12 +155,45 @@ def _plain_scalar_error(v):
         return "value starts with YAML syntax '%s' not supported here; quote the value" % v[0]
     return None
 
+def _block_scalar(style, lines, eof=False):
+    """Value of a '>'/'|' block scalar (style '>', '|', '>-', '|-') from its raw lines, as PyYAML scans it
+    (ScalarScanner.scan_block_scalar): indentation from the first non-empty line, '#' lines are content,
+    folding joins adjacent non-indented lines with a space, clip chomping keeps one final newline, '-' strips it.
+    eof: the last line ends the frontmatter text. skill-creator's quick_validate loads the text between '---\n' and
+    '\n---', so a block that is the last line has no line break and clip adds none. Returns (value, error)."""
+    no_break = eof and bool(lines) and bool(lines[-1].strip())
+    while lines and not lines[-1].strip():
+        lines = lines[:-1]  # trailing empty lines only matter for '+' (keep), which is not supported
+    first = next((l for l in lines if l.strip()), None)
+    if first is None:
+        return "", None
+    indent = len(first) - len(first.lstrip(" "))
+    chunks, breaks, line_break, prev_text = [], [], "", None
+    for ln in lines:
+        if len(ln) - len(ln.lstrip(" ")) >= indent and ln.strip():
+            text = ln[indent:]
+            if prev_text is not None:
+                if style[0] == ">" and prev_text[:1] not in (" ", "\t") and text[:1] not in (" ", "\t"):
+                    if not breaks: chunks.append(" ")
+                else:
+                    chunks.append(line_break)
+            chunks.extend(breaks); breaks = []
+            chunks.append(text); line_break = "\n"; prev_text = text
+        elif not ln.strip():
+            if prev_text is None: chunks.append("\n")  # leading empty lines are kept
+            else: breaks.append("\n")
+        else:
+            return None, "line less indented than the block scalar's first line"
+    if not style.endswith("-") and not no_break:
+        chunks.append(line_break)
+    return "".join(chunks), None
+
 def parse_frontmatter_ex(text):
     """Returns (meta dict or None, body, error). Supports scalars, inline lists, '- item' lists,
     one level of 'key: value' nesting, '>'/'|' blocks. Opening and closing lines must be exactly '---';
     every top-level line must be 'key: value' (a mapping) with unique keys. Indentation must use spaces
     (YAML forbids tabs) and unquoted values must be valid YAML plain scalars (see _plain_scalar_error).
-    ' #' starts a comment, as in YAML."""
+    ' #' starts a comment, as in YAML; inside a '>'/'|' block an indented '#' line is content."""
     lines = text.splitlines()
     if not lines or lines[0] != "---":
         return None, text, "first line must be exactly '---'"
@@ -127,20 +203,31 @@ def parse_frontmatter_ex(text):
             end = i; break
     if end is None:
         return None, text, "closing '---' line not found"
-    meta, key, block = {}, None, None
+    meta, key, block, block_lines, block_start, closed = {}, None, None, [], 0, False
     def err(n, msg): return None, text, "frontmatter line %d: %s" % (n, msg)
+    def finish_block(eof=False):
+        v, e = _block_scalar(block, block_lines, eof)
+        if e: return err(block_start, e)
+        meta[key] = v
+        return None
     for n, ln in enumerate(lines[1:end], 2):
+        if block is not None and (not ln.strip() or ln[0] == " "):
+            block_lines.append(ln); continue  # block content, '#' lines included
+        if block is not None:
+            bad = finish_block()
+            if bad: return bad
+            block, closed = None, True  # an indented line after this would continue nothing
         if not ln.strip() or ln.lstrip().startswith("#"):
             continue
         if ln[0] in " \t":
             if key is None:
                 return err(n, "indented line without a parent key")
+            if closed:
+                return err(n, "indented line after the block scalar of '%s' ended" % key)
             if "\t" in ln[:len(ln) - len(ln.lstrip())]:
                 return err(n, "tab in indentation (YAML allows spaces only)")
             s = ln.strip()
-            if block is not None:
-                meta[key] = (meta[key] + " " + s).strip()
-            elif meta[key] is not None and not isinstance(meta[key], (list, dict)):
+            if meta[key] is not None and not isinstance(meta[key], (list, dict)):
                 return err(n, "key '%s' already has a scalar value; nested lines not allowed" % key)
             elif s.startswith("- "):
                 if isinstance(meta[key], dict):
@@ -168,15 +255,18 @@ def parse_frontmatter_ex(text):
         key, val = m.group(1), _strip_comment(m.group(2) or "")
         if key in meta:
             return err(n, "duplicate key '%s'" % key)
-        block = None
+        closed = False
         if val in (">", "|", ">-", "|-"):
-            meta[key] = ""; block = val
+            meta[key] = ""; block, block_lines, block_start = val, [], n
         elif val == "":
             meta[key] = None
         else:
             pe = _plain_scalar_error(val)
             if pe: return err(n, pe)
             meta[key] = _scalar(val)
+    if block is not None:
+        bad = finish_block(eof=True)
+        if bad: return bad
     return meta, "\n".join(lines[end + 1:]), None
 
 # YAML 1.1 implicit types (what PyYAML's safe_load resolves): an unquoted value matching these is
@@ -380,21 +470,47 @@ HANGUL = "ㄱ-ㆎ가-힣"
 # Korean particle/ending glued to a path that ends in a Latin letter, digit, ')' or closing '**'
 # ('scripts/clean.py를', '...py에서', '**scripts/x.py**를')
 KO_PARTICLE_RE = re.compile(r"(?<=[A-Za-z0-9)\]*])[%s]+$" % HANGUL)
-# Inside fenced code only run commands are references: an interpreter followed by a bundled-dir path
-# ('python scripts/x.py', '$ bash assets/setup.sh'), or direct execution of a script ('./scripts/x.sh', 'scripts/x.py').
+# Inside fenced code only run commands are references, checked in every command of a line (split on &&, ||, ;, |):
+# an interpreter followed by a bundled-dir path ('python scripts/x.py', '$ bash assets/setup.sh', 'cd d && sh scripts/b.sh'),
+# or direct execution of a script ('./scripts/x.sh', 'scripts/x.py args'). A bare 'scripts/x.py' is a file listing,
+# not a run command, when it is indented, carries a '# note', or the block draws a tree (├ └ │).
 RUNNER = r"(?:sudo\s+)?(?:python[0-9.]*|bash|sh|zsh|node|deno\s+run|ruby|perl|Rscript|php|pwsh|uv\s+run(?:\s+python[0-9.]*)?)"
 _ARG = r"[^\s;&|<>'\"`]+"
-FENCED_RUN_RE = re.compile(r"^\s*(?:\$\s+)?(?:%s\s+(?:-\S+\s+)*(?:\./)?((?:scripts|references|assets)/%s)"
-                           r"|(?:\./)?(scripts/%s))" % (RUNNER, _ARG, _ARG))
+_ENV = r"(?:[A-Za-z_]\w*=\S*\s+)*"  # 'LANG=C python scripts/x.py'
+FENCED_RUN_RE = re.compile(r"^(?:\$\s+)?%s%s\s+(?:-\S+\s+)*(?:\./)?((?:scripts|references|assets)/%s)" % (_ENV, RUNNER, _ARG))
+FENCED_EXEC_RE = re.compile(r"^(?:\$\s+)?%s(\./)?(scripts/%s)" % (_ENV, _ARG))
+CMD_SPLIT_RE = re.compile(r"&&|\|\||;|\|")
+TREE_CHARS = set("├└│")
 
-def _clean_bundled(t):
-    """Bundled-dir path with trailing prose removed (anchor, punctuation, emphasis '**', Korean particle);
-    None if what is left is a directory mention or a glob."""
+def _fenced_run_refs(code_lines):
+    """Bundled-dir paths that fenced code lines run (see FENCED_RUN_RE / FENCED_EXEC_RE)."""
+    out, tree = [], any(TREE_CHARS & set(ln) for ln in code_lines)
+    for ln in code_lines:
+        m = re.search(r"(^|\s)#", ln)  # shell comment
+        cmd, note = (ln[:m.start()], True) if m else (ln, False)
+        for i, seg in enumerate(CMD_SPLIT_RE.split(cmd)):
+            indented = i == 0 and seg[:1] in (" ", "\t")
+            seg = seg.strip()
+            r = FENCED_RUN_RE.match(seg)
+            if r:
+                out.append(r.group(1)); continue
+            e = FENCED_EXEC_RE.match(seg)
+            if e and (e.group(1) or not (indented or tree or (note and seg == e.group(0)))):
+                out.append(e.group(2))
+    return out
+
+def _clean_bundled(t, stars=0):
+    """Bundled-dir path with trailing prose removed (anchor, punctuation, Korean particle, and up to `stars` closing
+    '*' of the emphasis the path was opened with, as in '**scripts/x.py**'); None if what is left is a directory
+    mention or a glob ('assets/icon*', 'scripts/*.py')."""
     t = t.split("#", 1)[0]
     prev = None
     while t != prev:
         prev = t
-        t = KO_PARTICLE_RE.sub("", t.rstrip(".:!?*"))
+        t = KO_PARTICLE_RE.sub("", t.rstrip(".:!?"))
+        k = len(t) - len(t.rstrip("*"))
+        if 0 < k <= stars:
+            t = t[:-k]
     if not t or t[-1] in "/\\" or GLOB_CHARS & set(t):
         return None
     return t
@@ -410,12 +526,11 @@ def local_refs(text):
         t = t.split("#", 1)[0].split("?", 1)[0]
         if t and not SCHEME_RE.match(t):
             refs.add(t)
-    found = BUNDLED_REF_RE.findall(prose)
-    for ln in _fenced(text):
-        m = FENCED_RUN_RE.match(ln)
-        if m: found.append(m.group(1) or m.group(2))
-    for t in found:
-        t = _clean_bundled(t)
+    found = [(m.group(1), len(prose[:m.start()]) - len(prose[:m.start()].rstrip("*")))
+             for m in BUNDLED_REF_RE.finditer(prose)]
+    found += [(t, 0) for t in _fenced_run_refs(_fenced(text))]
+    for t, stars in found:
+        t = _clean_bundled(t, stars)
         if t: refs.add(t)
     return refs
 
@@ -539,10 +654,14 @@ def check_skill(path):
           "무엇을 하는지와 언제 쓰는지가 드러나게 description을 %d자 이상으로 쓰세요." % DESCRIPTION_MIN)
     r.add("description-no-xml", "single-task", "<" not in desc and ">" not in desc,
           "description has no XML tags / angle brackets", "description에서 '<', '>'(XML 태그)를 빼세요.", must=True)
-    r.add("description-when", "single-task", bool(DESC_WHEN_RE.search(desc)),
-          "description says WHEN to use (any verb form: 'Use when', 'Used when', 'Use this skill when', '...할 때')",
-          "description에 언제 쓰는지(예: 'Use when ...', '...할 때 쓴다')를 추가하세요.", must=True)
-    pov = sorted(set(m.group(0) for m in DESC_PERSON_RE.finditer(desc)))
+    when = desc_when_clause(desc)
+    r.add("description-when", "single-task", when is not None,
+          "description has an English trigger clause ('Use when ...', 'Used when ...', 'Use this skill when ...', "
+          "'Use for/to ... when ...', 'Invoke when ...') with a concrete condition" + (": when %s" % when if when else ""),
+          "description에 영어 사용 조건 문장(예: 'Use when the user asks to summarize a PDF.')을 넣으세요. "
+          "'when' 뒤에 구체적인 조건(%d단어 이상)을 쓰세요. 'Use this.'나 한국어 조건문('…할 때 사용한다')만으로는 "
+          "인정하지 않습니다." % DESC_WHEN_MIN_WORDS, must=True)
+    pov = desc_person_words(desc)
     r.add("description-pov", "single-task", not pov,
           "description has no first/second-person wording" + (": %s" % pov if pov else ""),
           "description을 3인칭으로 쓰세요(예: 'I can help you...'/'You can use this...' 대신 'Processes Excel files...'). "
@@ -916,10 +1035,8 @@ def answer_lookup_violations(calls, workspace=None):
 URL_RE = re.compile(r"https?://[^\s<>()\[\]|\"'`]+")
 TABLE_RE = re.compile(r"^[ \t]*\|?.*\|.*\n[ \t]*\|?[ \t]*:?-{3,}:?[ \t]*(\|[ \t]*:?-{3,}:?[ \t]*)*\|?[ \t]*$", re.M)
 FILELINE_RE = re.compile(r"(?<![\w/.:-])((?:[\w.-]+/)*[\w-][\w.-]*\.[A-Za-z0-9]+):(\d+)(?:-(\d+))?(?![\d])")
-# Line-numbered tool output that proves a line was read:
-#  grep -n / rg -n style "path:N:text" (context lines "path-N-text"), path in the line itself;
-GREP_LINE_RE = re.compile(r"^((?:\.?/)?(?:[\w.-]+/)*[\w-][\w.-]*\.[A-Za-z0-9]+)([:-])(\d+)\2", re.M)
-#  cat -n / nl / Read-tool style "N<tab|→|:|space>text", attributed to the file named in that call's input.
+# Line-numbered tool output that proves a line was read: cat -n / nl / Read-tool style "N<tab|→|:|space>text",
+# attributed to the one file that call read (_read_call); single-file grep -n output is parsed in lines_seen.
 NUMBERED_LINE_RE = re.compile(r"^[ \t]*(\d+)(?:\t|→|:|\||[ ])", re.M)
 FILELINE_CRIT_RE = re.compile(r"파일\s*[:·/]\s*줄|file\s*:\s*line|file[- ]line", re.I)
 NO_WRITE_CRIT_RE = re.compile(r"(?:파일\s*)?(?:변경|수정|쓰기)\s*0\s*건|읽기\s*전용|read[- ]only|"
@@ -948,27 +1065,66 @@ def write_calls(calls):
             out.append("%s '%s'" % (c["tool"], hit[0]))
     return out
 
-def _norm_path(p):
-    p = posixpath.normpath(p.strip().strip("'\""))
+def _norm_path(p, cwd=None, workspace=None):
+    """Canonical form of a file path for exact comparison: quotes and './' dropped, normalized, joined to cwd when
+    relative, and made relative to the workspace when it lies inside it. No suffix matching: 'README.md' and
+    'docs/README.md' are different files."""
+    p = p.strip().strip("'\"")
+    if cwd and not p.startswith("/"):
+        p = posixpath.join(cwd.strip().strip("'\""), p)
+    p = posixpath.normpath(p)
+    if workspace and p.startswith("/"):
+        ws = posixpath.normpath(workspace)
+        if p.startswith(ws.rstrip("/") + "/"):
+            p = posixpath.relpath(p, ws)
     return p[2:] if p.startswith("./") else p
 
-def _same_file(a, b):
-    """Same file if equal after normalization or one is a path-component suffix of the other
-    (citation 'tests/x.py' vs read path '/work/repo/tests/x.py')."""
-    a, b = _norm_path(a), _norm_path(b)
-    return a == b or a.endswith("/" + b) or b.endswith("/" + a)
+SHELL_META_RE = re.compile(r"[|;&<>`$()\n]")
+# Tool names (split into words by _tool_words) that read one file and return its lines: 'Read', 'read_file',
+# 'view_file', 'open_file', 'cat'. Search/list/stat/count/write tools ('grep', 'search', 'wc', 'stat', 'write') are not.
+READ_TOOL_WORDS = {"read", "view", "open", "cat"}
+NOT_READ_TOOL_WORDS = WRITE_WORDS | {"search", "grep", "rg", "find", "glob", "list", "ls", "stat", "wc", "count",
+                                     "head", "tail", "diff", "fetch", "web", "url", "http"}
+# Tools whose input is a shell command; the command itself must then be a recognized single-file read.
+SHELL_TOOL_WORDS = {"bash", "shell", "sh", "zsh", "terminal", "exec", "execute", "run", "command", "cmd", "console"}
+CWD_KEYS = {"cwd"}
+_GREP_FLAG_LETTERS = set("niwFExhHvsI")  # options that keep 'N:line' output for one file honest
 
-SHELL_META_RE = re.compile(r"[|;&<>`$()]")
-
-def _numbered_read_target(cmd):
-    """The one file a shell command prints with its real line numbers, else None. Recognized: 'cat -n FILE'
-    (not -b/-s, which skip or squeeze lines) and 'nl -ba FILE' (optionally -w N). Pipes, redirects, several
-    files ('cat -n a b') and any other command (wc -l, head, grep, ...) are not attributable."""
+def _numbered_read_cmd(cmd):
+    """(kind, file) for a shell command that prints one file's lines with their real line numbers, else None.
+    kind 'numbered': 'cat -n FILE' (not -b/-s, which skip or squeeze lines), 'nl -ba FILE' (optionally -w N).
+    kind 'grep': 'grep -n [-i -w -F -E -x -v -h -H -s -A N -B N -C N] [-e] PATTERN FILE' on exactly one file
+    (output 'N:line', context 'N-line', with -H 'FILE:N:line'). Pipes, redirects, several files, recursion and any
+    other command (echo, printf, wc -l, head, ...) are not attributable."""
     if SHELL_META_RE.search(cmd): return None
     try: toks = shlex.split(cmd)
     except ValueError: return None
     if not toks: return None
     prog, args = os.path.basename(toks[0]), toks[1:]
+    if prog == "grep":
+        letters, pos, i, has_n, pattern = set(), [], 0, False, None
+        while i < len(args):
+            a = args[i]
+            if a in ("-e", "--regexp") and i + 1 < len(args):
+                if pattern is not None: return None
+                pattern = args[i + 1]; i += 2; continue
+            if a in ("-A", "-B", "-C") and i + 1 < len(args) and args[i + 1].isdigit():
+                i += 2; continue
+            if re.match(r"^-[ABC]\d+$", a):
+                i += 1; continue
+            if a in ("--line-number",):
+                has_n = True; i += 1; continue
+            if a.startswith("-") and a != "-" and not a.startswith("--"):
+                letters |= set(a[1:]); i += 1; continue
+            if a.startswith("--"):
+                return None
+            pos.append(a); i += 1
+        if letters - _GREP_FLAG_LETTERS or not (has_n or "n" in letters):
+            return None
+        if pattern is None:
+            if not pos: return None
+            pos = pos[1:]
+        return ("grep", pos[0]) if len(pos) == 1 and pos[0] != "-" else None
     files = [t for t in args if not t.startswith("-") or t == "-"]
     flags = [t for t in args if t.startswith("-") and t != "-"]
     if prog == "cat":
@@ -983,36 +1139,61 @@ def _numbered_read_target(cmd):
         ok = "-ba" in flags and all(f == "-ba" or re.match(r"^-w\d+$", f) for f in flags)
     else:
         ok = False
-    return files[0] if ok and len(files) == 1 and files[0] != "-" else None
+    return ("numbered", files[0]) if ok and len(files) == 1 and files[0] != "-" else None
 
-def _numbered_call_target(inp):
-    """The single file a tool call read with line numbers: one path-key value (Read tool style) and/or recognized
-    numbering commands, all naming the same one file. None when no file, several files, or an unrecognized command."""
+def _read_call(call, workspace=None):
+    """(kind, file as printed, canonical file) when a tool call read exactly one file, else None.
+    Read-tool style: a read tool (READ_TOOL_WORDS, no NOT_READ_TOOL_WORDS) with exactly one path-key value and no
+    command. Shell style: a shell tool (SHELL_TOOL_WORDS) whose one command is _numbered_read_cmd. An optional
+    'cwd' key resolves relative paths. Anything else (echo/printf output, wc/stat/search/write tools with a path key,
+    several paths) reads no attributable file."""
+    inp, words = call["input"], _tool_words(call["tool"])
+    cwd = None
+    if isinstance(inp, dict):
+        cw = [v for k, v in inp.items() if k in CWD_KEYS]
+        if cw:
+            if len(cw) != 1 or not _nonempty_str(cw[0]): return None
+            cwd = cw[0]
+        inp = {k: v for k, v in inp.items() if k not in CWD_KEYS}
     paths, cmds = _call_inputs(inp)
-    targets = set(_norm_path(p) for p in paths if p.strip())
-    for cmd in cmds:
-        t = _numbered_read_target(cmd)
-        if t is None: return None
-        targets.add(_norm_path(t))
-    return targets.pop() if len(targets) == 1 else None
+    paths = [x for x in paths if x.strip()]
+    if words & NOT_READ_TOOL_WORDS:
+        return None
+    if paths and not cmds and words & READ_TOOL_WORDS:
+        if len(paths) != 1: return None
+        return "numbered", paths[0], _norm_path(paths[0], cwd, workspace)
+    if cmds and not paths and words & SHELL_TOOL_WORDS and len(cmds) == 1:
+        rc = _numbered_read_cmd(cmds[0])
+        if rc: return rc[0], rc[1], _norm_path(rc[1], cwd, workspace)
+    return None
 
 def lines_seen(run):
-    """{line number: {file paths}} for lines a tool actually showed with their line numbers.
-    grep-style lines carry their own path (call results and top-level tool_results). Numbered lines without a path
-    count only for a call's own result, and only when that call read exactly one file (_numbered_call_target)."""
+    """{line number: {canonical file paths}} for lines a tool call showed with their real line numbers.
+    A line counts only from the result of a call that read exactly that one file (_read_call): 'N<sep>line' for a
+    read tool / 'cat -n' / 'nl -ba', 'N:line' or 'N-line' (or 'FILE:N:line' for that same FILE) for single-file
+    'grep -n'. Top-level tool_results and path-prefixed lines from any other call ('echo src/a.py:42:x', multi-file
+    grep) are not attributable to a read and do not count."""
     seen = {}
     if not run: return seen
+    ws = run.get("workspace")
     def mark(path, ln): seen.setdefault(int(ln), set()).add(path)
-    for text in run["results"]:
-        for path, _, ln in GREP_LINE_RE.findall(text):
-            mark(path, ln)
     for c in run["calls"]:
         if not c["result"]: continue
-        target = _numbered_call_target(c["input"])
-        if target is None: continue
+        rc = _read_call(c, ws)
+        if rc is None: continue
+        kind, printed, target = rc
+        if kind == "grep":
+            for line in c["result"].split("\n"):
+                for pre in (printed + ":", printed + "-"):
+                    if line.startswith(pre) and re.match(r"^\d+%s" % re.escape(pre[-1]), line[len(pre):]):
+                        line = line[len(pre):]; break
+                m = re.match(r"^(\d+)[:-]", line)
+                if m: mark(target, m.group(1))
+            continue
         for m in NUMBERED_LINE_RE.finditer(c["result"]):
             rest = c["result"][m.end():].split("\n", 1)[0].strip()
-            if rest and _same_file(rest, target): continue  # 'wc -l' style "N path": a count, not line N
+            if rest and (_norm_path(rest) == _norm_path(printed) or _norm_path(rest, None, ws) == target):
+                continue  # 'wc -l' style "N path": a count, not line N
             mark(target, m.group(1))
     return seen
 
@@ -1028,15 +1209,16 @@ def outcome_evidence(crit, final, run=None):
                 "파일을 바꾸는 도구(write/edit 등) 호출 %s를 없애고 읽기 전용으로 작업하세요." % w)
     n = _min_count(crit)
     if n is not None and FILELINE_CRIT_RE.search(crit):
-        seen = lines_seen(run)
+        seen, ws = lines_seen(run), (run or {}).get("workspace")
         cites = sorted({(f, int(a), int(b) if b else int(a)) for f, a, b in FILELINE_RE.findall(final)})
-        shown = lambda f, ln: any(_same_file(f, g) for g in seen.get(ln, ()))
+        shown = lambda f, ln: _norm_path(f, None, ws) in seen.get(ln, ())
         ok_cites = [c for c in cites if shown(c[0], c[1]) and shown(c[0], c[2])]
         bad = [("%s:%d" % c[:2]) + ("-%d" % c[2] if c[2] != c[1] else "") for c in cites if c not in ok_cites]
         return ("file-lines", len(ok_cites) >= n,
                 "%d file:line citations whose lines appear in captured read results (need >= %d)%s" % (len(ok_cites), n,
                 ("; cited lines never shown by a tool: %s" % bad) if bad else ""),
-                "도구 결과(줄 번호가 붙은 read/grep 결과)에 실제로 나온 줄만 '경로:줄'(예: src/app.py:42)로 인용하세요. "
+                "그 파일 하나만 읽은 도구 호출(Read 도구, cat -n FILE, nl -ba FILE, grep -n PATTERN FILE)의 결과에 줄 번호와 "
+                "함께 나온 줄만 '경로:줄'(예: src/app.py:42)로 인용하세요. 경로는 읽은 경로와 정확히 같아야 합니다. "
                 "%d개 이상 필요 (현재 확인된 것 %d개). 없는 줄·읽지 않은 줄은 세지 않습니다." % (n, len(ok_cites)))
     if n is not None and re.search(r"출처|인용|링크|source|citation|cite|reference|url|link", crit, re.I):
         urls = sorted(set(_norm_url(u) for u in URL_RE.findall(final)))
