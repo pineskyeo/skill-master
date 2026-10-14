@@ -14,23 +14,77 @@ RESERVED_NAME_WORDS = ("anthropic", "claude")  # Claude skill authoring best pra
 COMPATIBILITY_MAX = 500
 REF_TOC_LINES = 100  # Claude best practices: reference files longer than 100 lines get a table of contents
 MIN_EVALS = 3        # Claude best practices checklist: "At least three evaluations created"
+DESCRIPTION_MAX = 1024  # spec + best practices: description "Max 1024 characters"
+DESCRIPTION_MIN = 20    # house rule: the spec only requires non-empty
+# Spec: description "Should describe ... when to use it". Any verb form counts (Use when / Used when / Use this skill when).
+DESC_WHEN_RE = re.compile(r"\b(use when|when|use for|use this)\b|할 때|때 사용|경우", re.I)
+# Best practices: "Always write in third person" (avoid "I can help you...", "You can use this...").
+# Explicit pronouns only: Korean often drops the subject, so pronoun-less first/second person is not detected.
+DESC_PERSON_RE = re.compile(
+    r"(?<![\w/])I(?![\w/-])"  # 'I', "I'm" (not 'I/O')
+    r"|\b(?:[Mm]e|[Mm]y|[Mm]ine|[Ww]e|[Oo]ur|[Oo]urs|[Uu]s|[Yy]ou|[Yy]our|[Yy]ours|[Yy]ourself|[Yy]ourselves)\b"
+    r"|(?<!\w)(?:저는|제가|저희|나는|내가|우리는|우리가|우리의|당신|너는|네가|여러분)")
 
 # ---------- frontmatter (minimal YAML subset) ----------
+def _quoted_end(v):
+    """Index of the quote closing the quoted scalar that starts at v[0], or -1 if unterminated.
+    YAML: in "..." a backslash escapes the next character; in '...' a quote is escaped by doubling it ('')."""
+    q, i = v[0], 1
+    while i < len(v):
+        if q == '"' and v[i] == "\\":
+            i += 2; continue
+        if v[i] == q:
+            if q == "'" and v[i + 1:i + 2] == "'":
+                i += 2; continue
+            return i
+        i += 1
+    return -1
+
 def _strip_comment(v):
-    """Drop a trailing YAML comment: '#' preceded by whitespace outside quotes ends the value."""
+    """Drop a YAML comment: a '#' at the start of the value or preceded by whitespace (outside quotes)
+    starts a comment, so 'k: #x' is an empty (null) value, as in YAML."""
     v = v.strip()
     if v and v[0] in "\"'":
-        end = v.find(v[0], 1)
+        end = _quoted_end(v)
         if end > 0 and re.match(r"^\s+#", v[end + 1:]):
             return v[:end + 1]
         return v
+    if v.startswith("#"):
+        return ""
     m = re.search(r"\s#", v)
     return v[:m.start()].rstrip() if m else v
 
+# YAML 1.1 double-quoted escapes (PyYAML ScalarScanner.ESCAPE_REPLACEMENTS / ESCAPE_CODES)
+_DQ_ESCAPES = {"0": "\0", "a": "\a", "b": "\b", "t": "\t", "\t": "\t", "n": "\n", "v": "\v", "f": "\f", "r": "\r",
+               "e": "\x1b", " ": " ", '"': '"', "/": "/", "\\": "\\", "N": "\x85", "_": "\xa0",
+               "L": " ", "P": " "}
+_DQ_HEX = {"x": 2, "u": 4, "U": 8}
+
+def _unquote(v):
+    """(value, error) of a complete quoted scalar v (as returned by _strip_comment)."""
+    if v[0] == "'":
+        return v[1:-1].replace("''", "'"), None
+    out, i, s = [], 0, v[1:-1]
+    while i < len(s):
+        c = s[i]
+        if c != "\\":
+            out.append(c); i += 1; continue
+        e = s[i + 1:i + 2]
+        if e in _DQ_ESCAPES:
+            out.append(_DQ_ESCAPES[e]); i += 2
+        elif e in _DQ_HEX and re.match(r"^[0-9A-Fa-f]{%d}$" % _DQ_HEX[e], s[i + 2:i + 2 + _DQ_HEX[e]]):
+            out.append(chr(int(s[i + 2:i + 2 + _DQ_HEX[e]], 16))); i += 2 + _DQ_HEX[e]
+        else:
+            return None, "invalid escape '\\%s' in double-quoted value" % e
+    return "".join(out), None
+
 def _scalar(v):
+    """Python value of one scalar: None for empty/comment-only, unquoted string, inline list, or plain string."""
     v = _strip_comment(v)
-    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
-        return v[1:-1]
+    if not v:
+        return None
+    if v[0] in "\"'" and _quoted_end(v) == len(v) - 1:
+        return _unquote(v)[0]
     if v.startswith("[") and v.endswith("]"):
         return [_scalar(x) for x in v[1:-1].split(",") if x.strip()]
     return v
@@ -39,8 +93,15 @@ def _plain_scalar_error(v):
     """Why an unquoted value is not a valid YAML plain scalar for this subset (None if fine).
     A real YAML loader would reject or reinterpret these, so the frontmatter must quote them."""
     v = _strip_comment(v)
-    if not v or v[0] in "\"'":
+    if not v:
         return None
+    if v[0] in "\"'":
+        end = _quoted_end(v)
+        if end < 0:
+            return "unterminated %s-quoted value (multi-line quoted values are not supported here)" % v[0]
+        if end != len(v) - 1:
+            return "unexpected text after the closing %s quote" % v[0]
+        return _unquote(v)[1]
     if v.startswith("[") and v.endswith("]"):
         return None
     if ": " in v or v.endswith(":"):
@@ -174,9 +235,9 @@ FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 # CommonMark ATX heading: 0-3 spaces, 1-6 '#', then a space/tab or end of line; optional closing '#' sequence
 ATX_RE = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$")
 
-def _unfenced(text):
-    """text with fenced code blocks (``` or ~~~, CommonMark closing rules) removed."""
-    out, fence = [], None
+def _split_fences(text):
+    """(lines outside, lines inside) fenced code blocks (``` or ~~~, CommonMark closing rules); fence lines dropped."""
+    prose, code, fence = [], [], None
     for ln in text.splitlines():
         m = FENCE_RE.match(ln)
         if m:
@@ -184,8 +245,16 @@ def _unfenced(text):
             if fence is None: fence = mark
             elif mark[0] == fence[0] and len(mark) >= len(fence) and not rest.strip(): fence = None
             continue
-        if fence is None: out.append(ln)
-    return "\n".join(out)
+        (prose if fence is None else code).append(ln)
+    return prose, code
+
+def _unfenced(text):
+    """text with fenced code blocks removed."""
+    return "\n".join(_split_fences(text)[0])
+
+def _fenced(text):
+    """Lines inside fenced code blocks."""
+    return _split_fences(text)[1]
 
 def headings(text):
     """[(level, heading text)] of ATX headings outside fenced code."""
@@ -279,8 +348,14 @@ def name_errors(name):
     if not all(c.isalnum() or c == "-" for c in name): e.append("only letters, digits and '-' allowed")
     return e
 
+def _str_field(meta, key):
+    """meta[key] if it is a string, else "" (an empty 'key:' is None, which must not read as the text 'None';
+    non-string values are reported by field-types)."""
+    v = meta.get(key)
+    return v.strip() if isinstance(v, str) else ""
+
 def _common_name(r, meta, path):
-    name = unicodedata.normalize("NFKC", str(meta.get("name", "")).strip())
+    name = unicodedata.normalize("NFKC", _str_field(meta, "name"))
     ne = name_errors(name)
     r.add("name-format", "single-task", not ne,
           "name '%s' (skills-ref rules: NFKC, lowercase letters/digits/'-', <=%d)%s" % (name, NAME_MAX, (": %s" % ne) if ne else ""),
@@ -288,7 +363,7 @@ def _common_name(r, meta, path):
     folder = unicodedata.normalize("NFKC", os.path.basename(os.path.normpath(path)))
     r.add("name-matches-folder", "structure", name == folder,
           "name '%s' vs folder '%s'" % (name, folder), "frontmatter name을 폴더 이름 '%s'과 같게 맞추세요." % folder)
-    desc = str(meta.get("description", "")).strip()
+    desc = _str_field(meta, "description")
     r.add("description-present", "single-task", bool(desc), "description present",
           "무엇을 하는지와 언제 쓰는지를 담은 description을 추가하세요.")
     return name, desc
@@ -301,21 +376,47 @@ MD_LINK_RE = re.compile(r"\]\(\s*<?([^)\s>]+)>?(?:\s+[\"'][^)]*[\"'])?\s*\)")
 # whether written as a link, in inline code, or as plain text ("Run scripts/x.py").
 BUNDLED_REF_RE = re.compile(r"(?<![\w./\\-])((?:scripts|references|assets)[/\\][^\s`'\"()<>\[\]{}|,;]+)")
 GLOB_CHARS = set("*?")
+HANGUL = "ㄱ-ㆎ가-힣"
+# Korean particle/ending glued to a path that ends in a Latin letter, digit, ')' or closing '**'
+# ('scripts/clean.py를', '...py에서', '**scripts/x.py**를')
+KO_PARTICLE_RE = re.compile(r"(?<=[A-Za-z0-9)\]*])[%s]+$" % HANGUL)
+# Inside fenced code only run commands are references: an interpreter followed by a bundled-dir path
+# ('python scripts/x.py', '$ bash assets/setup.sh'), or direct execution of a script ('./scripts/x.sh', 'scripts/x.py').
+RUNNER = r"(?:sudo\s+)?(?:python[0-9.]*|bash|sh|zsh|node|deno\s+run|ruby|perl|Rscript|php|pwsh|uv\s+run(?:\s+python[0-9.]*)?)"
+_ARG = r"[^\s;&|<>'\"`]+"
+FENCED_RUN_RE = re.compile(r"^\s*(?:\$\s+)?(?:%s\s+(?:-\S+\s+)*(?:\./)?((?:scripts|references|assets)/%s)"
+                           r"|(?:\./)?(scripts/%s))" % (RUNNER, _ARG, _ARG))
+
+def _clean_bundled(t):
+    """Bundled-dir path with trailing prose removed (anchor, punctuation, emphasis '**', Korean particle);
+    None if what is left is a directory mention or a glob."""
+    t = t.split("#", 1)[0]
+    prev = None
+    while t != prev:
+        prev = t
+        t = KO_PARTICLE_RE.sub("", t.rstrip(".:!?*"))
+    if not t or t[-1] in "/\\" or GLOB_CHARS & set(t):
+        return None
+    return t
 
 def local_refs(text):
-    """Local file references in markdown, outside fenced code: every relative markdown link target, plus
-    bundled-dir paths (scripts/, references/, assets/) in inline code or plain text. URLs, #anchors, directory
-    mentions ('scripts/') and glob patterns ('assets/*.png') are not file references."""
-    text = _unfenced(text)
+    """Local file references in markdown: every relative markdown link target and bundled-dir path (scripts/,
+    references/, assets/) in inline code, **bold** or plain text outside fenced code, plus run commands inside
+    fenced code ('python scripts/x.py'). URLs, #anchors, directory mentions ('scripts/') and glob patterns
+    ('assets/*.png') are not file references."""
+    prose = _unfenced(text)
     refs = set()
-    for t in MD_LINK_RE.findall(text):
+    for t in MD_LINK_RE.findall(prose):
         t = t.split("#", 1)[0].split("?", 1)[0]
         if t and not SCHEME_RE.match(t):
             refs.add(t)
-    for t in BUNDLED_REF_RE.findall(text):
-        t = t.split("#", 1)[0].rstrip(".:!?")
-        if t[-1] not in "/\\" and not GLOB_CHARS & set(t):
-            refs.add(t)
+    found = BUNDLED_REF_RE.findall(prose)
+    for ln in _fenced(text):
+        m = FENCED_RUN_RE.match(ln)
+        if m: found.append(m.group(1) or m.group(2))
+    for t in found:
+        t = _clean_bundled(t)
+        if t: refs.add(t)
     return refs
 
 def _ref_problem(ref):
@@ -430,13 +531,22 @@ def check_skill(path):
     r.add("name-reserved", "single-task", not bad_words,
           "name has no reserved words %s" % (RESERVED_NAME_WORDS,) + (": contains %s" % bad_words if bad_words else ""),
           "name에서 예약어 %s를 빼세요." % bad_words, must=True)
-    r.add("description-length", "single-task", 20 <= len(desc) <= 1024,
-          "description length %d (20..1024)" % len(desc), "description을 20~1024자로 조정하세요.")
+    r.add("description-length", "single-task", 1 <= len(desc) <= DESCRIPTION_MAX,
+          "description length %d (1..%d)" % (len(desc), DESCRIPTION_MAX),
+          "description을 %d자 이하로 줄이세요(자세한 내용은 본문으로 옮기세요)." % DESCRIPTION_MAX, must=True)
+    r.add("description-min-length", "single-task", len(desc) >= DESCRIPTION_MIN,
+          "description length %d (>= %d, house rule)" % (len(desc), DESCRIPTION_MIN),
+          "무엇을 하는지와 언제 쓰는지가 드러나게 description을 %d자 이상으로 쓰세요." % DESCRIPTION_MIN)
     r.add("description-no-xml", "single-task", "<" not in desc and ">" not in desc,
           "description has no XML tags / angle brackets", "description에서 '<', '>'(XML 태그)를 빼세요.", must=True)
-    r.add("description-when", "single-task",
-          bool(re.search(r"\b(use when|when|use for|use this)\b|할 때|때 사용|경우", desc, re.I)),
-          "description says WHEN to use", "description에 'Use when ...'(언제 쓰는지) 문장을 추가하세요.")
+    r.add("description-when", "single-task", bool(DESC_WHEN_RE.search(desc)),
+          "description says WHEN to use (any verb form: 'Use when', 'Used when', 'Use this skill when', '...할 때')",
+          "description에 언제 쓰는지(예: 'Use when ...', '...할 때 쓴다')를 추가하세요.", must=True)
+    pov = sorted(set(m.group(0) for m in DESC_PERSON_RE.finditer(desc)))
+    r.add("description-pov", "single-task", not pov,
+          "description has no first/second-person wording" + (": %s" % pov if pov else ""),
+          "description을 3인칭으로 쓰세요(예: 'I can help you...'/'You can use this...' 대신 'Processes Excel files...'). "
+          "1·2인칭 표현 %s를 빼세요." % pov, must=True)
     multi = len(re.findall(r"\b(and also|as well as|plus)\b|그리고 또|뿐만 아니라", desc, re.I))
     r.add("single-purpose", "single-task", multi == 0 and desc.count(";") < 2,
           "description focuses on one purpose", "여러 일을 나열하지 말고 스킬 하나에 작업 하나만 남기세요(나머지는 별도 스킬로 분리).")
@@ -547,11 +657,16 @@ def scenario_errors(s):
     return e
 
 def load_scenarios(path):
-    """Returns [(filename, data or None, errors)]; data is None when the JSON does not parse."""
+    """Returns [(filename, data or None, errors)]; data is None when the JSON does not parse
+    or the scenarios/ directory cannot be listed (e.g. PermissionError)."""
     d = os.path.join(path, "scenarios")
     out = []
     if os.path.isdir(d):
-        for f in sorted(os.listdir(d)):
+        try:
+            names = os.listdir(d)
+        except OSError as e:
+            return [("scenarios/", None, ["cannot list scenarios/: %s" % e])]
+        for f in sorted(names):
             if f.endswith(".json"):
                 raw, err = read_text(os.path.join(d, f))  # OSError / UnicodeDecodeError -> error, not a crash
                 if err:
@@ -571,7 +686,7 @@ def check_agent(path):
           "AGENT.md 첫 줄을 정확히 '---'로 시작하고, 'key: value' 매핑(name, description, goal, tools, success_criteria)으로 된 frontmatter를 '---'로 닫으세요.")
     meta = meta or {}
     _common_name(r, meta, path)
-    goal = str(meta.get("goal", "")).strip()
+    goal = _str_field(meta, "goal")
     r.add("goal-present", "goal", len(goal) >= 15, "goal stated (>=15 chars)", "에이전트가 끝내야 할 목표를 goal에 한 문장으로 쓰세요.")
     crit = [str(c) for c in as_list(meta.get("success_criteria"))]
     # same checkers as transcript grading: measurable iff an outcome checker recognizes the criterion.
@@ -843,10 +958,48 @@ def _same_file(a, b):
     a, b = _norm_path(a), _norm_path(b)
     return a == b or a.endswith("/" + b) or b.endswith("/" + a)
 
+SHELL_META_RE = re.compile(r"[|;&<>`$()]")
+
+def _numbered_read_target(cmd):
+    """The one file a shell command prints with its real line numbers, else None. Recognized: 'cat -n FILE'
+    (not -b/-s, which skip or squeeze lines) and 'nl -ba FILE' (optionally -w N). Pipes, redirects, several
+    files ('cat -n a b') and any other command (wc -l, head, grep, ...) are not attributable."""
+    if SHELL_META_RE.search(cmd): return None
+    try: toks = shlex.split(cmd)
+    except ValueError: return None
+    if not toks: return None
+    prog, args = os.path.basename(toks[0]), toks[1:]
+    files = [t for t in args if not t.startswith("-") or t == "-"]
+    flags = [t for t in args if t.startswith("-") and t != "-"]
+    if prog == "cat":
+        letters = "".join(f[1:] for f in flags if not f.startswith("--"))
+        longs = [f for f in flags if f.startswith("--")]
+        ok = ("n" in letters or "--number" in longs) and not set(letters) - {"n"} and not set(longs) - {"--number"}
+    elif prog == "nl":
+        if "a" in files and "-b" in flags:  # 'nl -b a FILE'
+            files.remove("a"); flags = ["-ba" if f == "-b" else f for f in flags]
+        if "-w" in flags and files and files[0].isdigit():  # 'nl -w 3 FILE'
+            files.pop(0); flags.remove("-w")
+        ok = "-ba" in flags and all(f == "-ba" or re.match(r"^-w\d+$", f) for f in flags)
+    else:
+        ok = False
+    return files[0] if ok and len(files) == 1 and files[0] != "-" else None
+
+def _numbered_call_target(inp):
+    """The single file a tool call read with line numbers: one path-key value (Read tool style) and/or recognized
+    numbering commands, all naming the same one file. None when no file, several files, or an unrecognized command."""
+    paths, cmds = _call_inputs(inp)
+    targets = set(_norm_path(p) for p in paths if p.strip())
+    for cmd in cmds:
+        t = _numbered_read_target(cmd)
+        if t is None: return None
+        targets.add(_norm_path(t))
+    return targets.pop() if len(targets) == 1 else None
+
 def lines_seen(run):
     """{line number: {file paths}} for lines a tool actually showed with their line numbers.
-    grep-style lines carry their own path (call results and top-level tool_results); numbered lines without a path
-    count only for a call's own result and are attributed to the paths in that call's input."""
+    grep-style lines carry their own path (call results and top-level tool_results). Numbered lines without a path
+    count only for a call's own result, and only when that call read exactly one file (_numbered_call_target)."""
     seen = {}
     if not run: return seen
     def mark(path, ln): seen.setdefault(int(ln), set()).add(path)
@@ -855,13 +1008,12 @@ def lines_seen(run):
             mark(path, ln)
     for c in run["calls"]:
         if not c["result"]: continue
-        paths, cmds = _call_inputs(c["input"])
-        for cmd in cmds:
-            try: paths += shlex.split(cmd)
-            except ValueError: paths += cmd.split()
-        paths = [p for p in paths if p and not p.startswith("-")]
-        for ln in NUMBERED_LINE_RE.findall(c["result"]):
-            for p in paths: mark(p, ln)
+        target = _numbered_call_target(c["input"])
+        if target is None: continue
+        for m in NUMBERED_LINE_RE.finditer(c["result"]):
+            rest = c["result"][m.end():].split("\n", 1)[0].strip()
+            if rest and _same_file(rest, target): continue  # 'wc -l' style "N path": a count, not line N
+            mark(target, m.group(1))
     return seen
 
 def outcome_evidence(crit, final, run=None):

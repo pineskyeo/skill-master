@@ -701,13 +701,14 @@ class TestSkillEvals(SkillMixin, unittest.TestCase):
 class TestCitedLinesExist(TmpMixin, unittest.TestCase):
     """P1: a file:line citation counts only if that line appears in a captured, line-numbered tool result."""
     DRILL = p("transcripts/code-reviewer-drill.json")
+    WS = p("transcripts/fixtures/drill-repo")  # frozen workspace the drill transcript reads (not this test file)
     def test_fixture_cites_real_lines(self):
         run, err = eva.load_transcript(self.DRILL)
         self.assertFalse(err)
         cites = eva.FILELINE_RE.findall(run["final"])
         self.assertGreaterEqual(len(cites), 3)
         for f, ln, _ in cites:
-            with open(p(f), encoding="utf-8") as fh: real = fh.read().splitlines()
+            with open(os.path.join(self.WS, f), encoding="utf-8") as fh: real = fh.read().splitlines()
             ln = int(ln); self.assertLessEqual(ln, len(real), (f, ln))
             shown = [res for res in run["results"] if ("%s:%d:" % (f, ln)) in res or ("%6d\t" % ln) in res]
             self.assertTrue(shown, (f, ln))
@@ -715,16 +716,20 @@ class TestCitedLinesExist(TmpMixin, unittest.TestCase):
     def drill_with_final(self, final):
         t = rjson(self.DRILL); t["final"] = final
         return eva.grade_transcript(CR, self.transcript(t))
+    def cited_file(self):
+        run, _ = eva.load_transcript(self.DRILL)
+        return eva.FILELINE_RE.findall(run["final"])[0][0]
     def test_nonexistent_lines_fail(self):
-        r = self.drill_with_final("tests/test_eva.py:99999, tests/test_eva.py:99998, tests/test_eva.py:99997 test 파일 변경 없음")
+        f = self.cited_file()
+        r = self.drill_with_final("%s:99999, %s:99998, %s:99997 test 파일 변경 없음" % (f, f, f))
         self.assertEqual(r.verdict, "FAIL")
         self.assertEqual(self.ids(r, "critical_failed"), {"criteria-file-lines", "expected-file-lines"})
-        self.assertIn("tests/test_eva.py:99999", next(c["reason"] for c in r.failed if c["id"] == "expected-file-lines"))
+        self.assertIn("%s:99999" % f, next(c["reason"] for c in r.failed if c["id"] == "expected-file-lines"))
     def test_wrong_line_numbers_fail(self):
         run, _ = eva.load_transcript(self.DRILL)
         good = sorted({int(ln) for _, ln, _ in eva.FILELINE_RE.findall(run["final"])})
         wrong = [ln + 1000 for ln in good]  # same file, lines the tools never showed
-        r = self.drill_with_final("test: " + ", ".join("tests/test_eva.py:%d" % ln for ln in wrong))
+        r = self.drill_with_final("test: " + ", ".join("%s:%d" % (self.cited_file(), ln) for ln in wrong))
         self.assertEqual(r.verdict, "FAIL")
         self.assertTrue({"criteria-file-lines", "expected-file-lines"} <= self.ids(r, "critical_failed"))
     def test_one_wrong_line_drops_below_floor(self):
@@ -794,7 +799,7 @@ class TestPlainTextRefs(SkillMixin, unittest.TestCase):
                        files={"scripts/run.py": "print(1)\n", "references/guide.md": "# G\n"})
         self.assertTrue(self.status(r, "refs-exist")); self.assertEqual(r.verdict, "PASS", r.failed)
     def test_not_references(self):
-        for body in ("```\nRun scripts/missing.py\n```\n", "~~~sh\npython references/missing.md\n~~~\n",
+        for body in ("```\nRun scripts/missing.py\n```\n", "~~~text\nwrote references/missing.md\n~~~\n",
                      "See https://example.org/scripts/missing.py\n", "Not ours: my-scripts/x.py and lib/scripts/y.py\n",
                      "Put helpers in scripts/ and docs in `references/`.\n", "Images: assets/*.png\n",
                      "Pattern scripts/<name>.py\n", "Heading [top](#example)\n"):
@@ -835,6 +840,247 @@ class TestAtxHeadings(unittest.TestCase):
         self.assertFalse(eva.has_section("####### Example\n", "example"))  # 7 '#' is not a heading
         self.assertTrue(eva.has_section("##\tExample ##\n", "example"))
         self.assertEqual(eva.headings("## Inputs ##\n#\n"), [(2, "Inputs"), (1, "")])
+
+def cites_ok(final, calls, n=1):
+    return eva.outcome_evidence("파일:줄 근거 %d개 이상" % n, final, run_of(calls))[1]
+
+class TestCitationSingleFile(unittest.TestCase):
+    """Round 3 (a): numbered lines count only for a call that read exactly one file."""
+    def test_cat_n_single_file_counts(self):
+        for cmd in ("cat -n src/a.py", "cat --number src/a.py", "nl -ba src/a.py", "nl -b a src/a.py", "nl -ba -w 3 src/a.py"):
+            calls = [{"tool": "bash", "input": {"command": cmd}, "result": "     5\tx = 1"}]
+            self.assertTrue(cites_ok("src/a.py:5", calls), cmd)
+            self.assertFalse(cites_ok("src/b.py:5", calls), cmd)
+        self.assertTrue(cites_ok("src/a.py:5", [{"tool": "bash", "input": "cat -n src/a.py", "result": "5\tx"}]))
+    def test_multi_file_cat_rejected(self):
+        calls = [{"tool": "bash", "input": {"command": "cat -n src/a.py src/b.py"}, "result": "     5\tx = 1\n     6\ty"}]
+        self.assertFalse(cites_ok("src/a.py:5", calls)); self.assertFalse(cites_ok("src/b.py:6", calls))
+        calls = [{"tool": "read_file", "input": {"paths": ["src/a.py", "src/b.py"]}, "result": "5\tx"}]
+        self.assertFalse(cites_ok("src/a.py:5", calls))
+        calls = [{"tool": "read_file", "input": {"path": "src/a.py", "command": "cat -n src/b.py"}, "result": "5\tx"}]
+        self.assertFalse(cites_ok("src/a.py:5", calls))
+    def test_wc_and_other_commands_rejected(self):
+        for cmd, res in (("wc -l src/a.py", "      42 src/a.py"), ("wc -l src/a.py src/b.py", "  42 src/a.py\n  7 src/b.py"),
+                         ("head -n 50 src/a.py", "42 x"), ("grep -c foo src/a.py", "42"),
+                         ("sed -n 40,45p src/a.py | cat -n", "     1\tx\n    42\ty"), ("cat -n src/a.py > out.txt", "42\tx"),
+                         ("cat -b src/a.py", "    42\tx"), ("cat -ns src/a.py", "    42\tx"), ("nl src/a.py", "    42\tx"),
+                         ("nl -ba -v 10 src/a.py", "    42\tx"), ("cat -n -", "42\tx"), ("cat -n 'src/a.py", "42\tx")):
+            calls = [{"tool": "bash", "input": {"command": cmd}, "result": res}]
+            self.assertFalse(cites_ok("src/a.py:42", calls), cmd)
+            self.assertFalse(cites_ok("src/a.py:7", calls), cmd)
+    def test_wc_style_line_on_path_tool_rejected(self):
+        calls = [{"tool": "wc", "input": {"path": "src/a.py"}, "result": "42 src/a.py"}]
+        self.assertFalse(cites_ok("src/a.py:42", calls))
+        calls = [{"tool": "read_file", "input": {"path": "src/a.py"}, "result": "42 return src/a.py"}]
+        self.assertTrue(cites_ok("src/a.py:42", calls))  # real content that merely mentions a path still counts
+    def test_grep_lines_with_paths_still_count_across_files(self):
+        calls = [{"tool": "bash", "input": {"command": "grep -n foo src/a.py src/b.py"}, "result": "src/a.py:3:foo\nsrc/b.py:9:foo"}]
+        self.assertTrue(cites_ok("src/a.py:3 src/b.py:9", calls, 2))
+        self.assertFalse(cites_ok("src/a.py:9", calls))
+
+class TestRefDetectionRound3(SkillMixin, unittest.TestCase):
+    """Round 3 (b): Korean particles, **bold** paths, run commands inside fenced code."""
+    def refs(self, body):
+        return eva.local_refs(body)
+    def test_korean_particles_stripped(self):
+        for body in ("scripts/clean.py를 실행한다.\n", "`scripts/clean.py`를 실행한다.\n", "scripts/clean.py에서 읽는다.\n",
+                     "scripts/clean.py가 만든다.\n", "scripts/clean.py로, 그다음\n", "scripts/clean.py와 references/g.md를 본다.\n"):
+            self.assertIn("scripts/clean.py", self.refs(body), body)
+            self.assertFalse(any(r != "scripts/clean.py" and r.startswith("scripts/") for r in self.refs(body)), body)
+        self.assertIn("references/g.md", self.refs("scripts/clean.py와 references/g.md를 본다.\n"))
+        r = self.skill(body="먼저 scripts/run.py를 실행하고 references/guide.md를 읽는다.\n",
+                       files={"scripts/run.py": "print(1)\n", "references/guide.md": "# G\n"})
+        self.assertTrue(self.status(r, "refs-exist"), r.failed)
+        self.assertFalse(self.status(self.skill(body="scripts/missing.py를 실행한다.\n"), "refs-exist"))
+    def test_korean_filename_kept(self):
+        self.assertIn("references/가이드.md", self.refs("references/가이드.md를 읽는다.\n"))
+    def test_bold_paths(self):
+        for body in ("Run **scripts/x.py** first.\n", "**scripts/x.py**를 실행\n", "*scripts/x.py*\n", "***scripts/x.py***.\n"):
+            self.assertEqual(self.refs(body), {"scripts/x.py"}, body)
+        self.assertFalse(self.status(self.skill(body="Run **scripts/missing.py**.\n"), "refs-exist"))
+        self.assertEqual(self.refs("**scripts/*.py** and **assets/**\n"), set())  # glob / directory stay non-refs
+    def test_run_commands_in_fences(self):
+        for line, ref in (("python scripts/x.py --in a.csv", "scripts/x.py"), ("python3 -u scripts/x.py", "scripts/x.py"),
+                          ("$ bash assets/setup.sh", "assets/setup.sh"), ("uv run python scripts/x.py", "scripts/x.py"),
+                          ("./scripts/run.sh arg", "scripts/run.sh"), ("scripts/run.sh", "scripts/run.sh"),
+                          ("  node scripts/x.js; echo ok", "scripts/x.js"), ("sudo python scripts/x.py", "scripts/x.py")):
+            for fence in ("```bash\n%s\n```\n", "~~~\n%s\n~~~\n"):
+                self.assertEqual(self.refs(fence % line), {ref}, (fence, line))
+        r = self.skill(body="```bash\npython scripts/missing.py\n```\n")
+        self.assertFalse(self.status(r, "refs-exist"))
+        self.assertIn("scripts/missing.py", next(c["reason"] for c in r.failed if c["id"] == "refs-exist"))
+        r = self.skill(body="```bash\npython scripts/x.py\n```\n", files={"scripts/x.py": "print(1)\n"})
+        self.assertTrue(self.status(r, "refs-exist"))
+    def test_non_run_fence_lines_ignored(self):
+        for body in ("```\n├── scripts/\n│   └── x.py\n```\n", "```\nsee scripts/x.py\n```\n", "```\ncat references/x.md\n```\n",
+                     "```\npython my-scripts/x.py\n```\n", "```\npython scripts/<name>.py\n```\n", "```\n# scripts/x.py\n```\n"):
+            self.assertEqual(self.refs(body), set(), body)
+
+def _fm(body):
+    return "---\n%s\n---\n" % body
+
+class TestYamlParity(unittest.TestCase):
+    """Round 3 (c): frontmatter values match a real YAML parser for '#'-leading values and escaped quotes."""
+    CASES = ['k: #comment', 'k:   # comment', 'k: "a \\"b\\" c"', 'k: "a \\"b\\" # c" # real comment',
+             "k: 'it''s'", "k: 'it''s # x' # c", 'k: "tab\\there"', 'k: "back\\\\slash"', 'k: "\\u00e9t\\u00e9"',
+             'k: "a#b"', 'k: a#b', 'k: "x" # c', 'k: plain # c', "k: '#not comment'", 'k: "#not comment"',
+             'k: "say \\"hi\\""', 'k: "\\x41"', 'k: "\\/"']
+    def test_scalar_values_match_pyyaml(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        for line in self.CASES:
+            want = yaml.safe_load(line)["k"]
+            meta, _, err = eva.parse_frontmatter_ex(_fm(line))
+            self.assertIsNone(err, line); self.assertEqual(meta["k"], want, line)
+            meta, _, err = eva.parse_frontmatter_ex(_fm("m:\n  " + line))
+            self.assertIsNone(err, line)
+            self.assertEqual(meta["m"]["k"], yaml.safe_load("m:\n  " + line)["m"]["k"], line)
+    def test_errors_match_pyyaml(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        for line in ('k: "unterminated', 'k: "a" b', "k: 'a' b", 'k: "bad \\q escape"', 'k: "a \\"'):
+            with self.assertRaises(yaml.YAMLError, msg=line): yaml.safe_load(line)
+            meta, _, err = eva.parse_frontmatter_ex(_fm(line))
+            self.assertIsNone(meta, line); self.assertTrue(err, line)
+    def test_hash_value_is_empty_description(self):
+        d = tempfile.mkdtemp()
+        try:
+            s = os.path.join(d, "x-skill"); os.makedirs(s)
+            wtext(os.path.join(s, "SKILL.md"), "---\nname: x-skill\ndescription: #TODO write this\n---\n# X\n")
+            r = eva.check(s)
+            self.assertIn("description-present", {c["id"] for c in r.critical_failed})
+        finally:
+            shutil.rmtree(d)
+    def test_escaped_quote_description(self):
+        meta, _, err = eva.parse_frontmatter_ex(_fm('description: "Fixes \\"smart\\" quotes. Use when text has them." # c'))
+        self.assertIsNone(err); self.assertEqual(meta["description"], 'Fixes "smart" quotes. Use when text has them.')
+
+class TestDescriptionChecks(SkillMixin, unittest.TestCase):
+    """Round 3 (e): first/second person, >1024 chars and missing 'when' are FAIL; verb form is free."""
+    def desc(self, d):
+        raw = GOOD_FM.format(name="word-count", extra="", body="").replace(
+            "description: Counts words in one text file. Use when the user wants a word count.", "description: %s" % d)
+        return self.skill(raw=raw)
+    def test_verb_forms_free(self):
+        for d in ("Counts words in one text file. Use when the user wants a word count.",
+                  "Count words in one text file. Use this skill when the user wants a word count.",
+                  "Word counting for one text file, used when the user wants a word count.",
+                  "한국어 글의 낱말 수를 센다. 사용자가 낱말 수를 물을 때 사용한다.",
+                  "Counts words (I/O safe). Use when the user wants a word count."):
+            r = self.desc(d); self.assertEqual(r.verdict, "PASS", (d, r.failed))
+    def test_person_wording_fails(self):
+        for d, word in (("I can help you count words. Use when asked.", "I"),
+                        ("You can use this to count words. Use when asked.", "You"),
+                        ("Counts words for your files. Use when asked.", "your"),
+                        ("We count words in a file. Use when asked.", "We"),
+                        ("Counts words in my notes. Use when asked.", "my"),
+                        ("Counts words. Use when you need a count.", "you"),
+                        ("I'll count words in a file. Use when asked.", "I"),
+                        ("제가 낱말 수를 세어 드립니다. 낱말 수를 물을 때 사용한다.", "제가"),
+                        ("당신의 글에서 낱말 수를 센다. 낱말 수를 물을 때 사용한다.", "당신"),
+                        ("우리는 낱말 수를 센다. 낱말 수를 물을 때 사용한다.", "우리는")):
+            r = self.desc(d)
+            self.assertEqual(r.verdict, "FAIL", d)
+            self.assertIn("description-pov", self.ids(r, "critical_failed"), d)
+            self.assertIn(word, next(c["reason"] for c in r.failed if c["id"] == "description-pov"), d)
+    def test_third_person_words_not_flagged(self):
+        for d in ("Converts US dollars and measures hours of usage. Use when asked.", "Reads README.md. Use when asked.",
+                  "문제가 있는 문서의 안내가 맞는지 본다. 사용자가 물을 때 사용한다.", "우리말 맞춤법을 고친다. 교정을 요청할 때 사용한다."):
+            self.assertTrue(self.status(self.desc(d), "description-pov"), d)
+    def test_over_1024_fails(self):
+        base = "Counts words in one text file. Use when the user wants a word count. "
+        ok = (base * 20)[:1024].strip()
+        self.assertLessEqual(len(ok), 1024)
+        self.assertTrue(self.status(self.desc(ok), "description-length"))
+        long = base * 20
+        r = self.desc(long.strip() + " more")
+        self.assertGreater(len(long.strip() + " more"), 1024)
+        self.assertEqual(r.verdict, "FAIL"); self.assertIn("description-length", self.ids(r, "critical_failed"))
+    def test_missing_when_fails(self):
+        r = self.desc("Counts words in one text file and prints the total.")
+        self.assertEqual(r.verdict, "FAIL"); self.assertEqual(self.ids(r, "critical_failed"), {"description-when"})
+    def test_min_length_is_scored_house_rule(self):
+        r = self.desc("Use when counting.")
+        c = next(c for c in r.checks if c["id"] == "description-min-length")
+        self.assertFalse(c["passed"]); self.assertFalse(c["must"])
+        self.assertNotIn("description-min-length", self.ids(r, "critical_failed"))
+
+class TestRound3Misc(SkillMixin, unittest.TestCase):
+    """Round 3 (f): empty description is not 'None', listdir errors, refs-one-level at spec level, fixture coupling."""
+    def test_empty_description_not_none_string(self):
+        for line in ("description:", "description: ", "description: # later", 'description: ""'):
+            raw = GOOD_FM.format(name="word-count", extra="", body="").replace(
+                "description: Counts words in one text file. Use when the user wants a word count.", line)
+            r = self.skill(raw=raw)
+            self.assertIn("description-present", self.ids(r, "critical_failed"), line)
+            self.assertNotIn("None", next(c["reason"] for c in r.checks if c["id"] == "description-length"), line)
+            self.assertEqual(r.verdict, "FAIL")
+        raw = GOOD_FM.format(name="word-count", extra="", body="").replace("name: word-count", "name:")
+        r = self.skill(raw=raw)
+        self.assertIn("name-format", self.ids(r, "critical_failed"))
+        self.assertIn("name ''", next(c["reason"] for c in r.checks if c["id"] == "name-format"))
+    def test_empty_agent_fields(self):
+        a = os.path.join(self.tmp, "a"); os.makedirs(a)
+        wtext(os.path.join(a, "AGENT.md"), "---\nname: a\ndescription:\ngoal:\ntools: [t]\n---\n")
+        r = eva.check(a)
+        self.assertTrue({"description-present", "goal-present"} <= self.ids(r))
+    def test_listdir_permission_error(self):
+        from unittest import mock
+        a = os.path.join(self.tmp, "code-reviewer"); shutil.copytree(CR, a)
+        real = os.listdir
+        def deny(d):
+            if os.path.basename(os.path.normpath(d)) == "scenarios": raise PermissionError(13, "Permission denied", d)
+            return real(d)
+        with mock.patch("eva.os.listdir", side_effect=deny):
+            r = eva.check(a)
+            self.assertEqual(r.verdict, "FAIL")
+            self.assertIn("scenarios-valid", self.ids(r, "critical_failed"))
+            self.assertIn("cannot list scenarios/", next(c["reason"] for c in r.failed if c["id"] == "scenarios-valid"))
+            rr = eva.grade_transcript(a, p("transcripts/code-reviewer-drill.json"))
+            self.assertEqual(rr.verdict, "FAIL"); self.assertIn("scenario-known", self.ids(rr, "critical_failed"))
+    def test_refs_one_level_matches_spec(self):
+        # spec: "Keep file references one level deep from SKILL.md" -> a referenced file's own file refs are a chain
+        r = self.skill(body="See [g](references/g.md).\n",
+                       files={"references/g.md": "# G\nRun scripts/x.py.\n", "scripts/x.py": "print(1)\n"})
+        self.assertFalse(self.status(r, "refs-one-level"))
+        c = next(c for c in r.checks if c["id"] == "refs-one-level")
+        self.assertFalse(c["must"])  # spec wording is a recommendation ("Keep", "Avoid"): scored, not [필수]
+        # not chains: links back to SKILL.md, to itself, anchors, URLs, files SKILL.md also references
+        r = self.skill(body="See [g](references/g.md) and run scripts/x.py.\n",
+                       files={"references/g.md": "# G\n[back](../SKILL.md) [self](g.md) [top](#g) https://x.org/a.md "
+                                                 "and scripts/x.py\n", "scripts/x.py": "print(1)\n"})
+        self.assertTrue(self.status(r, "refs-one-level"), r.failed)
+    def test_drill_fixture_not_coupled_to_test_file(self):
+        t = open(p("transcripts/code-reviewer-drill.json"), encoding="utf-8").read()
+        self.assertNotIn("test_eva.py", t)
+        run, _ = eva.load_transcript(p("transcripts/code-reviewer-drill.json"))
+        for f, _, _ in eva.FILELINE_RE.findall(run["final"]):
+            self.assertTrue(os.path.isfile(os.path.join(p("transcripts/fixtures/drill-repo"), f)), f)
+
+class TestDocsHouseRules(unittest.TestCase):
+    """Round 3 (d): README marks house rules (H) including refs-exist and the evals rule."""
+    def row(self, cid):
+        readme = open(p("README.md"), encoding="utf-8").read()
+        rows = [ln for ln in readme.splitlines() if ln.startswith("| `%s`" % cid)]
+        self.assertEqual(len(rows), 1, cid)
+        return [x.strip() for x in rows[0].strip("|").split("|")]
+    def test_house_rules_marked(self):
+        for cid in ("refs-exist", "evals-valid", "evals-count", "description-min-length", "description-when",
+                    "refs-path-depth", "version-format", "single-purpose"):
+            self.assertIn("H", [s.strip() for s in self.row(cid)[-1].split(",")], cid)
+    def test_spec_rules_not_marked_house(self):
+        for cid in ("refs-one-level", "description-length", "description-pov"):
+            self.assertNotIn("H", [s.strip() for s in self.row(cid)[-1].split(",")], cid)
+    def test_must_markers(self):
+        for cid in ("description-length", "description-when", "description-pov"):
+            self.assertIn("[필수]", self.row(cid)[0], cid)
+        for c in eva.check(p("golden/skills/pdf-summarizer")).checks:
+            if c["id"] in ("description-length", "description-when", "description-pov"):
+                self.assertTrue(c["must"], c["id"])
 
 if __name__ == "__main__":
     unittest.main()

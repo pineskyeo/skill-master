@@ -48,10 +48,10 @@ python3 -m unittest discover -s tests -v                # 테스트
 ├── scripts/            # 선택: 실행 코드
 ├── references/         # 선택: 필요할 때 읽는 문서
 ├── assets/             # 선택: 템플릿, 데이터
-└── evals/evals.json    # 에바 필수: skill-creator 형식 평가셋
+└── evals/evals.json    # 에바 필수(H, 명세에는 없음): skill-creator 형식 평가셋
 ```
 - frontmatter 필드는 `name`, `description`, `license`, `compatibility`, `metadata`, `allowed-tools`만 쓸 수 있습니다. 그 밖의 필드(예: 예전의 `inputs:`/`outputs:`)는 `frontmatter-fields` [필수] 실패입니다. 입출력은 본문 `## Inputs`/`## Outputs`에 씁니다.
-- frontmatter는 YAML이어야 합니다. 첫 줄과 닫는 줄은 정확히 `---`입니다(H: skills-ref는 `---`로 시작하고 다음 `---`까지를 읽음). 그 사이는 `key: value` 매핑이고, 키는 중복될 수 없습니다. 들여쓰기에는 공백만 씁니다(탭 금지). 값에 `: `가 들어가거나 값이 YAML 기호(`&`, `*`, `!`, `{`, `@` 등)로 시작하면 YAML 오류이므로 따옴표로 감쌉니다. 공백 뒤 `#`은 YAML 주석이라 값이 거기서 끝납니다(오류 아님, YAML과 동일).
+- frontmatter는 YAML이어야 합니다. 첫 줄과 닫는 줄은 정확히 `---`입니다(H: skills-ref는 `---`로 시작하고 다음 `---`까지를 읽음). 그 사이는 `key: value` 매핑이고, 키는 중복될 수 없습니다. 들여쓰기에는 공백만 씁니다(탭 금지). 값에 `: `가 들어가거나 값이 YAML 기호(`&`, `*`, `!`, `{`, `@` 등)로 시작하면 YAML 오류이므로 따옴표로 감쌉니다. 공백 뒤 `#`과 값 맨 앞의 `#`은 YAML 주석이라 값이 거기서 끝납니다(오류 아님, YAML과 동일). 그래서 `description: # TODO`는 빈 값(null)이고 `description-present` 실패입니다. 따옴표 값은 YAML처럼 읽습니다: `"..."` 안의 `\"`, `\\`, `\n`, `\uXXXX` 등 이스케이프를 풀고(모르는 이스케이프는 오류), `'...'` 안의 `''`는 `'` 하나입니다. 닫는 따옴표 뒤에 주석이 아닌 글자가 있거나 따옴표가 같은 줄에서 닫히지 않으면 오류입니다(여러 줄 따옴표 값은 지원하지 않음). 테스트에서 파서 결과를 PyYAML `safe_load`와 비교합니다.
 - metadata 값은 따옴표를 강제하지 않습니다. skills-ref는 strictyaml로 읽어 `version: 1.0`, `beta: yes` 같은 값도 문자열로 받습니다. 명세 예시처럼 `"1.0"`으로 감싸는 것을 권장하지만 검사하지는 않습니다.
 - `evals/evals.json` (skill-creator / agentskills.io 형식):
   ```json
@@ -62,7 +62,7 @@ python3 -m unittest discover -s tests -v                # 테스트
   `files`, `assertions`는 선택입니다. agentskills.io 문서는 `assertions`, skill-creator `schemas.md`는 `expectations`라고 써서 두 이름을 모두 받습니다.
 
 ## 스킬 평가 기준
-[필수]는 점수와 상관없이 하나라도 실패하면 FAIL입니다. 출처 표시: **S**=agentskills.io 명세, **V**=skills-ref / quick_validate 검증기, **B**=Anthropic 모범 사례, **C**=skill-creator / agentskills.io 평가 문서, **H**=자체 규칙(명세보다 엄격함).
+[필수]는 점수와 상관없이 하나라도 실패하면 FAIL입니다. 출처 표시: **S**=agentskills.io 명세, **V**=skills-ref / quick_validate 검증기, **B**=Anthropic 모범 사례, **C**=skill-creator / agentskills.io 평가 문서, **H**=자체 규칙(명세에 없거나 명세보다 엄격함. 다른 출처와 함께 적힌 H는 그 출처보다 엄격한 부분).
 
 | id | 내용 | 출처 |
 |---|---|---|
@@ -72,22 +72,24 @@ python3 -m unittest discover -s tests -v                # 테스트
 | `name-format` [필수] | skills-ref `_validate_name`과 같음: NFKC 정규화 후 1~64자, 소문자(`name == name.lower()`), 유니코드 글자·숫자(`str.isalnum()`)와 `-`만, `-`로 시작·끝나지 않음, `--` 없음. 참고: skill-creator quick_validate는 ASCII `^[a-z0-9-]+$`만 허용하므로 `한국어-교정` 같은 이름은 quick_validate에서는 실패합니다 | S, V |
 | `name-matches-folder` [필수] | NFKC(폴더 이름) = NFKC(name) | S, V |
 | `name-reserved` [필수] | name에 `anthropic`, `claude`가 들어가면 안 됨 | B |
-| `description-present` [필수] | description이 비어 있지 않음 | S |
+| `description-present` [필수] | description이 비어 있지 않은 문자열. `description:`처럼 값이 없으면(null) 문자열 `'None'`으로 치지 않고 실패 | S |
 | `description-no-xml` [필수] | description에 `<`, `>` 없음 | B, V |
-| `description-length` | 20~1024자 (명세는 1~1024자, 최소 20자는 자체 규칙) | S, H |
-| `description-when` | 언제 쓰는지 적음 ("Use when", "할 때" 등) | S, B |
+| `description-length` [필수] | 1~1024자. 1024자를 넘으면 FAIL | S, B |
+| `description-min-length` | 20자 이상 (명세는 비어 있지만 않으면 됨) | H |
+| `description-when` [필수] | 언제 쓰는지 적음. 동사 형태는 자유("Use when", "Used when", "Use this skill when", "…할 때", "경우"). 명세는 "Should describe … when to use it"(권장)이라 [필수]로 강제하는 것은 자체 규칙. 한국어 "…하면 쓴다" 같은 조건형은 아직 인식하지 않음 | S, B, H |
+| `description-pov` [필수] | 1·2인칭 표현 금지 (B: "Always write in third person", "I can help you…"·"You can use this…" 피하기). 영어 `I`, `me`, `my`, `mine`, `we`, `our`, `us`, `you`, `your`, `yourself`와 한국어 `저는`, `제가`, `저희`, `나는`, `내가`, `우리는/우리가/우리의`, `당신`, `너는`, `네가`, `여러분`을 찾음. 명령형("Use when …")은 허용. 주어를 생략한 한국어 1·2인칭은 찾지 못함 | B |
 | `single-purpose` | 여러 일을 나열하지 않음 | H |
 | `compatibility-length` [있으면 필수] | 1~500자 | S, V |
 | `inputs-declared`, `outputs-declared`, `example-present` | 본문 `## Inputs`, `## Outputs`, `## Example` 제목 (명세는 예시 섹션을 권장). 제목은 CommonMark ATX 규칙: 앞 공백 0~3칸, `#` 1~6개 뒤 공백·탭(또는 줄 끝). 코드 블록 안 제목은 무시 | S(권장), H |
 | `size-limit` | SKILL.md 500줄 미만, 20KB 이하 (20KB는 "본문 5000토큰 미만" 권장치를 대신하는 자체 기준) | S, B, H |
 | `refs-relative` | 참조는 스킬 폴더 기준 상대경로, 슬래시(`/`) 사용, 폴더 밖(`..`)이나 절대경로 금지 | S, B |
-| `refs-exist` | 참조한 파일이 실제로 있음. 참조 찾기: 코드 블록(```` ``` ````, `~~~`)을 먼저 빼고, ① 마크다운 링크의 상대경로, ② 인라인 코드나 일반 문장 속 `scripts/…`, `references/…`, `assets/…` 경로(예: "Run scripts/x.py")를 찾음. URL, `#앵커`, 폴더 언급(`scripts/`), 글로브(`assets/*.png`), `my-scripts/x`처럼 다른 단어에 붙은 경로는 참조가 아님 | S |
-| `refs-one-level` | SKILL.md가 링크한 파일이 다시 다른 파일을 링크하지 않음(참조 사슬 금지) | S, B |
+| `refs-exist` | 참조한 파일이 실제로 있음. 명세는 참조를 상대경로로 쓰라고만 하고 파일 존재 검사는 정하지 않으므로 자체 규칙. 참조 찾기: ① 코드 블록 밖 마크다운 링크의 상대경로, ② 코드 블록 밖 인라인 코드·`**굵게**`·일반 문장 속 `scripts/…`, `references/…`, `assets/…` 경로(예: "Run scripts/x.py", "`scripts/clean.py`를 실행" — 경로 끝에 붙은 한국어 조사와 `**`는 떼어 냄), ③ 코드 블록(```` ``` ````, `~~~`) 안에서는 실행 명령만: 인터프리터(`python`, `python3`, `bash`, `sh`, `zsh`, `node`, `deno run`, `ruby`, `perl`, `Rscript`, `php`, `pwsh`, `uv run`) 뒤의 번들 경로, 또는 줄 맨 앞 `./scripts/…`·`scripts/…` 직접 실행. URL, `#앵커`, 폴더 언급(`scripts/`), 글로브(`assets/*.png`), `my-scripts/x`처럼 다른 단어에 붙은 경로, 코드 블록 안의 실행 명령이 아닌 줄은 참조가 아님. `__밑줄 강조__`로 감싼 경로는 아직 인식하지 않음 | H |
+| `refs-one-level` | SKILL.md가 참조한 .md 파일이 SKILL.md가 직접 참조하지 않는 다른 파일을 다시 참조하지 않음(참조 사슬 금지). 명세 원문 "Keep file references one level deep from SKILL.md. Avoid deeply nested reference chains."와 B 원문 "All reference files should link directly from SKILL.md"를 옮긴 것이라 명세보다 엄격하지 않음. 권장 문구("Keep", "Avoid")라 [필수]가 아닌 점수 항목. SKILL.md 자신, 같은 파일, `#앵커`, URL로 가는 링크는 사슬이 아님 | S, B |
 | `refs-path-depth` | 참조 경로는 폴더 한 단계까지(`references/x.md`). 명세에는 없는 자체 규칙 | H |
 | `reference-toc` [해당 시] | SKILL.md가 링크한 100줄 넘는 .md 파일은 제목 바로 다음에 목차(`## Contents`/`## 목차`) | B |
 | `version-format` [있으면 필수] | `metadata.version`은 SemVer `x.y.z`. 자체 규칙이며, 명세 예시의 `"1.0"`은 여기서 실패함 | H |
-| `evals-valid` [필수] | `evals/evals.json`이 있고 위 형식을 따름: `skill_name` = name, `id` 정수 중복 없음, `prompt`·`expected_output` 문자열, `files`는 스킬 안에 실제로 있음, `assertions`/`expectations`는 문자열 목록 | C |
-| `evals-count` [필수] | 평가 케이스 3개 이상 | B ("At least three evaluations created"), C ("Start with 2-3 test cases") |
+| `evals-valid` [필수] | `evals/evals.json`이 있고 위 형식을 따름: `skill_name` = name, `id` 정수 중복 없음, `prompt`·`expected_output` 문자열, `files`는 스킬 안에 실제로 있음, `assertions`/`expectations`는 문자열 목록. 형식은 C, 파일이 반드시 있어야 하는 것은 자체 규칙(명세의 디렉터리 구조에 `evals/`는 없음) | C, H |
+| `evals-count` [필수] | 평가 케이스 3개 이상. 개수 근거는 B ("At least three evaluations created"), C ("Start with 2-3 test cases"), [필수]로 강제하는 것은 자체 규칙 | B, C, H |
 
 **판정**: 아래를 모두 만족하면 PASS입니다.
 1. 통과율(N/A 제외) 80% 이상 (`PASS_THRESHOLD`)
@@ -107,8 +109,8 @@ python3 -m unittest discover -s tests -v                # 테스트
 - **개선 반복 루프** (C): 실패한 assertion, 사람 피드백, 실행 기록을 LLM에 주고 SKILL.md 수정안을 받는 루프. 지금 `loop.py`는 정적 검사 피드백만 돌립니다.
 - **토큰 예산** (S): 메타데이터 약 100토큰, 본문 5000토큰 미만 권장. 토크나이저가 없어 바이트(20KB)로 대신합니다.
 - **모델별 테스트** (B): Haiku / Sonnet / Opus 각각으로 확인하기
-- **본문 작성 품질** (B): 3인칭 description, 시점에 따라 틀려질 정보 없음, 용어 일관성, 스크립트 오류 처리·상수 근거, MCP 도구 전체 이름(`Server:tool`) — 자동 검사 없음
-- **description 시점 규칙 충돌**: Anthropic 모범 사례는 "3인칭으로 쓰라"고 하고, agentskills.io description 최적화 문서는 "Use this skill when..." 같은 명령형을 권합니다. 어느 쪽을 검사할지는 정하지 않았습니다(확인 필요).
+- **본문 작성 품질** (B): 시점에 따라 틀려질 정보 없음, 용어 일관성, 스크립트 오류 처리·상수 근거, MCP 도구 전체 이름(`Server:tool`) — 자동 검사 없음
+- **description 시점**: 동사 형태(3인칭 "Processes…" / 명령형 "Use this skill when…")는 강제하지 않고 1·2인칭 대명사만 `description-pov`로 막습니다. 주어를 생략한 한국어 1·2인칭(예: "도와드릴게요")은 찾지 못합니다.
 
 ## [분리 예정] 에이전트 평가
 `agent master`로 옮길 때까지 동작은 그대로입니다.
@@ -117,8 +119,9 @@ python3 -m unittest discover -s tests -v                # 테스트
 - 정적 검사: goal, 측정 가능한 success_criteria, 시나리오 2개 이상·expected_outcome, tools 선언과 expected_tools ⊆ tools, `## Tools`, `## Memory & Handoff`, 2턴 이상 시나리오
 - `success-measurable` [필수]: success_criteria 중 자동 확인 가능한 것이 1개 이상. 자동 확인이 안 되는 기준(예: "모든 지적에 파일:줄 근거를 단다", "모든 주장에 출처를 단다")은 지우지 않고 그대로 두며, transcript 채점 때 needs-review로 나옵니다.
 - transcript 채점([필수]): `transcript-valid`, `agent-valid`, `scenario-known`, `only-declared-tools`, `expected-tools-called`, `outcome-keywords`, `no-answer-lookup`, 결과 검증(검증된 출처 URL 개수, 파일:줄 근거 개수, 파일 변경 0건, 글자 수, 비교표). 확인 가능한 조건이 하나도 없으면 `outcome-evidence` 실패. 형식은 LOOP.md 참고
-- 파일:줄 근거: 최종 답의 `경로:줄`(또는 `경로:시작-끝`)은 **그 줄이 도구 결과에 줄 번호와 함께 나왔을 때만** 셉니다. 인정하는 결과 형식: grep/rg `-n` 형식 `경로:줄:내용`(문맥 줄 `경로-줄-내용`, 어느 결과에 있어도 됨), 또는 `cat -n`/Read 도구 형식 `줄<탭|→|:|공백>내용`(그 호출의 `input`에 적힌 파일에만 해당, 호출에 붙은 `result`일 때만). 파일 이름만 나오거나 없는 줄(예: `:99999`)은 세지 않습니다.
-- 예시: `golden/agents`(2), `bad/agents`, `transcripts/`. 자동 검사를 모두 통과하고 needs-review가 남는 REVIEW 예시는 `research-followup-cited.json`, `code-reviewer-drill.json`. FAIL 예시는 `research-followup.json`, `bad/research-fabricated-urls.json`, `bad/code-reviewer-answer-lookup.json`
+- 파일:줄 근거: 최종 답의 `경로:줄`(또는 `경로:시작-끝`)은 **그 줄이 도구 결과에 줄 번호와 함께 나왔을 때만** 셉니다. 인정하는 결과 형식: grep/rg `-n` 형식 `경로:줄:내용`(문맥 줄 `경로-줄-내용`, 어느 결과에 있어도 됨), 또는 `cat -n`/Read 도구 형식 `줄<탭|→|:|공백>내용`(호출에 붙은 `result`일 때만). 줄 번호만 있는 결과는 **그 호출이 정확히 한 파일을 읽었을 때만** 그 파일에 귀속합니다: 경로 키(`path`, `file_path` 등) 하나, 또는 명령 `cat -n FILE`·`nl -ba FILE`(파이프·리다이렉트 없이 파일 하나). `cat -n a b`처럼 여러 파일, `cat -b`/`cat -s`·기본 `nl`(빈 줄 때문에 번호가 어긋남), `wc -l` 등 그 밖의 명령, 파이프(`sed -n 5,9p f | cat -n`)는 세지 않고, `줄 경로` 형태의 줄(`wc -l` 출력)도 세지 않습니다. 파일 이름만 나오거나 없는 줄(예: `:99999`)은 세지 않습니다.
+- `scenarios/` 폴더를 읽을 수 없으면(예: PermissionError) 예외로 죽지 않고 `scenarios-valid` 실패로 보고합니다.
+- 예시: `golden/agents`(2), `bad/agents`, `transcripts/`. `code-reviewer-drill.json`은 고정 픽스처 `transcripts/fixtures/drill-repo/tests/test_sample.py`의 줄을 인용합니다(테스트 코드가 바뀌어도 인용 줄이 어긋나지 않음). 자동 검사를 모두 통과하고 needs-review가 남는 REVIEW 예시는 `research-followup-cited.json`, `code-reviewer-drill.json`. FAIL 예시는 `research-followup.json`, `bad/research-fabricated-urls.json`, `bad/code-reviewer-answer-lookup.json`
 
 ### 판정: PASS / REVIEW / FAIL
 자동으로 판정할 수 없는 기준은 **needs-review**(사람 또는 모델 채점 필요)로 보고합니다. N/A로 조용히 빼거나 PASS로 치지 않습니다.
