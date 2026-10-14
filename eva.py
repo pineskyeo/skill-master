@@ -35,7 +35,7 @@ def parse_frontmatter(text):
             s = ln.strip()
             if block is not None:
                 meta[key] = (meta[key] + " " + s).strip()
-            elif re.match(r"^[A-Za-z_][\w-]*:\s*\S", s) and not isinstance(meta.get(key), list):
+            elif re.match(r"^[A-Za-z_][\w-]*:\s*\S", s) and not isinstance(meta.get(key), list) and not str(s).startswith("- "):
                 if not isinstance(meta.get(key), dict): meta[key] = {}
                 k2, v2 = s.split(":", 1); meta[key][k2.strip()] = _scalar(v2)
             elif s.startswith("- "):
@@ -50,7 +50,7 @@ def parse_frontmatter(text):
         if val in (">", "|", ">-", "|-"):
             meta[key] = ""; block = val
         elif val == "":
-            meta[key] = []
+            meta[key] = None
         else:
             meta[key] = _scalar(val)
     return meta, "\n".join(lines[end + 1:])

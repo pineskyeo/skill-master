@@ -49,7 +49,7 @@ class TestCommands(unittest.TestCase):
         d = os.path.join(self.tmp, "bad/skills/no-io-skill")
         self.assertEqual(eva.main(["feedback", d, "--round", "1"]), 1)
         self.assertIn("수정:", open(os.path.join(d, "FEEDBACK.md"), encoding="utf-8").read())
-        self.assertEqual(json.load(open(os.path.join(d, "FEEDBACK.json")))["verdict"], "FAIL")
+        self.assertEqual(json.loads(open(os.path.join(d, "FEEDBACK.json")).read())["verdict"], "FAIL")
     def test_index(self):
         eva.main(["index", self.tmp])
         reg = json.load(open(os.path.join(self.tmp, "registry.json")))
