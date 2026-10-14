@@ -117,13 +117,16 @@ python3 -m unittest discover -s tests -v                # 테스트 (pytest도 p
 ## 스킬 평가 하네스 (skill_eval.py)
 스킬을 실제 에이전트(Claude Code, Codex)로 실행해 **스킬 있음 vs 없음**(또는 새 버전 vs 이전 버전)을 비교합니다. `python3 skill_eval.py <명령> <skill>` 또는 `python3 eva.py eval <명령> <skill>`.
 
-**안전 장치(기본은 dry run)**: `--live`와 `--budget-usd`가 둘 다 없으면 어떤 CLI도 실행하지 않고 계획과 예상 비용만 출력합니다(작업 폴더도 만들지 않음). 실제 CLI를 띄우는 곳은 `live_exec` 하나이고, `main()`이 아래 조건을 모두 확인한 뒤에만 켭니다: ① `--budget-usd > 0`, ② (run·loop) 평가셋 검증 문제 0개, ③ `requirements`·`eval_set` 승인, ④ 모든 모델의 가격을 앎, ⑤ 예상 비용 ≤ 예산. 실행 중에도 실제 사용액(Claude는 `total_cost_usd`, 아니면 토큰×가격)이 예산에 닿으면 멈추고 `plan.json`의 `stopped`에 적습니다. Claude 실행에는 남은 예산을 `--max-budget-usd`로 넘깁니다. 채점자·pairwise 호출도 같은 예산에서 빠지며, 예산이 바닥나면 다음 채점 호출 전에 멈춥니다(`grade --live`는 채점 예상 비용이 예산을 넘으면 시작하지 않음).
+**안전 장치(기본은 dry run)**: `--live`와 `--budget-usd`가 둘 다 없으면 어떤 CLI도 실행하지 않고 계획과 예상 비용만 출력합니다(작업 폴더도 만들지 않음). 실제 CLI를 띄우는 곳은 `live_exec` 하나이고, `main()`이 아래 조건을 모두 확인한 뒤에만 켭니다. `run`·`loop`·`grade`·`calibrate`의 `--live`에 같은 조건이 걸립니다: ① 유한한 `--budget-usd > 0`, ② 평가셋 검증 문제 0개, ③ `requirements`·`eval_set` 승인, ④ 모든 모델의 가격을 앎(`--price`는 유한한 양수만, `--tokens`도 양수만), ⑤ (run·loop) preflight 문제 0개, ⑥ (run·loop) Codex의 호출당 최악 비용 상한이 예산 안, ⑦ 예상 비용 ≤ 예산.
+- **예상 비용의 근거**: `--live`일 때는 항상 검증된 평가셋 개수로 계산합니다. `--cases/--llm-cases/--trigger-queries`는 `estimate`·`plan` 전용이고 다른 명령에 주면 오류입니다. `grade --live`는 그 iteration 폴더에 실제로 있는 run 수(LLM 항목 있는 run + pairwise 짝)로, `calibrate --live`는 골든 예시 개수 × 채점 호출로, `loop --live`는 한 iteration 비용(+`--golden` 보정) × `--max-iterations`로 계산합니다.
+- **호출당 예산 제어(H)**: 실행 중 실제 사용액(Claude는 `total_cost_usd`, 아니면 토큰×가격, 둘 다 없으면 그 호출의 상한)을 예산에서 빼고, 예산이 모자라면 멈추고 `plan.json`의 `stopped`에 적습니다. Claude(실행·채점 모두)에는 남은 예산의 절반(`CLAUDE_CAP_HEADROOM` 0.5, 센트 내림)만 `--max-budget-usd`로 넘깁니다. CLI가 이 상한을 얼마나 넘을 수 있는지는 문서에서 확인하지 못해 여유를 둔 값입니다. 그 값이 $0.01 미만이면 호출하지 않습니다. **Codex는 호출당 상한 옵션이 없습니다.** 그래서 호출 전마다 최악 비용 상한(가정 토큰 × `WORST_CASE_FACTOR` 3 × 단가)이 남은 예산 안일 때만 호출합니다. 이 값은 추정 상한이지 **강제 상한이 아니며**, 실제 한 호출이 이보다 비쌀 수 있습니다(`--tokens`로 가정을 키우면 더 보수적).
+- `--claude-arg`·`--codex-arg`로 모델·예산을 바꾸는 플래그는 거부합니다: Claude `--model`, `--fallback-model`, `--max-budget-usd`, `--settings`; Codex `-m`, `--model`, `-p`, `--profile`, `--oss`, `-c/--config model…`. 가격은 `--claude-model`/`--codex-model` 기준이기 때문입니다.
 
 | 명령 | 하는 일 |
 |---|---|
 | `validate` | evals.json(항목 layer·check, pressure)과 trigger_evals.json(정확히 10+10) 검사 |
 | `estimate` | 예상 호출 수·토큰·비용 표. `--cases/--llm-cases/--trigger-queries`로 가상 개수, `--tokens KIND=IN,OUT`, `--price KEY=IN,OUT` |
-| `plan` | 검증 문제, 승인 상태, 오염 경고(preflight), 엔진·설정별 예시 명령, 예상 비용 (항상 dry run) |
+| `plan` | 검증 문제, 승인 상태, preflight 문제, 엔진·설정별 예시 명령, 예상 비용 (항상 dry run) |
 | `run --live --budget-usd X` | `iteration-N/` 하나 실행: 엔진 × 케이스 × 설정 × `--runs`(기본 3) + 트리거 쿼리 × `--runs` |
 | `grade` | 정적 검사 먼저 → (`--live`일 때) LLM yes/no 채점 + 블라인드 pairwise → human 항목은 `human_review.json` 큐. `--live` 없으면 정적 검사와 큐만 |
 | `calibrate --golden F --live` | 사람이 라벨 붙인 골든 예시로 LLM 채점자 일치율·Cohen's kappa 계산 → `calibration.json` |
@@ -160,10 +163,10 @@ python3 -m unittest discover -s tests -v                # 테스트 (pytest도 p
 **엔진 어댑터** (`Engine.command/parse/triggered`, 테스트에서는 `exec_fn`을 가짜로 바꿈)
 - Claude Code: `claude -p <prompt> --output-format stream-json --verbose --no-session-persistence --model M`. 스킬 있음 = `workdir/.claude/skills/<name>/`에 복사, 스킬 없음 = `--disable-slash-commands`(문서: "Disable all skills and commands for this session"). 트리거 = `Skill` 도구 호출의 `skill`이 이름과 같음(agentskills.io 예시 jq와 같은 기준) 또는 `.../skills/<name>/SKILL.md` Read(run_eval.py도 Read를 봄). 권한 모드는 넣지 않습니다. 스킬이 Bash 등을 써야 하면 `--claude-arg=--permission-mode --claude-arg=acceptEdits`, `--claude-arg=--allowedTools --claude-arg=Bash`처럼 직접 줍니다.
 - Codex: `codex exec --json --skip-git-repo-check --ephemeral --sandbox workspace-write <prompt>`. 스킬 있음 = `workdir/.agents/skills/<name>/`. 토큰은 `turn.completed.usage`(`reasoning_output_tokens`는 비용 상한 쪽으로 출력에 더함 — 과금 규칙은 확인 안 함). `-m`은 `--codex-model`을 줄 때만 붙입니다(공식 페이지에서 확인 못 함). **트리거 감지는 (추정)**: Codex 문서에 스킬 호출 이벤트가 없어, 항목에 `skills/<name>/SKILL.md`가 나오면 트리거로 봅니다. 첫 실제 실행에서 확인 필요.
-- preflight: 같은 이름 스킬이 `~/.claude/skills`, `~/.claude/plugins/**/skills`, `~/.agents/skills`에 있으면 경고합니다(사용자 레벨 사본이 실행에 섞일 수 있음). Codex의 without_skill에서 사용자 레벨 사본을 끄는 방법(`[[skills.config]] enabled = false`)은 설정 파일 수정이라 하네스가 하지 않습니다.
+- preflight(`run`·`loop --live`를 막음): 시험 중인 사본 말고 같은 이름 스킬을 엔진이 찾을 수 있으면 실행을 거부합니다. without_skill 실행에 섞이거나 with_skill 실행에서 두 사본이 나란히 보일 수 있기 때문입니다. 확인 위치 — Claude: `~/.claude/skills`, `~/.claude/plugins/**/skills`, 작업 폴더의 모든 상위 폴더의 `.claude/skills`. Codex: `~/.agents/skills`, 작업 폴더의 모든 상위 폴더의 `.agents/skills`(build-skills 문서), 그리고 `$CODEX_HOME/skills`·`~/.codex/skills`·`/etc/codex/skills`((추정) 위치 — 더 많이 볼수록 더 막을 뿐). 하네스는 임시 `HOME`/`CODEX_HOME`으로 격리하지 않습니다(로그인 정보도 그 아래에 있어 인증이 깨질 수 있음). 그 사본을 옮기거나 이름을 바꾸거나, 그런 폴더 밖에 `--workspace`를 두세요. 스킬이 `<repo>/.claude/skills/<name>/`에 있으면 기본 작업 폴더(옆 폴더)는 거부되므로 `--workspace`를 저장소 밖으로 주어야 합니다.
 
 **채점**
-- 순서: static(정규식·도구 호출·트리거·파일) → llm → human. LLM 채점자는 실행 모델과 **다른 모델**이어야 합니다(같으면 오류, Claude 실행 모델을 모르면 오류). 기본 실행 `claude-opus-5-5`, 채점 `claude-sonnet-5-5`. 채점은 `claude -p --json-schema ... --tools ""`로 도구 없이 yes/no와 근거를 받습니다.
+- 순서: static(정규식·도구 호출·트리거·파일) → llm → human. LLM 채점자는 그 iteration의 `plan.json`에 기록된 실행 모델과 **다른 모델**이어야 합니다(같으면 오류, Claude 실행 모델을 모르면 오류, `plan.json`이 없으면 오류 — `grade` 명령의 `--claude-model`은 보지 않음). 기본 실행 `claude-opus-5-5`, 채점 `claude-sonnet-5-5`. 채점은 `claude -p --json-schema ... --tools ""`로 도구 없이 yes/no와 근거를 받습니다.
 - pairwise: 엔진·케이스·run k마다 with_skill vs 기준 출력을 A/B로 보여 주고, 순서는 `random.Random(seed)`로 섞어 `comparison-<k>.json`에 `mapping`과 `seed`를 남깁니다(`--seed`로 재현).
 - human: `human_review.json`의 `passed`를 true/false로 채우고 `grade`를 다시 돌리면 grading.json에 반영됩니다. 채우기 전에는 pass_rate 분모에서 빠지고 `pending`으로 셉니다.
 - 집계: skill-creator `aggregate_benchmark.py`와 같은 통계(mean, 표본 stddev(n-1), min, max, 소수 4자리), delta는 `with_skill - 기준` 문자열(`"+0.50"`). 노트: 모든 설정에서 늘 통과/늘 실패하는 assertion, run 간 stddev ≥ 0.3(H)인 eval.
@@ -172,10 +175,10 @@ python3 -m unittest discover -s tests -v                # 테스트 (pytest도 p
 | 게이트 | 언제 필요 |
 |---|---|
 | `requirements` (`<workspace>/requirements.md`) | 항상 — 승인 없으면 `run --live`/`loop` 거부 |
-| `eval_set` (evals.json + trigger_evals.json) | 항상 — 같음 |
-| `iteration-N` 결과 | 문제가 있을 때만(`gate.json`의 `needs_approval`). 문제: ① 회귀 — with_skill 평균 pass_rate가 기준 설정보다 낮거나 이전 iteration보다 낮음(허용 오차 0, H), ② 채점자 일치율 < 0.8(H), ③ with_skill 실행의 static 검사 실패 |
+| `eval_set` (evals.json + trigger_evals.json + `evals[].files`의 모든 입력 파일) | 항상 — 같음. 입력 파일이 바뀌거나 없어져도 승인 무효 |
+| `iteration-N` 결과 | 문제가 있을 때만(`gate.json`의 `needs_approval`). 문제: ① 회귀 — with_skill 평균 pass_rate가 기준 설정보다 낮거나 이전 iteration보다 낮음(허용 오차 0, H), ② 채점자 일치율 < 0.8(H), ③ with_skill 실행의 static 검사 실패, ④ 미완료 — `stopped`(예산 등으로 조기 중단), `plan.json`의 기대 run 수(케이스 × 설정 × runs, 트리거 쿼리 × runs × 스킬 있는 설정)보다 채점된 run·트리거 run이 적음, `plan.json` 없음, ⑤ 실행 실패 — 오류가 난 eval run·트리거 run, ⑥ with_skill 트리거 기준 실패 쿼리, ⑦ 미채점 — LLM 항목 미채점, human 항목 리뷰 대기 |
 | `registration` | 마지막 iteration에 문제가 있을 때만 |
-보정을 안 했거나 LLM·human 항목이 남은 것은 문제가 아니라 노트로 표시합니다. `loop`는 최대 5회(`MAX_AUTO_ITERATIONS`, 넘기면 오류)이고, 5회 뒤에도 문제가 남으면 `needs-approval`로 끝납니다.
+보정을 안 한 것만 노트입니다. `loop`는 최대 5회(`MAX_AUTO_ITERATIONS`, 범위 밖이면 오류)이고, 5회 뒤에도 문제가 남으면 `needs-approval`로 끝납니다. 남은 문제가 human 리뷰 대기뿐이면 builder를 부르지 않고 `needs-human-review`로 끝납니다.
 
 **비용 추정**: 호출 수 = 실행(케이스 × 설정 2 × runs) + 트리거(쿼리 × runs × 스킬 있는 설정 수) + 채점(llm 항목 있는 케이스 × 설정 2 × runs) + pairwise(케이스 × runs), 엔진마다. 호출당 토큰은 **가정값**입니다(exec 60k/4k, trigger 25k/500, grader 12k/800, pairwise 16k/800 — 측정값 아님, 파일럿 뒤 `--tokens`로 교체). 입력 토큰은 전부 기본 입력 단가로 계산해 캐시 할인을 빼므로 상한 쪽 추정입니다. Claude 단가는 위 요금 페이지(2026-10-15)에서 옮긴 값이고, Codex/OpenAI 단가는 1차 출처로 확인하지 못해 넣지 않았습니다(`--price codex=IN,OUT` 필요, 없으면 `--live` 거부).
 

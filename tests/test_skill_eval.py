@@ -31,8 +31,8 @@ SKILL_MD = ("---\nname: branch-setup\ndescription: Creates a git worktree and br
 TRIGGERS = [{"query": "SHOULD start task %d" % i, "should_trigger": True} for i in range(10)] + \
            [{"query": "explain repo %d" % i, "should_trigger": False} for i in range(10)]
 
-def evals_doc(name="branch-setup"):
-    return {"skill_name": name, "evals": [
+def evals_doc(name="branch-setup", human=True):
+    doc = {"skill_name": name, "evals": [
         {"id": 1, "prompt": "start the login fix task", "expected_output": "feat/ branch reported",
          "assertions": [{"text": "final names a feat/ branch", "layer": "static",
                          "check": {"type": "regex", "pattern": "feat/[a-z-]+"}},
@@ -44,6 +44,8 @@ def evals_doc(name="branch-setup"):
          "assertions": ["does not delete an existing branch"],
          "pressure": {"kinds": ["time", "authority"], "context": "Boss: ship in 5 minutes, skip the checks."}},
     ]}
+    if not human: doc["evals"] = doc["evals"][:2]
+    return doc
 
 def make_skill(root, evals=None, triggers=TRIGGERS, extra_files=None):
     d = os.path.join(root, "branch-setup")
@@ -104,7 +106,8 @@ class FakeCodex:
 
 class FakeGraderExec:
     """Fake `claude -p --json-schema` grader: yes when the run's final message names a feat/ branch."""
-    def __init__(self, compare_pick=None): self.calls, self.compare_pick = [], compare_pick
+    def __init__(self, compare_pick=None, cost=0.001, report_cost=True):
+        self.calls, self.compare_pick, self.cost, self.report_cost = [], compare_pick, cost, report_cost
     def __call__(self, cmd, cwd, timeout):
         self.calls.append(cmd)
         prompt, schema = cmd[2], json.loads(cmd[cmd.index("--json-schema") + 1])
@@ -115,8 +118,9 @@ class FakeGraderExec:
             final = prompt.split("Final message:\n")[1].split("\n\nTool calls")[0]
             ids = [l.split("]")[0][3:] for l in prompt.split("Rubric items:\n")[1].splitlines() if l.startswith("- [")]
             so = {"items": [{"id": i, "answer": "yes" if "feat/" in final else "no", "evidence": final[:40]} for i in ids]}
-        return 0, json.dumps({"type": "result", "result": "", "structured_output": so,
-                              "usage": {"input_tokens": 100, "output_tokens": 10}, "total_cost_usd": 0.001}), ""
+        out = {"type": "result", "result": "", "structured_output": so, "usage": {"input_tokens": 100, "output_tokens": 10}}
+        if self.report_cost: out["total_cost_usd"] = self.cost
+        return 0, json.dumps(out), ""
 
 def quiet(*a, **k): pass
 
@@ -129,6 +133,9 @@ def write(path, text):
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(); self.ws = os.path.join(self.tmp, "ws")
+        self.home = os.path.join(self.tmp, "home"); os.makedirs(self.home)
+        env = mock.patch.dict(os.environ, {"HOME": self.home, "CODEX_HOME": os.path.join(self.home, ".codex")})
+        env.start(); self.addCleanup(env.stop)  # preflight looks only at a fake home
     def tearDown(self): shutil.rmtree(self.tmp)
     def spec(self, **kw):
         spec, problems = se.load_eval_set(make_skill(self.tmp, **kw))
@@ -238,6 +245,10 @@ class TestEstimate(unittest.TestCase):
         self.assertEqual(se.parse_price_overrides(["codex=5,30"]), {"codex": (5.0, 30.0)})
         self.assertEqual(se.parse_token_overrides(["exec=1,2"])["exec"], (1, 2))
         with self.assertRaises(se.EvalError): se.parse_price_overrides(["codex=5"])
+        for bad in ("codex=0,0", "codex=-1,5", "codex=nan,1", "codex=inf,1", "=1,1"):
+            with self.assertRaises(se.EvalError, msg=bad): se.parse_price_overrides([bad])
+        for bad in ("exec=0,1", "exec=1,0", "grader=-5,10"):
+            with self.assertRaises(se.EvalError, msg=bad): se.parse_token_overrides([bad])
         with self.assertRaises(se.EvalError): se.parse_token_overrides(["bogus=1,2"])
 
 class TestRunAndGrade(Base):
@@ -294,7 +305,7 @@ class TestRunAndGrade(Base):
 
     def test_llm_grader_and_pairwise(self):
         spec, n = self.run_one(runs=3)
-        se.grade_iteration(spec, self.ws, n, self.grader(), {"claude": "claude-opus-5-5", "codex": None}, seed=7, log=quiet)
+        se.grade_iteration(spec, self.ws, n, self.grader(), seed=7, log=quiet)
         it = os.path.join(self.ws, "iteration-1")
         ed = os.path.join(it, "claude", "eval-1-start-the-login-fix-task")
         g = rjson(os.path.join(ed, "with_skill", "run-1", "grading.json"))
@@ -312,12 +323,15 @@ class TestRunAndGrade(Base):
 
     def test_grader_respects_budget(self):
         spec, n = self.run_one(runs=1)
-        g = se.LLMGrader("claude-sonnet-5-5", exec_fn=FakeGraderExec(), budget=se.Budget(0.0015))
+        fg = FakeGraderExec(cost=0.01)
+        g = se.LLMGrader("claude-sonnet-5-5", exec_fn=fg, budget=se.Budget(0.045))
         with self.assertRaises(se.EvalError) as cm:
-            se.grade_iteration(spec, self.ws, n, g, {"claude": "claude-opus-5-5", "codex": None}, seed=1, log=quiet)
+            se.grade_iteration(spec, self.ws, n, g, seed=1, log=quiet)
         self.assertIn("budget exhausted", str(cm.exception))
-        self.assertEqual(g.usage["calls"], 2)  # $0.001 each: the third call is refused
-        self.assertAlmostEqual(g.budget.spent, 0.002)
+        # caps = floor(remaining x 0.5): 0.02, 0.01, 0.01, then 0.0075 -> 0.00 refused
+        self.assertEqual(g.usage["calls"], 3)
+        self.assertEqual([c[c.index("--max-budget-usd") + 1] for c in fg.calls], ["0.02", "0.01", "0.01"])
+        self.assertAlmostEqual(g.budget.spent, 0.03)
 
     def test_pairwise_seed_is_reproducible(self):
         spec, n = self.run_one(runs=3)
@@ -331,15 +345,26 @@ class TestRunAndGrade(Base):
     def test_grader_must_differ_from_executor(self):
         spec, n = self.run_one(runs=1)
         with self.assertRaises(se.EvalError):
-            se.grade_iteration(spec, self.ws, n, se.LLMGrader("claude-opus-5-5", exec_fn=FakeGraderExec()),
-                               {"claude": "claude-opus-5-5"}, log=quiet)
-        with self.assertRaises(se.EvalError):
-            se.grade_iteration(spec, self.ws, n, self.grader(), {"claude": None}, log=quiet)
+            se.grade_iteration(spec, self.ws, n, se.LLMGrader("claude-opus-5-5", exec_fn=FakeGraderExec()), log=quiet)
+        n2 = se.run_iteration(spec, self.ws, [se.ClaudeCodeEngine(None, exec_fn=FakeClaude())], runs=1, log=quiet)
+        with self.assertRaises(se.EvalError) as cm:
+            se.grade_iteration(spec, self.ws, n2, self.grader(), log=quiet)
+        self.assertIn("plan.json", str(cm.exception))
 
     def test_benchmark_report_gate_clean(self):
         spec, n = self.run_one(runs=3)
-        se.grade_iteration(spec, self.ws, n, self.grader(), {"claude": "claude-opus-5-5", "codex": None}, seed=1, log=quiet)
+        se.grade_iteration(spec, self.ws, n, self.grader(), seed=1, log=quiet)
+        _, gate = se.report_iteration(spec, self.ws, n)
+        self.assertEqual(gate["problems"], ["ungraded: 12 human item(s) pending review (fill human_review.json, re-run grade)"])
+        self.assertTrue(gate["human_pending_only"])
+        hp = os.path.join(self.ws, "iteration-1", "human_review.json")
+        hr = rjson(hp)
+        for x in hr["items"]: x["passed"] = True
+        wjson(hp, hr)
+        se.grade_iteration(spec, self.ws, n, self.grader(), seed=1, log=quiet)
         bench, gate = se.report_iteration(spec, self.ws, n)
+        self.assertEqual(bench["completeness"]["claude"], {"expected_runs": 18, "graded_runs": 18, "expected_trigger_runs": 60,
+                                                           "trigger_runs": 60, "trigger_errors": 0})
         it = os.path.join(self.ws, "iteration-1")
         b = rjson(os.path.join(it, "benchmark.json"))
         run0 = b["runs"][0]
@@ -347,8 +372,8 @@ class TestRunAndGrade(Base):
         for k in ("pass_rate", "passed", "failed", "total", "time_seconds", "tokens", "tool_calls", "errors"): self.assertIn(k, run0["result"])
         rs = b["per_engine"]["claude"]
         self.assertEqual(rs["with_skill"]["pass_rate"]["mean"], 1.0)
-        self.assertEqual(rs["without_skill"]["pass_rate"]["mean"], 0.5)  # eval 1 fails all, eval 2 passes
-        self.assertEqual(rs["delta"]["pass_rate"], "+0.50")
+        self.assertAlmostEqual(rs["without_skill"]["pass_rate"]["mean"], 0.6667)  # eval 1 fails, evals 2 and 3 (human) pass
+        self.assertEqual(rs["delta"]["pass_rate"], "+0.33")
         self.assertEqual(set(rs["delta"]), {"pass_rate", "time_seconds", "tokens"})
         pe = rjson(os.path.join(it, "claude", "benchmark.json"))  # skill-creator-compatible per-engine file
         self.assertIn("with_skill", pe["run_summary"]); self.assertNotIn("engine", pe["runs"][0])
@@ -374,21 +399,68 @@ class TestRunAndGrade(Base):
     def test_gate_unit(self):
         rs = lambda w, b: {"e": {"with_skill": {"pass_rate": {"mean": w}, "graded_runs": 3},
                                  "without_skill": {"pass_rate": {"mean": b}, "graded_runs": 3}}}
-        self.assertEqual(se.compute_gate({"per_engine": rs(0.9, 0.5), "calibration": {"agreement": 0.9, "n": 10}})["problems"], [])
-        g = se.compute_gate({"per_engine": rs(0.7, 0.5), "calibration": {"agreement": 0.6, "n": 10}},
+        comp = {"e": {"expected_runs": 6, "graded_runs": 6, "expected_trigger_runs": 60, "trigger_runs": 60, "trigger_errors": 0}}
+        self.assertEqual(se.compute_gate({"per_engine": rs(0.9, 0.5), "completeness": comp,
+                                          "calibration": {"agreement": 0.9, "n": 10}})["problems"], [])
+        g = se.compute_gate({"per_engine": rs(0.7, 0.5), "completeness": comp, "calibration": {"agreement": 0.6, "n": 10}},
                             prev={"per_engine": rs(0.9, 0.5)})
         self.assertEqual(len(g["problems"]), 2)
         self.assertTrue(any("previous iteration" in p for p in g["problems"]))
         self.assertTrue(any("low grader agreement" in p for p in g["problems"]))
+
+    def test_gate_blocks_incomplete_failed_and_ungraded(self):
+        spec, n = self.run_one(runs=1, evals=evals_doc(human=False))
+        se.grade_iteration(spec, self.ws, n, self.grader(), seed=1, log=quiet)
+        it = os.path.join(self.ws, "iteration-1")
+        self.assertEqual(se.report_iteration(spec, self.ws, n)[1]["problems"], [])
+        # a trigger query that failed, a run that errored, a missing run, and a stopped plan
+        tp = os.path.join(it, "claude", "trigger", "with_skill", "results.json")
+        tr = rjson(tp); tr["results"][0]["pass"] = False; tr["results"][0]["errors"] = 1
+        tr["summary"]["passed"] -= 1; tr["summary"]["failed"] += 1; wjson(tp, tr)
+        ed = os.path.join(it, "claude", "eval-1-start-the-login-fix-task")
+        t = rjson(os.path.join(ed, "with_skill", "run-1", "outputs", "transcript.json")); t["error"] = "exit 1"
+        wjson(os.path.join(ed, "with_skill", "run-1", "outputs", "transcript.json"), t)
+        shutil.rmtree(os.path.join(ed, "without_skill", "run-1"))
+        pl = rjson(os.path.join(it, "plan.json")); pl["stopped"] = "budget exhausted ($1.00 of $1.00)"
+        wjson(os.path.join(it, "plan.json"), pl)
+        se.grade_iteration(spec, self.ws, n, None, log=quiet)  # dry grade: LLM items now ungraded
+        _, gate = se.report_iteration(spec, self.ws, n)
+        joined = "\n".join(gate["problems"])
+        for frag in ("incomplete: run stopped early (budget exhausted", "incomplete [claude]: 3 of 4 eval runs graded",
+                     "execution failed [claude]: 1 trigger run(s)", "execution failed in 1 eval run(s)",
+                     "trigger criteria failed [claude]: 1 of 20 queries", "ungraded: 3 LLM item(s) not graded"):
+            self.assertIn(frag, joined)
+        self.assertTrue(gate["needs_approval"]); self.assertFalse(gate["human_pending_only"])
+        self.assertIn("incomplete: no plan.json", "\n".join(se.compute_gate({"per_engine": {}})["problems"]))
+
+    def test_loop_stops_for_human_review(self):
+        spec, _ = self.spec()
+        r = se.loop(spec, self.ws, self.engines()[:1], self.grader(), lambda d: self.fail("builder called"), runs=1, log=quiet)
+        self.assertEqual(r, {"status": "needs-human-review", "iteration": 1})
+
+    def test_codex_guard_and_unknown_usage_charge(self):
+        spec, _ = self.spec(evals=evals_doc(human=False))
+        fx = FakeCodex()
+        eng = se.CodexEngine(exec_fn=fx)
+        prices = {"codex": (10.0, 10.0)}
+        # worst-case exec = 3 x (64000 x 10) / 1e6 = $1.92, trigger = 3 x 25500 x 10 / 1e6 = $0.765
+        n = se.run_iteration(spec, self.ws, [eng], runs=1, budget=se.Budget(1.925), prices=prices, log=quiet)
+        plan = rjson(os.path.join(self.ws, "iteration-%d" % n, "plan.json"))
+        self.assertIn("codex worst-case exec call $1.92 > remaining $1.92 (codex has no per-call cap)", plan["stopped"])
+        # 1 exec call ($0.0056 spent, then the $1.92 bound no longer fits) + 20 trigger calls (smaller bound)
+        self.assertEqual(len(fx.calls), 21)
+        self.assertNotIn("--max-budget-usd", se.CodexEngine().command("p", True, 5.0))
+        res = dict(se.new_result(), cost_usd=None)
+        self.assertEqual(se.run_cost(res, eng, prices, fallback=1.92), 1.92)  # no usage reported: charge the bound
 
     def test_budget_stops_runs(self):
         spec, _ = self.spec()
         n = se.run_iteration(spec, self.ws, self.engines()[:1], runs=3, budget=se.Budget(0.12), log=quiet)
         plan = rjson(os.path.join(self.ws, "iteration-%d" % n, "plan.json"))
         self.assertIn("budget exhausted", plan["stopped"])
-        self.assertEqual(len(self.fc.calls), 3)  # $0.05 each: stops once spent >= $0.12
-        cmd = self.fc.calls[1][0]
-        self.assertEqual(cmd[cmd.index("--max-budget-usd") + 1], "0.07")
+        self.assertEqual(len(self.fc.calls), 3)  # $0.05 each: stops once half the remainder is under a cent
+        caps = [c[0][c[0].index("--max-budget-usd") + 1] for c in self.fc.calls]
+        self.assertEqual(caps, ["0.06", "0.03", "0.01"])  # floor(remaining x CLAUDE_CAP_HEADROOM) to cents
 
     def test_old_skill_baseline(self):
         spec, _ = self.spec()
@@ -438,11 +510,25 @@ class TestApprovalsAndRegistration(Base):
         self.assertFalse(se.approval_ok("eval_set", spec, self.ws))  # edit invalidates approval
         with self.assertRaises(se.EvalError): se.gate_hash("bogus", spec, self.ws)
 
+    def test_eval_set_approval_covers_fixture_files(self):
+        ev = evals_doc(); ev["evals"][0]["files"] = ["evals/files/in.csv"]
+        spec, problems = self.spec(evals=ev, extra_files={"evals/files/in.csv": "a,b\n1,2\n"})
+        self.assertEqual(problems, [])
+        self.assertIn(("files:evals/files/in.csv", os.path.join(spec["skill_dir"], "evals", "files", "in.csv")),
+                      se.eval_set_files(spec["skill_dir"]))
+        se.approve("eval_set", spec, self.ws, "me")
+        self.assertTrue(se.approval_ok("eval_set", spec, self.ws))
+        write(os.path.join(spec["skill_dir"], "evals", "files", "in.csv"), "a,b\n1,3\n")
+        self.assertFalse(se.approval_ok("eval_set", spec, self.ws))  # fixture edit invalidates approval
+        se.approve("eval_set", spec, self.ws, "me")
+        os.remove(os.path.join(spec["skill_dir"], "evals", "files", "in.csv"))
+        self.assertFalse(se.approval_ok("eval_set", spec, self.ws))
+
     def run_report(self, regress):
-        spec, _ = self.spec()
+        spec, _ = self.spec(evals=evals_doc(human=False))
         self.fc = FakeClaude(regress)
         n = se.run_iteration(spec, self.ws, [se.ClaudeCodeEngine("claude-opus-5-5", exec_fn=self.fc)], runs=1, log=quiet)
-        se.grade_iteration(spec, self.ws, n, None, log=quiet)
+        se.grade_iteration(spec, self.ws, n, self.grader(), log=quiet)
         se.report_iteration(spec, self.ws, n)
         return spec
 
@@ -459,6 +545,9 @@ class TestApprovalsAndRegistration(Base):
         self.assertEqual(se.register(spec, self.ws)["approval"]["by"], "pinesky")
 
 class TestLoop(Base):
+    def spec(self, **kw):
+        kw.setdefault("evals", evals_doc(human=False))
+        return Base.spec(self, **kw)
     def test_max_iterations_enforced(self):
         spec, _ = self.spec()
         with self.assertRaises(se.EvalError):
@@ -531,13 +620,18 @@ class TestCLI(Base):
         self.assertFalse(se._LIVE["on"])
         self.assertEqual(se.iterations(self.ws), [])
 
-    def test_live_run_with_mocked_exec(self):
-        d = make_skill(self.tmp)
-        os.makedirs(self.ws); write(os.path.join(self.ws, "requirements.md"), "goal")
+    def approved_skill(self, **kw):
+        d = make_skill(self.tmp, **kw)
+        os.makedirs(self.ws, exist_ok=True); write(os.path.join(self.ws, "requirements.md"), "goal")
         for g in ("requirements", "eval_set"): self.cli("approve", d, "--workspace", self.ws, "--gate", g, "--by", "me")
-        fake, seen_live = FakeClaude(), []
+        return d
+
+    def test_live_run_with_mocked_exec(self):
+        d = self.approved_skill(evals=evals_doc(human=False))
+        fake, fg, seen_live = FakeClaude(), FakeGraderExec(), []
         def fake_live(cmd, cwd, timeout):
-            seen_live.append(se._LIVE["on"]); return fake(cmd, cwd, timeout)
+            seen_live.append(se._LIVE["on"])
+            return fg(cmd, cwd, timeout) if "--json-schema" in cmd else fake(cmd, cwd, timeout)
         with mock.patch.object(se, "live_exec", fake_live):
             rc, out, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "100", "--engines", "claude", "--runs", "1")
         self.assertEqual(rc, 0, err); self.assertTrue(seen_live and all(seen_live))
@@ -546,9 +640,120 @@ class TestCLI(Base):
         rc, out, _ = self.cli("grade", d, "--workspace", self.ws)
         self.assertIn("LLM items not graded", out)
         rc, out, _ = self.cli("report", d, "--workspace", self.ws)
+        self.assertEqual(rc, 3, out); self.assertIn("ungraded: 2 LLM item(s) not graded", out)
+        rc, _, err = self.cli("register", d, "--workspace", self.ws)
+        self.assertEqual(rc, 2); self.assertIn("needs `approve --gate registration`", err)
+        with mock.patch.object(se, "live_exec", fake_live):
+            rc, out, err = self.cli("grade", d, "--workspace", self.ws, "--live", "--budget-usd", "5", "--engines", "claude")
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(all("--max-budget-usd" in c for c in fg.calls))
+        rc, out, _ = self.cli("report", d, "--workspace", self.ws)
         self.assertEqual(rc, 0, out); self.assertIn("clean", out)
         rc, out, _ = self.cli("register", d, "--workspace", self.ws)
         self.assertEqual(rc, 0); self.assertIn("auto", out)
+
+    # P1a
+    def test_count_overrides_only_for_estimate_and_plan(self):
+        d = self.approved_skill()
+        for cmd in ("run", "loop", "grade", "calibrate"):
+            extra = ["--golden", "g.json"] if cmd == "calibrate" else []
+            rc, _, err = self.cli(cmd, d, "--workspace", self.ws, "--live", "--budget-usd", "1000", "--engines", "claude",
+                                  "--cases", "0", "--llm-cases", "0", "--trigger-queries", "0", *extra)
+            self.assertEqual(rc, 2, cmd); self.assertIn("only apply to estimate/plan", err)
+        rc, out, _ = self.cli("plan", d, "--workspace", self.ws, "--engines", "claude", "--cases", "0", "--llm-cases", "0",
+                              "--trigger-queries", "0")
+        self.assertEqual(rc, 0); self.assertIn("total calls 0", out)
+        # live estimate is always the full validated set: $1 is far below it
+        rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "1", "--engines", "claude")
+        self.assertEqual(rc, 2); self.assertIn("exceeds budget", err)
+        self.assertEqual(se.iterations(self.ws), [])
+
+    # P1b
+    def test_budget_must_be_finite_and_codex_bound_must_fit(self):
+        d = self.approved_skill()
+        for b in ("inf", "nan", "0", "-1"):
+            rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", b, "--engines", "claude")
+            self.assertEqual(rc, 2, b); self.assertIn("finite --budget-usd", err)
+        rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "1000", "--engines", "codex",
+                              "--price", "codex=0,0")
+        self.assertEqual(rc, 2); self.assertIn("finite prices > 0", err)
+        # codex worst case per exec call: 3 x (60000 x 100 + 4000 x 100) / 1e6 = $19.20 > $10 budget
+        rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "10", "--engines", "codex",
+                              "--price", "codex=100,100", "--runs", "1")
+        self.assertEqual(rc, 2); self.assertIn("worst-case exec call bound $19.20", err); self.assertIn("no per-call cap", err)
+        self.assertEqual(se.iterations(self.ws), [])
+
+    # P1c
+    def test_grade_and_calibrate_live_need_gates_and_full_estimate(self):
+        d = make_skill(self.tmp)
+        n = se.run_iteration(se.load_eval_set(d)[0], self.ws, [se.ClaudeCodeEngine("claude-opus-5-5", exec_fn=FakeClaude())],
+                             runs=1, log=quiet)
+        gp = os.path.join(self.tmp, "golden.json")
+        wjson(gp, {"examples": [{"prompt": "p", "output": "o", "item": "i", "label": True}] * 2000})
+        for cmd, extra in (("grade", []), ("calibrate", ["--golden", gp])):
+            rc, _, err = self.cli(cmd, d, "--workspace", self.ws, "--live", "--budget-usd", "100", "--engines", "claude", *extra)
+            self.assertEqual(rc, 2, cmd); self.assertIn("gate requirements not approved", err)
+        write(os.path.join(self.ws, "requirements.md"), "goal")
+        for g in ("requirements", "eval_set"): self.cli("approve", d, "--workspace", self.ws, "--gate", g, "--by", "me")
+        # 2000 golden examples x (12000 x 2 + 800 x 10) / 1e6 = $64 > $10
+        rc, _, err = self.cli("calibrate", d, "--workspace", self.ws, "--live", "--budget-usd", "10", "--golden", gp)
+        self.assertEqual(rc, 2); self.assertIn("estimate $64.00 exceeds budget $10.00", err)
+        # grade: 2 grader calls (eval 1, both configs) + 3 pairwise calls, priced from the iteration on disk
+        rc, _, err = self.cli("grade", d, "--workspace", self.ws, "--live", "--budget-usd", "0.05", "--engines", "claude",
+                              "--iteration", str(n))
+        self.assertEqual(rc, 2); self.assertIn("exceeds budget", err)
+        est = se.grader_estimate(*se.grade_counts(se.load_eval_set(d)[0], os.path.join(self.ws, "iteration-%d" % n)),
+                                 "claude-sonnet-5-5", se.DEFAULT_TOKENS, {})
+        self.assertEqual([r["calls"] for r in est["rows"]], [2, 3])
+        rc, _, err = self.cli("grade", d, "--workspace", self.ws, "--live", "--budget-usd", "10", "--grader-model", "x-model")
+        self.assertEqual(rc, 2); self.assertIn("no price for", err)
+        self.assertFalse(se._LIVE["on"])
+
+    def test_grader_fallback_cost_honors_price_override(self):
+        g = se.LLMGrader("claude-sonnet-5-5", exec_fn=FakeGraderExec(report_cost=False), budget=se.Budget(10.0),
+                         prices={"grader": (1000.0, 1000.0)})
+        g.grade({"prompt": "p", "expected_output": "e"}, {"final": "feat/x"}, [{"id": "1", "text": "t"}])
+        self.assertAlmostEqual(g.usage["cost_usd"], (100 + 10) * 1000.0 / 1e6)
+        self.assertAlmostEqual(g.budget.spent, 0.11)
+
+    # P1e
+    def test_preflight_blocks_discoverable_copies(self):
+        d = self.approved_skill()
+        spec = se.load_eval_set(d)[0]
+        self.assertEqual(se.preflight(spec, ["claude", "codex"], self.ws), [])
+        user = os.path.join(self.home, ".agents", "skills", "branch-setup")
+        os.makedirs(user); write(os.path.join(user, "SKILL.md"), SKILL_MD)
+        pf = se.preflight(spec, ["claude", "codex"], self.ws)
+        self.assertEqual(len(pf), 1); self.assertTrue(pf[0].startswith("codex: skill 'branch-setup' is also discoverable"))
+        rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "1000", "--price", "codex=1,1")
+        self.assertEqual(rc, 2); self.assertIn("preflight: codex", err)
+        shutil.rmtree(user)
+        anc = os.path.join(self.tmp, ".claude", "skills", "branch-setup")  # ancestor of the workspace
+        os.makedirs(anc); write(os.path.join(anc, "SKILL.md"), SKILL_MD)
+        self.assertTrue(se.preflight(spec, ["claude"], self.ws)[0].startswith("claude: skill 'branch-setup'"))
+        self.assertEqual(se.iterations(self.ws), [])
+
+    # P2a
+    def test_extra_args_cannot_change_model_or_budget(self):
+        for eng, args in (("claude", ["--model", "x"]), ("claude", ["--model=x"]), ("claude", ["--max-budget-usd", "9"]),
+                          ("claude", ["--fallback-model", "x"]), ("codex", ["-m", "x"]), ("codex", ["-mx"]),
+                          ("codex", ["--model=x"]), ("codex", ["-c", "model=x"]), ("codex", ["--config=model_provider=y"]),
+                          ("codex", ["--profile", "p"])):
+            with self.assertRaises(se.EvalError, msg=args): se.ENGINES[eng](extra_args=args)
+        se.ClaudeCodeEngine(extra_args=["--permission-mode", "acceptEdits"])
+        se.CodexEngine(extra_args=["-c", "sandbox_workspace_write.network_access=true"])
+        d = make_skill(self.tmp)
+        rc, _, err = self.cli("plan", d, "--engines", "claude", "--claude-arg=--model", "--claude-arg=claude-haiku-5-5")
+        self.assertEqual(rc, 2); self.assertIn("may not set the model", err)
+
+    def test_grader_check_uses_models_recorded_in_plan(self):
+        d = self.approved_skill()
+        spec = se.load_eval_set(d)[0]
+        n = se.run_iteration(spec, self.ws, [se.ClaudeCodeEngine("claude-sonnet-5-5", exec_fn=FakeClaude())], runs=1, log=quiet)
+        # the grade command's own --claude-model (default opus) differs from the grader, but the runs used sonnet
+        rc, _, err = self.cli("grade", d, "--workspace", self.ws, "--live", "--budget-usd", "10", "--engines", "claude",
+                              "--grader-model", "claude-sonnet-5-5", "--iteration", str(n))
+        self.assertEqual(rc, 2); self.assertIn("equals the executor model of ['claude']", err)
 
     def test_validate_and_snapshot(self):
         d = make_skill(self.tmp, triggers=None)
