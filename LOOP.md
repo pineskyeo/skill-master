@@ -28,6 +28,8 @@ run.json 형식 (JSON 객체):
 - `tool_calls` 항목은 도구 이름 문자열, 또는 `{"tool": str, "input": str|object(선택), "result": str(선택)}` 객체. 그 밖의 필드나 타입은 형식 오류.
 - 도구 결과는 각 호출의 `result`에 붙이거나, 최상위 `tool_results`(문자열 목록)에 모아 둔다. 둘 다 써도 된다.
 - 출처 조건에서는 **도구 결과에 실제로 나온 URL만** 센다. 결과에 없는 URL(지어낸 URL)은 세지 않는다.
+- 파일:줄 근거는 **그 줄이 도구 결과에 줄 번호와 함께 나왔을 때만** 센다(grep `-n`의 `경로:줄:내용`, 또는 그 호출 `input`의 파일에 대한 `cat -n`/Read 형식 `줄<탭>내용`). 없는 줄은 세지 않는다.
+- 자동 확인이 안 되는 기준은 needs-review로 나오고, 자동 검사를 다 통과해도 판정은 PASS가 아니라 REVIEW(종료코드 3)다.
 - `workspace`가 있으면 그 밖의 절대경로 접근도 `no-answer-lookup` 위반이다.
 - 형식이 틀리면 `transcript-valid` [필수] 실패로 FAIL 보고서가 나온다(예외로 죽지 않음).
 

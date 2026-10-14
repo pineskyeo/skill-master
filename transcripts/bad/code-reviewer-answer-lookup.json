@@ -29,15 +29,35 @@
     "pattern": "^class Test",
     "path": "tests"
    },
-   "result": "tests/test_eva.py:12:class TestParser\ntests/test_eva.py:23:class TestGolden\ntests/test_eva.py:29:class TestBad"
+   "result": "tests/test_eva.py:19:class TestParser(unittest.TestCase):\ntests/test_eva.py:30:class TestGolden(unittest.TestCase):\ntests/test_eva.py:36:class TestBad(unittest.TestCase):\ntests/test_eva.py:54:class TestCommands(unittest.TestCase):\ntests/test_eva.py:84:class TestOutcomeEvidence(unittest.TestCase):\ntests/test_eva.py:99:class TestTranscriptOutcome(unittest.TestCase):\ntests/test_eva.py:128:class TestOptionalChecks(unittest.TestCase):\ntests/test_eva.py:154:class TestCategoryFloor(unittest.TestCase):\ntests/test_eva.py:175:class TestExitCodes(unittest.TestCase):\ntests/test_eva.py:183:class TestLoop(unittest.TestCase):\ntests/test_eva.py:215:class TestRequiredToolChecks(TmpMixin, unittest.TestCase):\ntests/test_eva.py:242:class TestCodeReviewer(TmpMixin, unittest.TestCase):\ntests/test_eva.py:289:class TestStaticMeasurable(TmpMixin, unittest.TestCase):\ntests/test_eva.py:314:class TestVerifiedCitations(TmpMixin, unittest.TestCase):\ntests/test_eva.py:342:class TestInputValidation(TmpMixin, unittest.TestCase):\ntests/test_eva.py:429:class TestFencedSections(unittest.TestCase):\ntests/test_eva.py:448:class TestNoAnswerLookup(TmpMixin, unittest.TestCase):\ntests/test_eva.py:487:class TestDocs(unittest.TestCase):\ntests/test_eva.py:525:class TestSkillSpecFrontmatter(SkillMixin, unittest.TestCase):\ntests/test_eva.py:617:class TestSkillSpecReferences(SkillMixin, unittest.TestCase):\ntests/test_eva.py:663:class TestSkillEvals(SkillMixin, unittest.TestCase):\ntests/test_eva.py:701:class TestCitedLinesExist(TmpMixin, unittest.TestCase):\ntests/test_eva.py:756:class TestNeedsReview(TmpMixin, unittest.TestCase):\ntests/test_eva.py:785:class TestPlainTextRefs(SkillMixin, unittest.TestCase):\ntests/test_eva.py:809:class TestScenarioReadErrors(TmpMixin, unittest.TestCase):\ntests/test_eva.py:826:class TestAtxHeadings(unittest.TestCase):"
   },
   {
    "tool": "read_file",
    "input": {
-    "path": "tests/test_eva.py"
+    "path": "tests/test_eva.py",
+    "offset": 30,
+    "limit": 5
    },
-   "result": "23 class TestGolden(unittest.TestCase): ...\n29 class TestBad(unittest.TestCase): ...\n61     def test_transcript_without_citations_fails(self): ..."
+   "result": "    30\tclass TestGolden(unittest.TestCase):\n    31\t    def test_all_golden_pass(self):\n    32\t        for u in eva.find_units(p(\"golden\")):\n    33\t            r = eva.check(u)\n    34\t            self.assertEqual(r.verdict, \"PASS\", (u, r.failed, r.category_failed))"
+  },
+  {
+   "tool": "read_file",
+   "input": {
+    "path": "tests/test_eva.py",
+    "offset": 36,
+    "limit": 4
+   },
+   "result": "    36\tclass TestBad(unittest.TestCase):\n    37\t    def failed(self, path):\n    38\t        r = eva.check(p(path)); self.assertEqual(r.verdict, \"FAIL\")\n    39\t        return {c[\"id\"] for c in r.failed}"
+  },
+  {
+   "tool": "read_file",
+   "input": {
+    "path": "tests/test_eva.py",
+    "offset": 68,
+    "limit": 4
+   },
+   "result": "    68\t    def test_transcript_without_citations_fails(self):\n    69\t        r = eva.grade_transcript(p(\"golden/agents/research-assistant\"), p(\"transcripts/research-followup.json\"))\n    70\t        self.assertEqual(r.verdict, \"FAIL\")\n    71\t        self.assertTrue({\"criteria-sources\", \"expected-table\"} <= {c[\"id\"] for c in r.failed})"
   }
  ],
- "final": "앞 턴에서 말한 test 폴더(tests/) 상세:\n- tests/test_eva.py:23 TestGolden — golden/ 아래 모든 단위가 PASS인지 확인\n- tests/test_eva.py:29 TestBad — bad/ 예시가 기대한 검사에서 FAIL하는지 확인\n- tests/test_eva.py:61 transcript 채점 — 출처 없는 실행 기록이 FAIL하는지 확인\n근거 위치는 grep으로 찾고 read_file로 확인했습니다. 파일은 수정하지 않았습니다."
+ "final": "앞 턴에서 말한 test 폴더(tests/) 상세:\n- tests/test_eva.py:30 TestGolden — golden/ 아래 모든 단위가 PASS인지 확인\n- tests/test_eva.py:36 TestBad — bad/ 예시가 기대한 검사에서 FAIL하는지 확인\n- tests/test_eva.py:68 transcript 채점 — 출처 없는 실행 기록이 FAIL하는지 확인\n근거 위치는 grep으로 찾고 read_file로 확인했습니다. 파일은 수정하지 않았습니다."
 }

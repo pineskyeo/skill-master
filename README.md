@@ -19,6 +19,9 @@
 - agentskills.io description 최적화(트리거 평가): https://agentskills.io/skill-creation/optimizing-descriptions.md
 - agentskills.io 문서 색인: https://agentskills.io/llms.txt
 - 참조 검증기 skills-ref: https://raw.githubusercontent.com/agentskills/agentskills/main/skills-ref/src/skills_ref/validator.py
+- skills-ref 파서: https://raw.githubusercontent.com/agentskills/agentskills/main/skills-ref/src/skills_ref/parser.py (`strictyaml`로 읽음, metadata 값은 `str()`로 바꿈)
+- strictyaml 파서(스칼라 타입 처리, flow/anchor/tag 금지): https://raw.githubusercontent.com/crdoconnor/strictyaml/master/strictyaml/parser.py
+- CommonMark ATX 제목 규칙: https://spec.commonmark.org/0.31.2/#atx-headings
 - Anthropic skill-creator: https://raw.githubusercontent.com/anthropics/skills/main/skills/skill-creator/SKILL.md
 - skill-creator 스키마(evals.json, grading.json): https://raw.githubusercontent.com/anthropics/skills/main/skills/skill-creator/references/schemas.md
 - skill-creator 검증기: https://raw.githubusercontent.com/anthropics/skills/main/skills/skill-creator/scripts/quick_validate.py
@@ -28,12 +31,12 @@
 
 ## 사용법
 ```
-python3 eva.py check golden/skills/pdf-summarizer        # 하나 검사 (PASS면 종료코드 0)
+python3 eva.py check golden/skills/pdf-summarizer        # 하나 검사 (종료코드: PASS 0, FAIL 1, REVIEW 3)
 python3 eva.py check <path> --json                      # JSON 출력
-python3 eva.py check-all golden                         # 폴더 전체 (하나라도 FAIL이거나 검사 대상이 0개면 종료코드 1)
+python3 eva.py check-all golden                         # 폴더 전체 (하나라도 FAIL이거나 검사 대상이 0개면 1, FAIL 없이 REVIEW가 있으면 3)
 python3 eva.py feedback <path> --round 1                # FEEDBACK.md / FEEDBACK.json 작성
 python3 eva.py index golden                             # INDEX.md / registry.json 생성
-python3 loop.py <path> --builder "<cmd>"                # 자동 피드백 루프 (LOOP.md, 빌더 실패 시 종료코드 2)
+python3 loop.py <path> --builder "<cmd>"                # 자동 피드백 루프 (LOOP.md, 빌더 실패 시 종료코드 2, REVIEW면 3)
 python3 eva.py check <agent> --transcript run.json      # [분리 예정] 에이전트 실행 기록 채점
 python3 -m unittest discover -s tests -v                # 테스트
 ```
@@ -48,7 +51,8 @@ python3 -m unittest discover -s tests -v                # 테스트
 └── evals/evals.json    # 에바 필수: skill-creator 형식 평가셋
 ```
 - frontmatter 필드는 `name`, `description`, `license`, `compatibility`, `metadata`, `allowed-tools`만 쓸 수 있습니다. 그 밖의 필드(예: 예전의 `inputs:`/`outputs:`)는 `frontmatter-fields` [필수] 실패입니다. 입출력은 본문 `## Inputs`/`## Outputs`에 씁니다.
-- frontmatter는 YAML이어야 합니다. 첫 줄과 닫는 줄은 정확히 `---`입니다. 그 사이는 `key: value` 매핑이고, 키는 중복될 수 없습니다. 들여쓰기에는 공백만 씁니다(탭 금지). 값에 `: `, ` #`가 들어가거나 값이 YAML 기호(`&`, `*`, `!`, `{`, `|`, `>`, `@` 등)로 시작하면 따옴표로 감쌉니다.
+- frontmatter는 YAML이어야 합니다. 첫 줄과 닫는 줄은 정확히 `---`입니다(H: skills-ref는 `---`로 시작하고 다음 `---`까지를 읽음). 그 사이는 `key: value` 매핑이고, 키는 중복될 수 없습니다. 들여쓰기에는 공백만 씁니다(탭 금지). 값에 `: `가 들어가거나 값이 YAML 기호(`&`, `*`, `!`, `{`, `@` 등)로 시작하면 YAML 오류이므로 따옴표로 감쌉니다. 공백 뒤 `#`은 YAML 주석이라 값이 거기서 끝납니다(오류 아님, YAML과 동일).
+- metadata 값은 따옴표를 강제하지 않습니다. skills-ref는 strictyaml로 읽어 `version: 1.0`, `beta: yes` 같은 값도 문자열로 받습니다. 명세 예시처럼 `"1.0"`으로 감싸는 것을 권장하지만 검사하지는 않습니다.
 - `evals/evals.json` (skill-creator / agentskills.io 형식):
   ```json
   {"skill_name": "<frontmatter name>",
@@ -64,9 +68,9 @@ python3 -m unittest discover -s tests -v                # 테스트
 |---|---|---|
 | `frontmatter` [필수] | `---`로 감싼 YAML 매핑 | S |
 | `frontmatter-fields` [필수] | 명세의 6개 필드만 허용 | S, V |
-| `field-types` [필수] | name·description·license·compatibility·allowed-tools는 비어 있지 않은 문자열, metadata는 문자열→문자열 매핑. YAML이 숫자·불리언·null·날짜로 읽을 값(예: `version: 1.0`)은 따옴표로 감싸야 함 | S, V |
-| `name-format` [필수] | 1~64자, `a-z0-9`와 `-`만, `-`로 시작·끝나지 않음, `--` 없음 | S, V |
-| `name-matches-folder` [필수] | name = 폴더 이름 | S, V |
+| `field-types` [필수] | name·description·compatibility·license·allowed-tools는 문자열, metadata는 문자열→문자열 매핑(목록·중첩 매핑 불가) (S). name·description·compatibility 값이 PyYAML에서 숫자·불리언·null·날짜로 읽히면(예: `name: 123`) 따옴표 필요 (V: quick_validate가 `yaml.safe_load` 후 `str`인지 검사). license·allowed-tools가 비어 있으면 실패 (H). metadata 값은 따옴표 강제 안 함 | S, V, H |
+| `name-format` [필수] | skills-ref `_validate_name`과 같음: NFKC 정규화 후 1~64자, 소문자(`name == name.lower()`), 유니코드 글자·숫자(`str.isalnum()`)와 `-`만, `-`로 시작·끝나지 않음, `--` 없음. 참고: skill-creator quick_validate는 ASCII `^[a-z0-9-]+$`만 허용하므로 `한국어-교정` 같은 이름은 quick_validate에서는 실패합니다 | S, V |
+| `name-matches-folder` [필수] | NFKC(폴더 이름) = NFKC(name) | S, V |
 | `name-reserved` [필수] | name에 `anthropic`, `claude`가 들어가면 안 됨 | B |
 | `description-present` [필수] | description이 비어 있지 않음 | S |
 | `description-no-xml` [필수] | description에 `<`, `>` 없음 | B, V |
@@ -74,10 +78,10 @@ python3 -m unittest discover -s tests -v                # 테스트
 | `description-when` | 언제 쓰는지 적음 ("Use when", "할 때" 등) | S, B |
 | `single-purpose` | 여러 일을 나열하지 않음 | H |
 | `compatibility-length` [있으면 필수] | 1~500자 | S, V |
-| `inputs-declared`, `outputs-declared`, `example-present` | 본문 `## Inputs`, `## Outputs`, `## Example` (명세는 예시 섹션을 권장) | S(권장), H |
+| `inputs-declared`, `outputs-declared`, `example-present` | 본문 `## Inputs`, `## Outputs`, `## Example` 제목 (명세는 예시 섹션을 권장). 제목은 CommonMark ATX 규칙: 앞 공백 0~3칸, `#` 1~6개 뒤 공백·탭(또는 줄 끝). 코드 블록 안 제목은 무시 | S(권장), H |
 | `size-limit` | SKILL.md 500줄 미만, 20KB 이하 (20KB는 "본문 5000토큰 미만" 권장치를 대신하는 자체 기준) | S, B, H |
 | `refs-relative` | 참조는 스킬 폴더 기준 상대경로, 슬래시(`/`) 사용, 폴더 밖(`..`)이나 절대경로 금지 | S, B |
-| `refs-exist` | 참조한 파일이 실제로 있음 | S |
+| `refs-exist` | 참조한 파일이 실제로 있음. 참조 찾기: 코드 블록(```` ``` ````, `~~~`)을 먼저 빼고, ① 마크다운 링크의 상대경로, ② 인라인 코드나 일반 문장 속 `scripts/…`, `references/…`, `assets/…` 경로(예: "Run scripts/x.py")를 찾음. URL, `#앵커`, 폴더 언급(`scripts/`), 글로브(`assets/*.png`), `my-scripts/x`처럼 다른 단어에 붙은 경로는 참조가 아님 | S |
 | `refs-one-level` | SKILL.md가 링크한 파일이 다시 다른 파일을 링크하지 않음(참조 사슬 금지) | S, B |
 | `refs-path-depth` | 참조 경로는 폴더 한 단계까지(`references/x.md`). 명세에는 없는 자체 규칙 | H |
 | `reference-toc` [해당 시] | SKILL.md가 링크한 100줄 넘는 .md 파일은 제목 바로 다음에 목차(`## Contents`/`## 목차`) | B |
@@ -104,7 +108,6 @@ python3 -m unittest discover -s tests -v                # 테스트
 - **토큰 예산** (S): 메타데이터 약 100토큰, 본문 5000토큰 미만 권장. 토크나이저가 없어 바이트(20KB)로 대신합니다.
 - **모델별 테스트** (B): Haiku / Sonnet / Opus 각각으로 확인하기
 - **본문 작성 품질** (B): 3인칭 description, 시점에 따라 틀려질 정보 없음, 용어 일관성, 스크립트 오류 처리·상수 근거, MCP 도구 전체 이름(`Server:tool`) — 자동 검사 없음
-- **name 유니코드 처리** (V): skills-ref는 NFKC 정규화 후 유니코드 소문자·숫자를 허용합니다. 에바는 명세 본문의 `a-z`, `0-9`(ASCII)만 허용해 더 엄격합니다.
 - **description 시점 규칙 충돌**: Anthropic 모범 사례는 "3인칭으로 쓰라"고 하고, agentskills.io description 최적화 문서는 "Use this skill when..." 같은 명령형을 권합니다. 어느 쪽을 검사할지는 정하지 않았습니다(확인 필요).
 
 ## [분리 예정] 에이전트 평가
@@ -112,8 +115,20 @@ python3 -m unittest discover -s tests -v                # 테스트
 - 에이전트: `<name>/AGENT.md` (frontmatter: name, description, goal, tools, success_criteria) + `scenarios/*.json`
   - 시나리오: `{"id": str, "turns": [{"user": str}, ...], "expected_tools": [str, ...], "must_include": [str, ...], "expected_outcome": str | [str, ...], "success_criteria"(선택): str | [str, ...]}`. 형식이 틀리면 `scenarios-valid` [필수] 실패
 - 정적 검사: goal, 측정 가능한 success_criteria, 시나리오 2개 이상·expected_outcome, tools 선언과 expected_tools ⊆ tools, `## Tools`, `## Memory & Handoff`, 2턴 이상 시나리오
+- `success-measurable` [필수]: success_criteria 중 자동 확인 가능한 것이 1개 이상. 자동 확인이 안 되는 기준(예: "모든 지적에 파일:줄 근거를 단다", "모든 주장에 출처를 단다")은 지우지 않고 그대로 두며, transcript 채점 때 needs-review로 나옵니다.
 - transcript 채점([필수]): `transcript-valid`, `agent-valid`, `scenario-known`, `only-declared-tools`, `expected-tools-called`, `outcome-keywords`, `no-answer-lookup`, 결과 검증(검증된 출처 URL 개수, 파일:줄 근거 개수, 파일 변경 0건, 글자 수, 비교표). 확인 가능한 조건이 하나도 없으면 `outcome-evidence` 실패. 형식은 LOOP.md 참고
-- 예시: `golden/agents`(2), `bad/agents`, `transcripts/`. PASS 예시는 `research-followup-cited.json`, `code-reviewer-drill.json`. FAIL 예시는 `research-followup.json`, `bad/research-fabricated-urls.json`, `bad/code-reviewer-answer-lookup.json`
+- 파일:줄 근거: 최종 답의 `경로:줄`(또는 `경로:시작-끝`)은 **그 줄이 도구 결과에 줄 번호와 함께 나왔을 때만** 셉니다. 인정하는 결과 형식: grep/rg `-n` 형식 `경로:줄:내용`(문맥 줄 `경로-줄-내용`, 어느 결과에 있어도 됨), 또는 `cat -n`/Read 도구 형식 `줄<탭|→|:|공백>내용`(그 호출의 `input`에 적힌 파일에만 해당, 호출에 붙은 `result`일 때만). 파일 이름만 나오거나 없는 줄(예: `:99999`)은 세지 않습니다.
+- 예시: `golden/agents`(2), `bad/agents`, `transcripts/`. 자동 검사를 모두 통과하고 needs-review가 남는 REVIEW 예시는 `research-followup-cited.json`, `code-reviewer-drill.json`. FAIL 예시는 `research-followup.json`, `bad/research-fabricated-urls.json`, `bad/code-reviewer-answer-lookup.json`
+
+### 판정: PASS / REVIEW / FAIL
+자동으로 판정할 수 없는 기준은 **needs-review**(사람 또는 모델 채점 필요)로 보고합니다. N/A로 조용히 빼거나 PASS로 치지 않습니다.
+| 판정 | 조건 | 종료코드 |
+|---|---|---|
+| FAIL | 자동 검사 하나라도 실패([필수] 실패, 점수 80% 미만, 카테고리 하한 미달, 자동 검사 0개) | 1 |
+| REVIEW | 자동 검사는 모두 통과했지만 needs-review 항목이 남음 | 종료코드 3 |
+| PASS | 자동 검사 모두 통과, needs-review 없음 | 0 |
+- needs-review 항목은 `status: "needs-review"`, `passed: null`이고 점수 분모에서 빠집니다. `--json` 출력의 `needs_review`에 id 목록이 나옵니다(id 예: `criteria-needs-review`, `expected-needs-review`).
+- 사람/모델 채점자가 needs-review 항목을 확인해야 최종 PASS로 볼 수 있습니다. 그 채점 결과를 기록하는 기능은 아직 없습니다.
 
 ### 정답 조회 무결성 검사 (`no-answer-lookup`, [필수])
 위 "정석" 원칙과는 다른, 실행 기록용 무결성 검사입니다. 에이전트가 문제를 직접 풀지 않고 정답을 찾아보면 FAIL입니다.

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Eva (에바): SKILL.md skill evaluator (agent checks are slated to move to a separate "agent master").
 stdlib only, Python 3.9+."""
-import argparse, json, os, posixpath, re, shlex, sys
+import argparse, json, os, posixpath, re, shlex, sys, unicodedata
 
 PASS_THRESHOLD = 0.8
 CATEGORY_FLOOR = 0.5  # every category with applicable checks needs >=1 pass and pass rate >= this
 SKILL_MAX_BYTES = 20000  # house proxy for the spec's "< 5000 tokens" body budget (tokens are not counted)
 SKILL_MAX_LINES = 500    # spec: "Keep your main SKILL.md under 500 lines" -> lines must be < 500
-NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+NAME_MAX = 64
 # agentskills.io/specification: the only frontmatter fields (skills-ref and skill-creator quick_validate reject others)
 SKILL_FIELDS = ("name", "description", "license", "compatibility", "metadata", "allowed-tools")
 RESERVED_NAME_WORDS = ("anthropic", "claude")  # Claude skill authoring best practices: name "cannot contain"
@@ -16,8 +16,19 @@ REF_TOC_LINES = 100  # Claude best practices: reference files longer than 100 li
 MIN_EVALS = 3        # Claude best practices checklist: "At least three evaluations created"
 
 # ---------- frontmatter (minimal YAML subset) ----------
-def _scalar(v):
+def _strip_comment(v):
+    """Drop a trailing YAML comment: '#' preceded by whitespace outside quotes ends the value."""
     v = v.strip()
+    if v and v[0] in "\"'":
+        end = v.find(v[0], 1)
+        if end > 0 and re.match(r"^\s+#", v[end + 1:]):
+            return v[:end + 1]
+        return v
+    m = re.search(r"\s#", v)
+    return v[:m.start()].rstrip() if m else v
+
+def _scalar(v):
+    v = _strip_comment(v)
     if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
         return v[1:-1]
     if v.startswith("[") and v.endswith("]"):
@@ -27,15 +38,13 @@ def _scalar(v):
 def _plain_scalar_error(v):
     """Why an unquoted value is not a valid YAML plain scalar for this subset (None if fine).
     A real YAML loader would reject or reinterpret these, so the frontmatter must quote them."""
-    v = v.strip()
+    v = _strip_comment(v)
     if not v or v[0] in "\"'":
         return None
     if v.startswith("[") and v.endswith("]"):
         return None
     if ": " in v or v.endswith(":"):
         return "':' inside an unquoted value is a YAML mapping indicator; quote the value"
-    if " #" in v:
-        return "' #' starts a YAML comment and truncates the value; quote the value"
     if v[0] in "@`":
         return "'%s' is a reserved YAML indicator; quote the value" % v[0]
     if v[0] in "&*!%{|>" or v == "-" or v.startswith("- ") or v.startswith("["):
@@ -46,7 +55,8 @@ def parse_frontmatter_ex(text):
     """Returns (meta dict or None, body, error). Supports scalars, inline lists, '- item' lists,
     one level of 'key: value' nesting, '>'/'|' blocks. Opening and closing lines must be exactly '---';
     every top-level line must be 'key: value' (a mapping) with unique keys. Indentation must use spaces
-    (YAML forbids tabs) and unquoted values must be valid YAML plain scalars (see _plain_scalar_error)."""
+    (YAML forbids tabs) and unquoted values must be valid YAML plain scalars (see _plain_scalar_error).
+    ' #' starts a comment, as in YAML."""
     lines = text.splitlines()
     if not lines or lines[0] != "---":
         return None, text, "first line must be exactly '---'"
@@ -94,7 +104,7 @@ def parse_frontmatter_ex(text):
         m = re.match(r"^([A-Za-z_][\w-]*):(?:\s+(.*))?$", ln)
         if not m:
             return err(n, "expected 'key: value' (frontmatter must be a mapping)")
-        key, val = m.group(1), (m.group(2) or "").strip()
+        key, val = m.group(1), _strip_comment(m.group(2) or "")
         if key in meta:
             return err(n, "duplicate key '%s'" % key)
         block = None
@@ -132,12 +142,12 @@ def yaml_typed_keys(text):
             m = re.match(r"^\s+(?:-\s+(.*)|([A-Za-z_][\w-]*):\s+(.*))$", ln)
             if not block and parent and m:
                 v = m.group(1) if m.group(1) is not None else m.group(3)
-                if _YAML_TYPED_RE.match(v.strip()):
+                if _YAML_TYPED_RE.match(_strip_comment(v)):
                     out.append(parent + ("[]" if m.group(1) is not None else "." + m.group(2)))
             continue
         m = re.match(r"^([A-Za-z_][\w-]*):(?:\s+(.*))?$", ln)
         if m:
-            parent, v = m.group(1), (m.group(2) or "").strip()
+            parent, v = m.group(1), _strip_comment(m.group(2) or "")
             block = v in (">", "|", ">-", "|-")
             if v and _YAML_TYPED_RE.match(v):
                 out.append(parent)
@@ -161,33 +171,52 @@ def as_list(v):
     return v if isinstance(v, list) else [v]
 
 FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+# CommonMark ATX heading: 0-3 spaces, 1-6 '#', then a space/tab or end of line; optional closing '#' sequence
+ATX_RE = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$")
 
-def has_section(body, *words):
-    """True if a markdown heading (outside fenced code blocks) contains any of words."""
-    fence = None
-    for ln in body.splitlines():
+def _unfenced(text):
+    """text with fenced code blocks (``` or ~~~, CommonMark closing rules) removed."""
+    out, fence = [], None
+    for ln in text.splitlines():
         m = FENCE_RE.match(ln)
         if m:
             mark, rest = m.group(1), m.group(2)
-            if fence is None:
-                fence = mark
-            elif mark[0] == fence[0] and len(mark) >= len(fence) and not rest.strip():
-                fence = None
+            if fence is None: fence = mark
+            elif mark[0] == fence[0] and len(mark) >= len(fence) and not rest.strip(): fence = None
             continue
-        if fence is None and ln.startswith("#") and any(w.lower() in ln.lower() for w in words):
-            return True
-    return False
+        if fence is None: out.append(ln)
+    return "\n".join(out)
+
+def headings(text):
+    """[(level, heading text)] of ATX headings outside fenced code."""
+    out = []
+    for ln in _unfenced(text).splitlines():
+        m = ATX_RE.match(ln)
+        if m: out.append((len(m.group(1)), (m.group(2) or "").strip()))
+    return out
+
+def has_section(body, *words):
+    """True if a markdown heading (outside fenced code blocks) contains any of words."""
+    return any(w.lower() in t.lower() for _, t in headings(body) for w in words)
 
 class Report:
-    """checks: passed True/False, or None for N/A (excluded from score and category floor)."""
+    """checks: status "pass"/"fail" (passed True/False), "n/a" (absent optional item) or "needs-review"
+    (criterion a machine cannot check; a human or model grader must). n/a and needs-review have passed None and are
+    excluded from score and category floor; any needs-review item turns an otherwise passing verdict into REVIEW."""
     def __init__(self, path, kind):
         self.path, self.kind, self.checks = path, kind, []
     def add(self, cid, category, ok, reason, fix="", must=False):
-        self.checks.append({"id": cid, "category": category, "passed": bool(ok),
+        self.checks.append({"id": cid, "category": category, "status": "pass" if ok else "fail", "passed": bool(ok),
                             "must": must or cid in CRITICAL, "reason": reason, "fix": "" if ok else fix})
     def na(self, cid, category, reason, must=False):
-        self.checks.append({"id": cid, "category": category, "passed": None,
+        self.checks.append({"id": cid, "category": category, "status": "n/a", "passed": None,
                             "must": must or cid in CRITICAL, "reason": "N/A: " + reason, "fix": ""})
+    def review(self, cid, category, reason, fix):
+        self.checks.append({"id": cid, "category": category, "status": "needs-review", "passed": None,
+                            "must": True, "reason": "needs-review: " + reason, "fix": fix})
+    @property
+    def needs_review(self):
+        return [c for c in self.checks if c["status"] == "needs-review"]
     @property
     def applicable(self):
         return [c for c in self.checks if c["passed"] is not None]
@@ -216,13 +245,18 @@ class Report:
                       if s["passed"] == 0 or s["passed"] / s["total"] < CATEGORY_FLOOR)
     @property
     def verdict(self):
+        """FAIL if any machine check fails; else REVIEW if a needs-review item remains; else PASS."""
         ok = self.applicable and self.score >= PASS_THRESHOLD and not self.critical_failed and not self.category_failed
-        return "PASS" if ok else "FAIL"
+        if not ok: return "FAIL"
+        return "REVIEW" if self.needs_review else "PASS"
     def to_dict(self):
         return {"path": self.path, "kind": self.kind, "score": self.score,
                 "threshold": PASS_THRESHOLD, "category_floor": CATEGORY_FLOOR,
                 "categories": self.categories, "category_failed": self.category_failed,
+                "needs_review": [c["id"] for c in self.needs_review],
                 "verdict": self.verdict, "checks": self.checks}
+
+EXIT_CODES = {"PASS": 0, "FAIL": 1, "REVIEW": 3}
 
 CRITICAL = {"frontmatter", "name-format", "name-matches-folder", "description-present",
             "goal-present", "tools-declared"}
@@ -232,11 +266,26 @@ def detect_kind(path):
     if os.path.isfile(os.path.join(path, "AGENT.md")): return "agent"
     return None
 
+def name_errors(name):
+    """Name rules exactly as skills-ref validator._validate_name: NFKC-normalized, 1..64 chars, lowercase,
+    Unicode letters/digits (str.isalnum) and '-' only, no leading/trailing '-', no '--'."""
+    if not name.strip():
+        return ["must be a non-empty string"]
+    e = []
+    if len(name) > NAME_MAX: e.append("exceeds %d characters (%d)" % (NAME_MAX, len(name)))
+    if name != name.lower(): e.append("must be lowercase")
+    if name.startswith("-") or name.endswith("-"): e.append("cannot start or end with '-'")
+    if "--" in name: e.append("cannot contain '--'")
+    if not all(c.isalnum() or c == "-" for c in name): e.append("only letters, digits and '-' allowed")
+    return e
+
 def _common_name(r, meta, path):
-    name = str(meta.get("name", ""))
-    r.add("name-format", "single-task", bool(NAME_RE.match(name)) and len(name) <= 64,
-          "name '%s' kebab-case, <=64" % name, "name을 소문자 kebab-case(예: pdf-summarizer)로, 64자 이하로 바꾸세요.")
-    folder = os.path.basename(os.path.normpath(path))
+    name = unicodedata.normalize("NFKC", str(meta.get("name", "")).strip())
+    ne = name_errors(name)
+    r.add("name-format", "single-task", not ne,
+          "name '%s' (skills-ref rules: NFKC, lowercase letters/digits/'-', <=%d)%s" % (name, NAME_MAX, (": %s" % ne) if ne else ""),
+          "name을 소문자·숫자·하이픈(예: pdf-summarizer)으로, %d자 이하로 바꾸세요." % NAME_MAX)
+    folder = unicodedata.normalize("NFKC", os.path.basename(os.path.normpath(path)))
     r.add("name-matches-folder", "structure", name == folder,
           "name '%s' vs folder '%s'" % (name, folder), "frontmatter name을 폴더 이름 '%s'과 같게 맞추세요." % folder)
     desc = str(meta.get("description", "")).strip()
@@ -248,27 +297,24 @@ def _common_name(r, meta, path):
 SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 MD_LINK_RE = re.compile(r"\]\(\s*<?([^)\s>]+)>?(?:\s+[\"'][^)]*[\"'])?\s*\)")
 
-def _unfenced(text):
-    """text with fenced code block contents removed (same fence rules as has_section)."""
-    out, fence = [], None
-    for ln in text.splitlines():
-        m = FENCE_RE.match(ln)
-        if m:
-            mark, rest = m.group(1), m.group(2)
-            if fence is None: fence = mark
-            elif mark[0] == fence[0] and len(mark) >= len(fence) and not rest.strip(): fence = None
-            continue
-        if fence is None: out.append(ln)
-    return "\n".join(out)
+# Spec bundled directories (agentskills.io "Directory structure"); a path into one of them is a file reference
+# whether written as a link, in inline code, or as plain text ("Run scripts/x.py").
+BUNDLED_REF_RE = re.compile(r"(?<![\w./\\-])((?:scripts|references|assets)[/\\][^\s`'\"()<>\[\]{}|,;]+)")
+GLOB_CHARS = set("*?")
 
 def local_refs(text):
-    """Local file references in markdown: bundled-dir paths (scripts/, references/, assets/) in links or
-    backticks anywhere, plus any other relative markdown link outside fenced code. URLs and #anchors excluded."""
-    refs = set(re.findall(r"\]\(((?:scripts|references|assets)[/\\][^)\s#]+)\)", text))
-    refs |= set(re.findall(r"`((?:scripts|references|assets)[/\\][^`\s]+)`", text))
-    for t in MD_LINK_RE.findall(_unfenced(text)):
+    """Local file references in markdown, outside fenced code: every relative markdown link target, plus
+    bundled-dir paths (scripts/, references/, assets/) in inline code or plain text. URLs, #anchors, directory
+    mentions ('scripts/') and glob patterns ('assets/*.png') are not file references."""
+    text = _unfenced(text)
+    refs = set()
+    for t in MD_LINK_RE.findall(text):
         t = t.split("#", 1)[0].split("?", 1)[0]
         if t and not SCHEME_RE.match(t):
+            refs.add(t)
+    for t in BUNDLED_REF_RE.findall(text):
+        t = t.split("#", 1)[0].rstrip(".:!?")
+        if t[-1] not in "/\\" and not GLOB_CHARS & set(t):
             refs.add(t)
     return refs
 
@@ -282,21 +328,25 @@ def _ref_problem(ref):
 
 def _toc_first(text):
     """True if the first heading after the title (outside fences) is a table of contents."""
-    heads = [ln for ln in _unfenced(text).splitlines() if re.match(r"^#{1,6}\s", ln)]
-    if heads and heads[0].startswith("# "):
+    heads = headings(text)
+    if heads and heads[0][0] == 1:
         heads = heads[1:]
-    return bool(heads) and bool(re.search(r"contents|목차|\btoc\b", heads[0], re.I))
+    return bool(heads) and bool(re.search(r"contents|목차|\btoc\b", heads[0][1], re.I))
+
+# skill-creator quick_validate loads with yaml.safe_load and rejects these when not str. skills-ref (strictyaml)
+# reads every scalar as a string, so other fields (metadata values included) are not forced to be quoted.
+PYYAML_STR_FIELDS = ("name", "description", "compatibility")
 
 def _field_type_errors(meta, typed):
     """Spec types: name/description/license/compatibility/allowed-tools are strings, metadata maps string->string.
-    typed: keys whose unquoted value YAML would load as bool/null/number/date (yaml_typed_keys)."""
+    typed: keys whose unquoted value YAML 1.1 (PyYAML) would load as bool/null/number/date (yaml_typed_keys)."""
     e = []
     for k in ("name", "description", "license", "compatibility", "allowed-tools"):
         if k not in meta: continue
         if not isinstance(meta[k], str) or not meta[k].strip():
             e.append("%s: non-empty string required, got %s" % (k, "empty" if meta[k] in (None, "") else type(meta[k]).__name__))
-        elif k in typed:
-            e.append("%s: YAML loads '%s' as non-string; quote it" % (k, meta[k]))
+        elif k in typed and k in PYYAML_STR_FIELDS:
+            e.append("%s: PyYAML (skill-creator quick_validate) loads '%s' as non-string; quote it" % (k, meta[k]))
     if "metadata" in meta:
         md = meta["metadata"]
         if not isinstance(md, dict):
@@ -306,8 +356,6 @@ def _field_type_errors(meta, typed):
             for k, v in md.items():
                 if not isinstance(v, str):
                     e.append("metadata.%s: string value required, got %s" % (k, type(v).__name__))
-                elif "metadata." + k in typed:
-                    e.append("metadata.%s: YAML loads '%s' as non-string; quote it (e.g. \"%s\")" % (k, v, v))
     return e
 
 def evals_errors(path, name):
@@ -376,7 +424,7 @@ def check_skill(path):
     te = _field_type_errors(meta, typed)
     r.add("field-types", "structure", not te, "field types per spec" + (": %s" % te if te else ""),
           "spec 타입에 맞추세요: name·description·license·compatibility·allowed-tools는 문자열(allowed-tools는 공백 구분), "
-          "metadata는 '키: \"문자열\"' 매핑. 숫자·날짜·yes/no처럼 보이는 값은 따옴표로 감싸세요.", must=True)
+          "metadata는 '키: 문자열' 매핑. name·description·compatibility가 숫자·날짜·yes/no처럼 보이면 따옴표로 감싸세요.", must=True)
     name, desc = _common_name(r, meta, path)
     bad_words = [w for w in RESERVED_NAME_WORDS if w in name.lower()]
     r.add("name-reserved", "single-task", not bad_words,
@@ -505,9 +553,11 @@ def load_scenarios(path):
     if os.path.isdir(d):
         for f in sorted(os.listdir(d)):
             if f.endswith(".json"):
+                raw, err = read_text(os.path.join(d, f))  # OSError / UnicodeDecodeError -> error, not a crash
+                if err:
+                    out.append((f, None, [err])); continue
                 try:
-                    with open(os.path.join(d, f), encoding="utf-8") as fh:
-                        data = json.load(fh)
+                    data = json.loads(raw)
                 except ValueError as e:
                     out.append((f, None, ["invalid JSON: %s" % e])); continue
                 out.append((f, data, scenario_errors(data)))
@@ -524,13 +574,14 @@ def check_agent(path):
     goal = str(meta.get("goal", "")).strip()
     r.add("goal-present", "goal", len(goal) >= 15, "goal stated (>=15 chars)", "에이전트가 끝내야 할 목표를 goal에 한 문장으로 쓰세요.")
     crit = [str(c) for c in as_list(meta.get("success_criteria"))]
-    # same checkers as transcript grading: measurable iff an outcome checker recognizes the criterion
+    # same checkers as transcript grading: measurable iff an outcome checker recognizes the criterion.
+    # At least one must be machine-checkable; the rest stay as criteria and are graded needs-review per transcript.
     unmeasurable = [c for c in crit if outcome_evidence(c, "") is None]
-    r.add("success-measurable", "goal", len(crit) >= 1 and not unmeasurable,
+    r.add("success-measurable", "goal", len(crit) > len(unmeasurable),
           "%d/%d success criteria machine-checkable%s" % (len(crit) - len(unmeasurable), len(crit),
-          (": not checkable %s" % unmeasurable) if unmeasurable else ""),
-          "success_criteria마다 자동 확인 가능한 조건을 쓰세요(예: '출처 링크 3개 이상', '800자 이하', '비교표', "
-          "'파일:줄 근거 2개 이상', '파일 변경 0건').")
+          ("; needs-review (human/model grading) at transcript time: %s" % unmeasurable) if unmeasurable else ""),
+          "자동 확인 가능한 success_criteria를 1개 이상 쓰세요(예: '출처 링크 3개 이상', '800자 이하', '비교표', "
+          "'파일:줄 근거 2개 이상', '파일 변경 0건'). 자동 확인이 안 되는 기준은 지우지 말고 함께 두세요.", must=True)
     scen = load_scenarios(path)
     invalid = ["%s (%s)" % (f, "; ".join(e)) for f, s, e in scen if e]
     valid = [(f, s) for f, s, e in scen if not e]
@@ -666,11 +717,12 @@ def grade_transcript(agent_path, transcript_path):
     for origin, crit in sources:
         crit = str(crit)
         ev = outcome_evidence(crit, final, run)
-        base = "%s-%s" % (origin, ev[0] if ev else "unchecked")
+        base = "%s-%s" % (origin, ev[0] if ev else "needs-review")
         seen[base] = seen.get(base, 0) + 1
         cid = base if seen[base] == 1 else "%s-%d" % (base, seen[base])
         if ev is None:
-            r.na(cid, "goal", "not machine-checkable: '%s'" % crit)
+            r.review(cid, "goal", "not machine-checkable, grade by human/model: '%s'" % crit,
+                     "사람 또는 모델 채점자가 최종 답이 '%s'를 만족하는지 판정하세요." % crit)
             continue
         checked += 1
         _, ok, got, fix = ev
@@ -748,7 +800,12 @@ def answer_lookup_violations(calls, workspace=None):
 # ---------- outcome checkers ----------
 URL_RE = re.compile(r"https?://[^\s<>()\[\]|\"'`]+")
 TABLE_RE = re.compile(r"^[ \t]*\|?.*\|.*\n[ \t]*\|?[ \t]*:?-{3,}:?[ \t]*(\|[ \t]*:?-{3,}:?[ \t]*)*\|?[ \t]*$", re.M)
-FILELINE_RE = re.compile(r"(?<![\w/.:-])((?:[\w.-]+/)*[\w-][\w.-]*\.[A-Za-z0-9]+):(\d+)(?:-\d+)?(?![\d])")
+FILELINE_RE = re.compile(r"(?<![\w/.:-])((?:[\w.-]+/)*[\w-][\w.-]*\.[A-Za-z0-9]+):(\d+)(?:-(\d+))?(?![\d])")
+# Line-numbered tool output that proves a line was read:
+#  grep -n / rg -n style "path:N:text" (context lines "path-N-text"), path in the line itself;
+GREP_LINE_RE = re.compile(r"^((?:\.?/)?(?:[\w.-]+/)*[\w-][\w.-]*\.[A-Za-z0-9]+)([:-])(\d+)\2", re.M)
+#  cat -n / nl / Read-tool style "N<tab|→|:|space>text", attributed to the file named in that call's input.
+NUMBERED_LINE_RE = re.compile(r"^[ \t]*(\d+)(?:\t|→|:|\||[ ])", re.M)
 FILELINE_CRIT_RE = re.compile(r"파일\s*[:·/]\s*줄|file\s*:\s*line|file[- ]line", re.I)
 NO_WRITE_CRIT_RE = re.compile(r"(?:파일\s*)?(?:변경|수정|쓰기)\s*0\s*건|읽기\s*전용|read[- ]only|"
                               r"no\s+(?:file\s+)?(?:writes?|edits?|changes|modifications)|zero\s+(?:file\s+)?(?:writes|edits|changes)", re.I)
@@ -776,6 +833,37 @@ def write_calls(calls):
             out.append("%s '%s'" % (c["tool"], hit[0]))
     return out
 
+def _norm_path(p):
+    p = posixpath.normpath(p.strip().strip("'\""))
+    return p[2:] if p.startswith("./") else p
+
+def _same_file(a, b):
+    """Same file if equal after normalization or one is a path-component suffix of the other
+    (citation 'tests/x.py' vs read path '/work/repo/tests/x.py')."""
+    a, b = _norm_path(a), _norm_path(b)
+    return a == b or a.endswith("/" + b) or b.endswith("/" + a)
+
+def lines_seen(run):
+    """{line number: {file paths}} for lines a tool actually showed with their line numbers.
+    grep-style lines carry their own path (call results and top-level tool_results); numbered lines without a path
+    count only for a call's own result and are attributed to the paths in that call's input."""
+    seen = {}
+    if not run: return seen
+    def mark(path, ln): seen.setdefault(int(ln), set()).add(path)
+    for text in run["results"]:
+        for path, _, ln in GREP_LINE_RE.findall(text):
+            mark(path, ln)
+    for c in run["calls"]:
+        if not c["result"]: continue
+        paths, cmds = _call_inputs(c["input"])
+        for cmd in cmds:
+            try: paths += shlex.split(cmd)
+            except ValueError: paths += cmd.split()
+        paths = [p for p in paths if p and not p.startswith("-")]
+        for ln in NUMBERED_LINE_RE.findall(c["result"]):
+            for p in paths: mark(p, ln)
+    return seen
+
 def outcome_evidence(crit, final, run=None):
     """Map one criterion to checkable evidence on the final answer (and the run's tool calls/results).
     run: normalized transcript from load_transcript (None = no tool calls, no tool results).
@@ -788,15 +876,16 @@ def outcome_evidence(crit, final, run=None):
                 "파일을 바꾸는 도구(write/edit 등) 호출 %s를 없애고 읽기 전용으로 작업하세요." % w)
     n = _min_count(crit)
     if n is not None and FILELINE_CRIT_RE.search(crit):
-        seen_text = "\n".join(list(_strings([c["input"] for c in calls])) + results)
-        cites = sorted(set(FILELINE_RE.findall(final)))
-        opened = lambda f: re.search(r"(?<![\w.-])" + re.escape(f) + r"(?![\w-]|\.\w)", seen_text) is not None
-        ok_cites = [c for c in cites if opened(c[0])]
-        bad = ["%s:%s" % c for c in cites if not opened(c[0])]
+        seen = lines_seen(run)
+        cites = sorted({(f, int(a), int(b) if b else int(a)) for f, a, b in FILELINE_RE.findall(final)})
+        shown = lambda f, ln: any(_same_file(f, g) for g in seen.get(ln, ()))
+        ok_cites = [c for c in cites if shown(c[0], c[1]) and shown(c[0], c[2])]
+        bad = [("%s:%d" % c[:2]) + ("-%d" % c[2] if c[2] != c[1] else "") for c in cites if c not in ok_cites]
         return ("file-lines", len(ok_cites) >= n,
-                "%d file:line citations to files opened via tools (need >= %d)%s" % (len(ok_cites), n,
-                ("; files never opened: %s" % bad) if bad else ""),
-                "도구로 실제 읽은 파일의 '경로:줄'(예: src/app.py:42) 근거를 %d개 이상 다세요 (현재 %d개)." % (n, len(ok_cites)))
+                "%d file:line citations whose lines appear in captured read results (need >= %d)%s" % (len(ok_cites), n,
+                ("; cited lines never shown by a tool: %s" % bad) if bad else ""),
+                "도구 결과(줄 번호가 붙은 read/grep 결과)에 실제로 나온 줄만 '경로:줄'(예: src/app.py:42)로 인용하세요. "
+                "%d개 이상 필요 (현재 확인된 것 %d개). 없는 줄·읽지 않은 줄은 세지 않습니다." % (n, len(ok_cites)))
     if n is not None and re.search(r"출처|인용|링크|source|citation|cite|reference|url|link", crit, re.I):
         urls = sorted(set(_norm_url(u) for u in URL_RE.findall(final)))
         fetched = set(_norm_url(u) for res in results for u in URL_RE.findall(res))
@@ -839,8 +928,13 @@ def feedback_md(r, rnd=None):
         for k in d["category_failed"]:
             lines.append("- %s: %d/%d 통과" % (k, d["categories"][k]["passed"], d["categories"][k]["total"]))
         lines.append("")
+    if d["needs_review"]:
+        lines += ["## 사람/모델 채점 필요 (needs-review, 자동 판정 불가)", ""]
+        for c in r.needs_review:
+            lines.append("- `%s`: %s" % (c["id"], c["reason"]))
+        lines.append("")
     if not fails:
-        lines.append("모든 검사를 통과했습니다. 수정할 것이 없습니다.")
+        lines.append("자동 검사는 모두 통과했습니다." if d["needs_review"] else "모든 검사를 통과했습니다. 수정할 것이 없습니다.")
     else:
         lines += ["## 고쳐야 할 것 (중요도 순)", ""]
         fails.sort(key=lambda c: not c["must"])
@@ -871,7 +965,7 @@ def print_report(r):
     d = r.to_dict()
     print("[%s] %s (%s) score=%.2f threshold=%.2f" % (d["verdict"], r.path, d["kind"], d["score"], PASS_THRESHOLD))
     for c in d["checks"]:
-        mark = "-" if c["passed"] is None else ("✓" if c["passed"] else "✗")
+        mark = {"pass": "✓", "fail": "✗", "n/a": "-", "needs-review": "?"}[c["status"]]
         print("  %s %-22s %-11s %s" % (mark, c["id"], c["category"], c["reason"]))
     if d["category_failed"]:
         print("  category below floor %.2f: %s" % (CATEGORY_FLOOR, d["category_failed"]))
@@ -887,7 +981,7 @@ def main(argv=None):
     if a.cmd == "check":
         r = grade_transcript(a.path, a.transcript) if a.transcript else check(a.path)
         print(json.dumps(r.to_dict(), ensure_ascii=False, indent=2)) if a.json else print_report(r)
-        return 0 if r.verdict == "PASS" else 1
+        return EXIT_CODES[r.verdict]
     if a.cmd == "check-all":
         units = find_units(a.path)
         if not units:
@@ -898,14 +992,16 @@ def main(argv=None):
             print(json.dumps([r.to_dict() for r in reps], ensure_ascii=False, indent=2))
         else:
             for r in reps: print("[%s] %.2f %s" % (r.verdict, r.score, r.path))
-            print("total=%d pass=%d fail=%d" % (len(reps), sum(r.verdict == "PASS" for r in reps), sum(r.verdict == "FAIL" for r in reps)))
-        return 1 if any(r.verdict == "FAIL" for r in reps) else 0
+            print("total=%d pass=%d review=%d fail=%d" % (len(reps), sum(r.verdict == "PASS" for r in reps),
+                  sum(r.verdict == "REVIEW" for r in reps), sum(r.verdict == "FAIL" for r in reps)))
+        verdicts = {r.verdict for r in reps}
+        return EXIT_CODES["FAIL"] if "FAIL" in verdicts else EXIT_CODES["REVIEW"] if "REVIEW" in verdicts else 0
     if a.cmd == "feedback":
         r = check(a.path)
         open(os.path.join(a.path, "FEEDBACK.md"), "w", encoding="utf-8").write(feedback_md(r, a.round))
         json.dump(r.to_dict(), open(os.path.join(a.path, "FEEDBACK.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=2)
         print("%s -> FEEDBACK.md, FEEDBACK.json (%s %.2f)" % (a.path, r.verdict, r.score))
-        return 0 if r.verdict == "PASS" else 1
+        return EXIT_CODES[r.verdict]
     if a.cmd == "index":
         reg, md = build_index(a.path)
         open(os.path.join(a.path, "INDEX.md"), "w", encoding="utf-8").write(md)
