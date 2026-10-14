@@ -709,10 +709,21 @@ def _field_type_errors(meta, typed):
             e.append("disable-model-invocation: unquoted boolean true/false required, got %r" % (v,))
     return e
 
+def _assertion_list(v):
+    """Non-empty list; each item a non-empty string (skill-creator) or, as a house extension used by skill_eval.py,
+    an object {"text": str, "layer": static|llm|human, "check": object (optional)}. skill_eval validates checks."""
+    if not (isinstance(v, list) and v): return False
+    for x in v:
+        if _nonempty_str(x): continue
+        if not (isinstance(x, dict) and _nonempty_str(x.get("text")) and x.get("layer") in EVAL_LAYERS
+                and isinstance(x.get("check", {}), dict)):
+            return False
+    return True
+
 def evals_errors(path, name):
     """Validate evals/evals.json against the skill-creator / agentskills.io format. Returns (n_cases, errors).
     Format: {"skill_name": <frontmatter name>, "evals": [{"id": int (unique), "prompt": str, "expected_output": str,
-    "files": [str] (optional, relative to skill root, must exist), "assertions"|"expectations": [str] (optional),
+    "files": [str] (optional, relative to skill root, must exist), "assertions"|"expectations": [str|object] (optional),
     "layer": "static"|"llm"|"human" (optional; exact lowercase, no layer is required to be present)}]}"""
     fp = os.path.join(path, "evals", "evals.json")
     if not os.path.isfile(fp):
@@ -752,8 +763,8 @@ def evals_errors(path, name):
                     if prob: e.append("evals[%d].files %s: %s" % (i, f, prob))
                     elif not os.path.isfile(os.path.join(path, f)): e.append("evals[%d].files %s: not found" % (i, f))
         for k in ("assertions", "expectations"):
-            if k in it and not _str_list(it[k]):
-                e.append("evals[%d].%s: non-empty list of strings required" % (i, k))
+            if k in it and not _assertion_list(it[k]):
+                e.append("evals[%d].%s: non-empty list of strings or {\"text\", \"layer\"} objects required" % (i, k))
         if "layer" in it and it["layer"] not in EVAL_LAYERS:
             e.append("evals[%d].layer: must be one of %s (lowercase), got %r" % (i, "|".join(EVAL_LAYERS), it["layer"]))
     dup = sorted({x for x in ids if ids.count(x) > 1})
@@ -1499,6 +1510,10 @@ def print_report(r):
         print("  category below floor %.2f: %s" % (CATEGORY_FLOOR, d["category_failed"]))
 
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["eval"]:  # skill-eval harness (skill_eval.py): plan|estimate|run|grade|report|...
+        import skill_eval
+        return skill_eval.main(argv[1:])
     p = argparse.ArgumentParser(prog="eva", description="Eva skill/agent evaluator")
     sp = p.add_subparsers(dest="cmd", required=True)
     for n in ("check", "check-all", "feedback", "index"):

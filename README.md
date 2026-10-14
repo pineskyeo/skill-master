@@ -28,6 +28,10 @@
 - Anthropic 스킬 작성 모범 사례: https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices
 - Anthropic 테스트 설계(eval 모범 사례): https://platform.claude.com/docs/en/test-and-evaluate/develop-tests
 - OpenAI eval 모범 사례: https://developers.openai.com/api/docs/guides/evaluation-best-practices (platform.openai.com 주소에서 리다이렉트됨)
+- (평가 하네스) skill-creator 로컬 사본 `~/.claude/plugins/cache/claude-plugins-official/skill-creator/*/skills/skill-creator/`: `SKILL.md`, `references/schemas.md`(evals·grading·timing·benchmark·comparison JSON), `scripts/aggregate_benchmark.py`(통계·delta), `scripts/run_eval.py`(트리거 감지·trigger_rate), `scripts/run_loop.py`(60/40 분할, 최대 5회), `agents/comparator.md`(블라인드 비교). 캐시된 7개 사본의 `schemas.md`는 모두 같은 내용(md5 동일)
+- (평가 하네스) Claude Code 비대화형 실행: https://code.claude.com/docs/en/headless, CLI 플래그: https://code.claude.com/docs/en/cli-reference (`-p`, `--output-format stream-json`, `--json-schema`, `--tools ""`, `--disable-slash-commands`, `--max-budget-usd`, `--no-session-persistence`)
+- (평가 하네스) Codex 비대화형 실행: https://learn.chatgpt.com/docs/non-interactive-mode (`codex exec --json`, 이벤트 `item.completed`·`turn.completed`의 `usage`), Codex 스킬 위치: https://learn.chatgpt.com/docs/build-skills (`.agents/skills`)
+- (평가 하네스) Claude 요금: https://platform.claude.com/docs/en/about-claude/pricing (2026-10-15 확인)
 
 ## 사용법
 ```
@@ -38,6 +42,8 @@ python3 eva.py feedback <path> --round 1                # FEEDBACK.md / FEEDBACK
 python3 eva.py index golden                             # INDEX.md / registry.json 생성
 python3 loop.py <path> --builder "<cmd>"                # 자동 피드백 루프 (LOOP.md, 빌더 실패 시 종료코드 2, REVIEW면 3)
 python3 eva.py check <agent> --transcript run.json      # [분리 예정] 에이전트 실행 기록 채점
+python3 eva.py eval plan <skill>                        # 스킬 평가 하네스: 계획·예상 비용만 출력 (dry run, 아무것도 실행 안 함)
+python3 eva.py eval run <skill> --live --budget-usd 20   # 실제 실행 (승인·예산 조건, 아래 "스킬 평가 하네스")
 python3 -m unittest discover -s tests -v                # 테스트 (pytest도 pytest.ini의 testpaths로 같은 tests/만 수집)
 ```
 
@@ -59,7 +65,7 @@ python3 -m unittest discover -s tests -v                # 테스트 (pytest도 p
    "evals": [{"id": 1, "prompt": "실제 사용자 요청", "expected_output": "성공의 모습",
               "files": ["evals/files/x.csv"], "assertions": ["확인 가능한 문장"]}]}
   ```
-  `files`, `assertions`, `layer`는 선택입니다. `layer`는 그 케이스를 채점하는 방식이며 값은 정확히 소문자 `static`·`llm`·`human` 중 하나여야 합니다(그 밖의 값·대문자는 `evals-valid` 실패, H). 세 layer가 모두 있을 필요는 없습니다. agentskills.io 문서는 `assertions`, skill-creator `schemas.md`는 `expectations`라고 써서 두 이름을 모두 받습니다.
+  `files`, `assertions`, `layer`는 선택입니다. `layer`는 그 케이스를 채점하는 방식이며 값은 정확히 소문자 `static`·`llm`·`human` 중 하나여야 합니다(그 밖의 값·대문자는 `evals-valid` 실패, H). 세 layer가 모두 있을 필요는 없습니다. agentskills.io 문서는 `assertions`, skill-creator `schemas.md`는 `expectations`라고 써서 두 이름을 모두 받습니다. assertion 항목은 문자열 외에 `{"text": str, "layer": "static|llm|human", "check": {...}}` 객체도 받습니다(H, 항목별 layer — 아래 "스킬 평가 하네스"). `check` 내용은 `eva.py eval validate`가 검사합니다.
 
 ## 스킬 평가 기준
 [필수]는 점수와 상관없이 하나라도 실패하면 FAIL입니다. 출처 표시: **S**=agentskills.io 명세, **V**=skills-ref / quick_validate 검증기, **B**=Anthropic 모범 사례, **C**=skill-creator / agentskills.io 평가 문서, **H**=자체 규칙(명세에 없거나 명세보다 엄격함. 다른 출처와 함께 적힌 H는 그 출처보다 엄격한 부분).
@@ -99,18 +105,91 @@ python3 -m unittest discover -s tests -v                # 테스트 (pytest도 p
 5. 형식이 틀린 입력은 예외로 죽지 않고 FAIL 보고서로 나옵니다.
 
 ## 업계 표준 대비 아직 없는 스킬 기능
-아래는 조사한 문서에 있지만 에바가 아직 하지 않는 것입니다. 에바는 정적 검사만 하고, 모델을 실행하지 않습니다.
-- **스킬 있음 vs 없음 벤치마크** (C): 같은 프롬프트를 `with_skill`과 `without_skill`(또는 `old_skill`)로 실행하고 `iteration-N/` 작업 폴더에 결과를 남기는 기능
-- **채점·집계** (C): assertion별 `grading.json`(`text`/`passed`/`evidence`), `timing.json`(`total_tokens`, `duration_ms`), `benchmark.json`(pass_rate·time·tokens의 mean±stddev와 delta)
-- **트리거(description) 평가** (C): should-trigger / should-not-trigger 쿼리 약 20개(각 8~10개, 비슷하지만 다른 일을 하는 근접 오답 포함), 쿼리마다 3회 실행해 트리거 비율 계산(기준 0.5), train 60% / validation 40% 분할, 최대 5회 반복, validation 점수로 최선의 description 선택. 쿼리 파일(`[{"query", "should_trigger"}]`)의 위치는 명세에 없어 정적 검사도 하지 않습니다.
-- **assertion 품질 분석** (C): 두 설정 모두에서 늘 통과하거나 늘 실패하는 assertion, 실행마다 결과가 크게 다른 eval 찾기
-- **블라인드 비교** (C): 두 버전 출력을 어느 쪽인지 숨기고 LLM 판정자에게 비교시키기
-- **사람 리뷰 기록** (C): `feedback.json`과 리뷰 뷰어
-- **개선 반복 루프** (C): 실패한 assertion, 사람 피드백, 실행 기록을 LLM에 주고 SKILL.md 수정안을 받는 루프. 지금 `loop.py`는 정적 검사 피드백만 돌립니다.
+`eva.py check`는 정적 검사만 하고 모델을 실행하지 않습니다. 스킬 있음/없음 벤치마크, 채점·집계, 트리거 평가, assertion 품질 분석, 블라인드 비교, 사람 리뷰 큐, 반복 루프는 이제 `skill_eval.py`(아래 "스킬 평가 하네스")에 있습니다. 다만 실제 모델 실행으로 검증한 적은 아직 없습니다(테스트는 모두 가짜 엔진). 아래는 여전히 없는 것입니다.
+- **description 자동 최적화** (C): train 60% / validation 40% 분할, LLM이 description 수정안을 내고 validation 점수로 최선을 고르는 루프. 하네스는 트리거 비율만 재고, description을 고치지 않습니다.
+- **리뷰 뷰어** (C): skill-creator `eval-viewer/generate_review.py` 같은 HTML 뷰어. 하네스는 `comparison.md`와 `human_review.json`만 만듭니다.
+- **SKILL.md 수정안 생성** (C): 실패한 assertion·사람 피드백·실행 기록을 LLM에 주고 수정안을 받는 일. `eval loop --builder`는 사용자가 준 명령을 부를 뿐 프롬프트를 만들지 않습니다. `loop.py`는 정적 검사 피드백만 돌립니다.
 - **토큰 예산** (S): 메타데이터 약 100토큰, 본문 5000토큰 미만 권장. 토크나이저가 없어 바이트(20KB)로 대신합니다.
 - **모델별 테스트** (B): Haiku / Sonnet / Opus 각각으로 확인하기
 - **본문 작성 품질** (B): 시점에 따라 틀려질 정보 없음, 용어 일관성, 스크립트 오류 처리·상수 근거, MCP 도구 전체 이름(`Server:tool`) — 자동 검사 없음
 - **description 시점**: 동사 형태(3인칭 "Processes…" / 명령형 "Use this skill when…")는 강제하지 않고 1·2인칭 대명사만 `description-pov`로 막습니다. 따옴표 안 인용은 검사하지 않으므로, 인용 안에 숨긴 1·2인칭은 찾지 못합니다. 주어를 생략한 한국어 1·2인칭(예: "도와드릴게요")은 찾지 못합니다.
+
+## 스킬 평가 하네스 (skill_eval.py)
+스킬을 실제 에이전트(Claude Code, Codex)로 실행해 **스킬 있음 vs 없음**(또는 새 버전 vs 이전 버전)을 비교합니다. `python3 skill_eval.py <명령> <skill>` 또는 `python3 eva.py eval <명령> <skill>`.
+
+**안전 장치(기본은 dry run)**: `--live`와 `--budget-usd`가 둘 다 없으면 어떤 CLI도 실행하지 않고 계획과 예상 비용만 출력합니다(작업 폴더도 만들지 않음). 실제 CLI를 띄우는 곳은 `live_exec` 하나이고, `main()`이 아래 조건을 모두 확인한 뒤에만 켭니다: ① `--budget-usd > 0`, ② (run·loop) 평가셋 검증 문제 0개, ③ `requirements`·`eval_set` 승인, ④ 모든 모델의 가격을 앎, ⑤ 예상 비용 ≤ 예산. 실행 중에도 실제 사용액(Claude는 `total_cost_usd`, 아니면 토큰×가격)이 예산에 닿으면 멈추고 `plan.json`의 `stopped`에 적습니다. Claude 실행에는 남은 예산을 `--max-budget-usd`로 넘깁니다. 채점자·pairwise 호출도 같은 예산에서 빠지며, 예산이 바닥나면 다음 채점 호출 전에 멈춥니다(`grade --live`는 채점 예상 비용이 예산을 넘으면 시작하지 않음).
+
+| 명령 | 하는 일 |
+|---|---|
+| `validate` | evals.json(항목 layer·check, pressure)과 trigger_evals.json(정확히 10+10) 검사 |
+| `estimate` | 예상 호출 수·토큰·비용 표. `--cases/--llm-cases/--trigger-queries`로 가상 개수, `--tokens KIND=IN,OUT`, `--price KEY=IN,OUT` |
+| `plan` | 검증 문제, 승인 상태, 오염 경고(preflight), 엔진·설정별 예시 명령, 예상 비용 (항상 dry run) |
+| `run --live --budget-usd X` | `iteration-N/` 하나 실행: 엔진 × 케이스 × 설정 × `--runs`(기본 3) + 트리거 쿼리 × `--runs` |
+| `grade` | 정적 검사 먼저 → (`--live`일 때) LLM yes/no 채점 + 블라인드 pairwise → human 항목은 `human_review.json` 큐. `--live` 없으면 정적 검사와 큐만 |
+| `calibrate --golden F --live` | 사람이 라벨 붙인 골든 예시로 LLM 채점자 일치율·Cohen's kappa 계산 → `calibration.json` |
+| `report` | `benchmark.json`, 엔진별 `benchmark.json`, `comparison.md`, `gate.json` (문제 있으면 종료코드 3) |
+| `approve --gate G --by NAME` | 승인 기록(`approvals.json`, 파일 sha256에 묶임 — 파일이 바뀌면 승인 무효) |
+| `register` | `registration.json` 작성. 마지막 iteration에 문제가 있으면 `registration` 승인 필요 |
+| `snapshot` | 현재 스킬을 `skill-snapshot/`에 복사 (`--baseline old`의 기준) |
+| `loop --live --budget-usd X [--builder CMD]` | run→grade→(calibrate)→report 반복. 문제 없으면 멈춤, 있으면 builder 실행 후 다음 iteration. 최대 5회 |
+
+**평가셋 형식**
+- `evals/evals.json`: skill-creator 형식 + 항목별 layer. 문자열 assertion은 케이스 `layer`(없으면 `llm`)를 따릅니다. `static` 항목은 기계 검사 `check`가 필수입니다: `regex`/`not_regex`(`pattern`, `target`: `final`|`transcript`, `flags`: `"i"`), `tool_call`(`tool`, `input_regex`, `min` 기본 1, `max`), `skill_triggered`(`expected`), `file_exists`(실행 workdir 기준 상대경로). 예: `{"text": "Skill 호출 0회", "layer": "static", "check": {"type": "tool_call", "tool": "Skill", "min": 0, "max": 0}}`.
+- 압박 시나리오(pressure): 케이스에 `"pressure": {"kinds": ["time", "authority"], "context": "..."}`. `context`를 프롬프트 앞에 붙여 실행하고, 보고서에 pressure/normal 통과율을 따로 냅니다.
+- `evals/trigger_evals.json`: skill-creator 형식 `[{"query": str, "should_trigger": bool}]`, should-trigger 10개 + should-not 10개(H). 스킬이 있는 설정에서만 실행하고, 쿼리별 trigger_rate ≥ 0.5면 트리거로 봅니다(run_eval.py 기본값).
+- 골든(채점자 보정): `{"examples": [{"id", "prompt", "expected_output"?, "output", "item", "label": bool}]}`.
+
+**작업 폴더** (기본: 스킬 폴더 옆 `<name>-workspace/`, skill-creator 관례. `--workspace`로 변경)
+```
+<name>-workspace/
+├── requirements.md, approvals.json, registration.json, skill-snapshot/
+└── iteration-N/
+    ├── plan.json, benchmark.json, comparison.md, gate.json, human_review.json, calibration.json
+    └── <engine>/                      # claude | codex
+        ├── benchmark.json             # 이 엔진만, skill-creator 스키마 그대로
+        ├── eval-<id>-<name>/
+        │   ├── eval_metadata.json, comparison-<k>.json
+        │   └── with_skill|without_skill|old_skill/run-<k>/
+        │       ├── workdir/           # 에이전트 작업 폴더 (스킬은 evals/ 빼고 설치)
+        │       ├── outputs/transcript.json, outputs/final.md
+        │       ├── timing.json        # total_tokens, duration_ms, input/output/cached tokens, cost_usd
+        │       └── grading.json
+        └── trigger/<config>/results.json   # run_eval.py 출력 형식
+```
+
+**엔진 어댑터** (`Engine.command/parse/triggered`, 테스트에서는 `exec_fn`을 가짜로 바꿈)
+- Claude Code: `claude -p <prompt> --output-format stream-json --verbose --no-session-persistence --model M`. 스킬 있음 = `workdir/.claude/skills/<name>/`에 복사, 스킬 없음 = `--disable-slash-commands`(문서: "Disable all skills and commands for this session"). 트리거 = `Skill` 도구 호출의 `skill`이 이름과 같음(agentskills.io 예시 jq와 같은 기준) 또는 `.../skills/<name>/SKILL.md` Read(run_eval.py도 Read를 봄). 권한 모드는 넣지 않습니다. 스킬이 Bash 등을 써야 하면 `--claude-arg=--permission-mode --claude-arg=acceptEdits`, `--claude-arg=--allowedTools --claude-arg=Bash`처럼 직접 줍니다.
+- Codex: `codex exec --json --skip-git-repo-check --ephemeral --sandbox workspace-write <prompt>`. 스킬 있음 = `workdir/.agents/skills/<name>/`. 토큰은 `turn.completed.usage`(`reasoning_output_tokens`는 비용 상한 쪽으로 출력에 더함 — 과금 규칙은 확인 안 함). `-m`은 `--codex-model`을 줄 때만 붙입니다(공식 페이지에서 확인 못 함). **트리거 감지는 (추정)**: Codex 문서에 스킬 호출 이벤트가 없어, 항목에 `skills/<name>/SKILL.md`가 나오면 트리거로 봅니다. 첫 실제 실행에서 확인 필요.
+- preflight: 같은 이름 스킬이 `~/.claude/skills`, `~/.claude/plugins/**/skills`, `~/.agents/skills`에 있으면 경고합니다(사용자 레벨 사본이 실행에 섞일 수 있음). Codex의 without_skill에서 사용자 레벨 사본을 끄는 방법(`[[skills.config]] enabled = false`)은 설정 파일 수정이라 하네스가 하지 않습니다.
+
+**채점**
+- 순서: static(정규식·도구 호출·트리거·파일) → llm → human. LLM 채점자는 실행 모델과 **다른 모델**이어야 합니다(같으면 오류, Claude 실행 모델을 모르면 오류). 기본 실행 `claude-opus-5-5`, 채점 `claude-sonnet-5-5`. 채점은 `claude -p --json-schema ... --tools ""`로 도구 없이 yes/no와 근거를 받습니다.
+- pairwise: 엔진·케이스·run k마다 with_skill vs 기준 출력을 A/B로 보여 주고, 순서는 `random.Random(seed)`로 섞어 `comparison-<k>.json`에 `mapping`과 `seed`를 남깁니다(`--seed`로 재현).
+- human: `human_review.json`의 `passed`를 true/false로 채우고 `grade`를 다시 돌리면 grading.json에 반영됩니다. 채우기 전에는 pass_rate 분모에서 빠지고 `pending`으로 셉니다.
+- 집계: skill-creator `aggregate_benchmark.py`와 같은 통계(mean, 표본 stddev(n-1), min, max, 소수 4자리), delta는 `with_skill - 기준` 문자열(`"+0.50"`). 노트: 모든 설정에서 늘 통과/늘 실패하는 assertion, run 간 stddev ≥ 0.3(H)인 eval.
+
+**승인 게이트**
+| 게이트 | 언제 필요 |
+|---|---|
+| `requirements` (`<workspace>/requirements.md`) | 항상 — 승인 없으면 `run --live`/`loop` 거부 |
+| `eval_set` (evals.json + trigger_evals.json) | 항상 — 같음 |
+| `iteration-N` 결과 | 문제가 있을 때만(`gate.json`의 `needs_approval`). 문제: ① 회귀 — with_skill 평균 pass_rate가 기준 설정보다 낮거나 이전 iteration보다 낮음(허용 오차 0, H), ② 채점자 일치율 < 0.8(H), ③ with_skill 실행의 static 검사 실패 |
+| `registration` | 마지막 iteration에 문제가 있을 때만 |
+보정을 안 했거나 LLM·human 항목이 남은 것은 문제가 아니라 노트로 표시합니다. `loop`는 최대 5회(`MAX_AUTO_ITERATIONS`, 넘기면 오류)이고, 5회 뒤에도 문제가 남으면 `needs-approval`로 끝납니다.
+
+**비용 추정**: 호출 수 = 실행(케이스 × 설정 2 × runs) + 트리거(쿼리 × runs × 스킬 있는 설정 수) + 채점(llm 항목 있는 케이스 × 설정 2 × runs) + pairwise(케이스 × runs), 엔진마다. 호출당 토큰은 **가정값**입니다(exec 60k/4k, trigger 25k/500, grader 12k/800, pairwise 16k/800 — 측정값 아님, 파일럿 뒤 `--tokens`로 교체). 입력 토큰은 전부 기본 입력 단가로 계산해 캐시 할인을 빼므로 상한 쪽 추정입니다. Claude 단가는 위 요금 페이지(2026-10-15)에서 옮긴 값이고, Codex/OpenAI 단가는 1차 출처로 확인하지 못해 넣지 않았습니다(`--price codex=IN,OUT` 필요, 없으면 `--live` 거부).
+
+### skill-creator 대비 차이(deviation)
+- **엔진 계층 추가**: skill-creator는 `iteration-N/eval-*/<config>/run-*`입니다. 하네스는 엔진이 둘이라 `iteration-N/<engine>/eval-*/...`로 한 단계 더 둡니다. 엔진 폴더 안은 skill-creator 구조 그대로이고 엔진별 `benchmark.json`도 skill-creator 스키마입니다. skill-creator `scripts/aggregate_benchmark.py iteration-N/<engine>`은 모든 run에 채점된 항목이 하나 이상 있을 때 동작합니다(가짜 엔진 결과로 확인). 아직 채점 안 된 run(`pass_rate: null`, 예: human 항목만 있는 케이스의 리뷰 전)이 있으면 그 스크립트는 `TypeError`로 멈추므로 하네스의 `report`를 쓰세요. 최상위 `iteration-N/benchmark.json`은 같은 필드에 `per_engine`, `trigger`, `pairwise`, `static_failures`, `pressure`, `human_pending`, `llm_not_graded`, `calibration`, `gate`를 더하고 `runs[]`에 `engine`을 더한 확장입니다.
+- **eval 폴더 이름**: skill-creator `eval-<ID>`/설명 이름, agentskills.io `eval-<설명>`. 하네스는 `eval-<id>-<name>`(name 없으면 프롬프트 slug)이고 eval_id는 `eval_metadata.json`에 둡니다(aggregate_benchmark가 읽는 위치).
+- **grading.json**: `expectations[]`의 `text`/`passed`/`evidence`는 같고 `id`, `layer`, `status`, `grader`를 더합니다. `passed`는 미채점(human 대기, dry-run llm)일 때 `null`이고 `summary.pass_rate` 분모에서 빠지며 `summary.pending`에 셉니다(skill-creator는 bool만). `claims`, `user_notes_summary`, `eval_feedback`는 만들지 않습니다. agentskills.io 예시는 `assertion_results`라는 이름을 쓰지만 skill-creator 뷰어가 `expectations`를 읽으므로 그쪽을 따랐습니다.
+- **benchmark.json delta**: skill-creator 형식(문자열 `"+0.50"`)을 따릅니다. agentskills.io 예시는 숫자(`0.50`)입니다. 실행 결과에 `pending`, `cost_usd`를 더하고, 채점 항목이 0개인 run은 pass_rate 통계에서 뺍니다(skill-creator는 0.0으로 넣음).
+- **timing.json**: `total_tokens`, `duration_ms`, `total_duration_seconds`, `executor_start/end`는 같고 `input_tokens`, `output_tokens`, `cached_input_tokens`, `cost_usd`를 더합니다. 시간은 하네스가 CLI 프로세스를 감싸 잰 벽시계 시간이고, 토큰은 CLI 출력에서 읽습니다(subagent 알림이 아님). 채점자 시간은 넣지 않습니다.
+- **comparison.json**: `winner`(A/B/TIE)와 `reasoning`은 같고, comparator.md의 `rubric`·`output_quality` 점수 대신 `mapping`, `winner_configuration`, `seed`, `grader_model`을 둡니다. 비교 단위는 같은 번호 run끼리입니다.
+- **사람 리뷰**: agentskills.io `feedback.json`(eval별 자유 의견) 대신 항목별 `human_review.json`(`passed` true/false + `note`)입니다.
+- **트리거 평가**: 쿼리 파일 형식과 0.5 기준, 3회 실행은 같습니다. 개수는 정확히 10+10(H, 문서는 각 8~10). Claude 트리거 감지는 run_eval.py처럼 `.claude/commands/`에 명령 파일을 만들지 않고 스킬 폴더를 `.claude/skills/`에 설치해 실제 스킬로 띄웁니다. 스트림 조기 종료는 하지 않아 run 하나가 끝까지 돕니다(비용 추정이 이를 반영). train/validation 분할과 description 최적화는 없습니다.
+- **채점 계층**: skill-creator assertion은 문자열뿐이고 채점 방식은 grader가 정합니다. 하네스는 항목마다 `layer`를 두고 static은 반드시 기계 검사로만 채점합니다(H).
+- **승인 게이트·예산·회귀 판정·일치율 기준**은 skill-creator에 없는 자체 규칙(H)입니다.
 
 ## [분리 예정] 에이전트 평가
 `agent master`로 옮길 때까지 동작은 그대로입니다.
