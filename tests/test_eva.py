@@ -1382,7 +1382,6 @@ class TestRound5DescriptionWhen(SkillMixin, unittest.TestCase):
                   "Counts words. Used when the user wants a word count.", "Counts words. Invoke when the user asks for a word count.",
                   "Counts words. Trigger when the user asks for a word count.", "Use when the user wants a word count of a file.",
                   "Counts words. Claude should use this skill when the user wants a word count.",
-                  "Counts words. This skill applies when the user wants a word count.",
                   "Counts words. Read this skill before counting words in any document.",
                   "Counts words. Read this skill when the user wants a word count.",
                   "Counts words. Use this when the user wants a word count.",  # accepted before Round 5, kept
@@ -1407,6 +1406,55 @@ class TestRound5Docs(unittest.TestCase):
         readme = open(p("README.md"), encoding="utf-8").read()
         self.assertNotIn("어느 결과에 있어도 됨", readme)
         self.assertNotIn("줄<탭|→|:|공백>", readme)
+
+class TestRound6DescriptionWhen(SkillMixin, unittest.TestCase):
+    """Round 6 (1)(2): 'this skill' only after a use verb or as subject of 'modal/be + use verb'; skip/avoid/cannot
+    are negatives; a period with no space after it still ends the condition."""
+    desc = TestRound5DescriptionWhen.desc
+    def rejected(self, *descs):
+        for d in descs:
+            self.assertIsNone(eva.desc_when_clause(d), d)
+            r = self.desc(d); self.assertEqual(self.ids(r, "critical_failed"), {"description-when"}, d)
+    def test_this_skill_needs_use_wording(self):
+        self.rejected("Counts words. This skill counts words when files change.",
+                      "Counts words. Config files for this skill are loaded when the session starts.",
+                      "Counts words. This skill is loaded when the session starts.",
+                      "Counts words. This skill is called when a hook fires.",
+                      "Counts words. This skill applies when the user wants a word count.",
+                      "Counts words. Config for this skill is used when the session starts.")
+    def test_skip_avoid_cannot_rejected(self):
+        self.rejected("Counts words. Skip this skill when the input is binary.",
+                      "Counts words. Avoid this skill when the input is binary.",
+                      "Counts words. Cannot use this skill when the file is binary.",
+                      "Counts words. Can't use this skill when the file is binary.",
+                      "Counts words. Avoid using this skill when the input is binary.",
+                      "Counts words. Without asking, use this skill when the file is binary.")
+    def test_this_skill_use_wording_accepted(self):
+        for d in ("Counts words. This skill should be used when the user asks for a word count.",
+                  "Counts words. This skill can be used when the user asks for a word count.",
+                  "Counts words. This skill must be invoked when the user asks for a word count.",
+                  "Counts words. This skill is used when the user asks for a word count.",
+                  "Counts words. Claude should use this skill when the user wants a word count.",
+                  "Counts words. Agents invoke this skill whenever the user pastes a long text."):
+            r = self.desc(d); self.assertEqual(r.verdict, "PASS", (d, r.failed))
+    def test_period_without_space_ends_condition(self):
+        self.rejected("Counts words. Use when needed.The user wants a summary.",
+                      "Counts words. Use this skill when asked.Then count words in the file.",
+                      "Counts words. This skill should be used when needed.Files are counted.",
+                      "Counts words.Use when the user wants a word count.")  # not a new sentence start: no loosening
+        for d in ("Counts words. Use when the user opens a file.txt and wants a count.",
+                  "Counts words. Use when the user runs Python 3.12 and wants a count.",
+                  "Counts words. Use when the user gives a text, e.g. a long note."):
+            r = self.desc(d); self.assertEqual(r.verdict, "PASS", (d, r.failed))
+        self.assertEqual(eva.desc_when_clause("Counts words. Use when the user edits SKILL.md files."),
+                         "the user edits SKILL.md files")
+
+class TestRunnerParity(unittest.TestCase):
+    """pytest from the repo root collects the same tests as 'unittest discover -s tests' (not the frozen fixtures)."""
+    def test_pytest_testpaths(self):
+        import configparser
+        cfg = configparser.ConfigParser(); cfg.read(p("pytest.ini"), encoding="utf-8")
+        self.assertEqual(cfg.get("pytest", "testpaths").split(), ["tests"])
 
 if __name__ == "__main__":
     unittest.main()

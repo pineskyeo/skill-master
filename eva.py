@@ -20,18 +20,28 @@ DESCRIPTION_MIN = 20    # house rule: the spec only requires non-empty
 # counts, followed by a substantive condition (DESC_WHEN_MIN_WORDS words, not only vague ones):
 #   - a sentence that starts with 'Use' / 'Used' / 'Invoke' / 'Trigger' (optionally 'this|the|it [skill|tool]', an '-ly' adverb,
 #     'for|to <task>') and then 'when'/'whenever' ('Use when ...', 'Use this skill when ...', 'Used when ...');
-#   - a clause with 'this skill' as subject or object ('... this skill when ...', 'This skill should be used when ...');
+#   - 'this skill' right after a use verb ('... use|using|invoke|trigger|read this skill when ...') or as the
+#     sentence subject of 'modal/be + use verb' ('This skill should be used|can be used|must be invoked|is used when ...');
 #   - a sentence 'Read this skill before|when ...'.
 # Not counted: a 'when' after any other words ('Counts words when files change', 'files loaded when',
-# 'hooks called when', 'Applies to X when', '..., used when'), negated clauses ('Do not use when', "Don't use this
-# skill when", 'Never use when'), 'Use this.', Korean conditionals ('...할 때 사용한다') and quoted text.
+# 'hooks called when', 'Applies to X when', '..., used when', 'This skill counts words|is loaded|applies when',
+# 'Skip|Avoid this skill when', 'Config for this skill is used when'), negated clauses ('Do not use when', "Don't use
+# this skill when", 'Never use when', 'Cannot use this skill when', 'Avoid using this skill when'), 'Use this.',
+# Korean conditionals ('...할 때 사용한다') and quoted text. A '.', '!' or '?' directly followed by a capital letter
+# ('needed.The user ...') ends the condition but does not start a new trigger sentence.
+_DESC_USE_VERB = r"(?:used|invoked|triggered|read)"
 DESC_USE_START_RE = re.compile(
     r"(?:use|used|invoke|trigger)(?:\s+(?:this|the|it))?(?:\s+(?:skill|tool))?(?:\s+[A-Za-z]+ly)?(?:\s+(?:for|to)\b[^;]{1,150}?)?"
     r"\s+(?:when|whenever)\b([^;]*)", re.I)
-DESC_THIS_SKILL_RE = re.compile(r"\bthis\s+skill(?:\s+[A-Za-z]+){0,4}?\s+(?:when|whenever)\b([^;]*)", re.I)
+DESC_THIS_SKILL_OBJ_RE = re.compile(
+    r"\b(?:use|using|invoke|invoking|trigger|triggering|read|reading)\s+this\s+skill\s+(?:when|whenever)\b([^;]*)", re.I)
+DESC_THIS_SKILL_SUBJ_RE = re.compile(
+    r"this\s+skill\s+(?:(?:should|must|can|may|will|could|might|shall)\s+be|is)\s+%s\s+(?:when|whenever)\b([^;]*)"
+    % _DESC_USE_VERB, re.I)
 DESC_READ_RE = re.compile(r"read\s+this\s+skill\s+(?:before|when|whenever)\b([^;]*)", re.I)
-DESC_NEGATION_RE = re.compile(r"\b(?:not|never)\b|n['’]t\b", re.I)
+DESC_NEGATION_RE = re.compile(r"\b(?:not|never|cannot|avoid(?:s|ing)?|skip(?:s|ping)?|without)\b|n['’]t\b", re.I)
 DESC_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+DESC_TIGHT_STOP_RE = re.compile(r"[.!?](?=[A-Z])")  # 'needed.The user': sentence end with no space after it
 DESC_WHEN_MIN_WORDS = 2
 DESC_WHEN_VAGUE = {"a", "an", "the", "it", "is", "are", "be", "this", "that", "there", "you", "user", "users", "someone",
                    "needed", "need", "necessary", "appropriate", "required", "relevant", "useful", "helpful", "asked",
@@ -43,10 +53,11 @@ def desc_when_clause(desc):
     from 'Use when the user wants a word count.'), else None. Quoted text is blanked first (_unquoted)."""
     for sent in DESC_SENTENCE_RE.split(_unquoted(desc)):
         sent = sent.strip().lstrip("-*•(").strip()
-        for m in (DESC_USE_START_RE.match(sent), DESC_READ_RE.match(sent), DESC_THIS_SKILL_RE.search(sent)):
+        for m in (DESC_USE_START_RE.match(sent), DESC_READ_RE.match(sent), DESC_THIS_SKILL_SUBJ_RE.match(sent),
+                  DESC_THIS_SKILL_OBJ_RE.search(sent)):
             if m is None or DESC_NEGATION_RE.search(sent[:m.start(1)]):
                 continue
-            cond = " ".join(m.group(1).split()).rstrip(".!?")
+            cond = " ".join(DESC_TIGHT_STOP_RE.split(m.group(1))[0].split()).rstrip(".!?")
             words = re.findall(r"[A-Za-z][A-Za-z'-]*", cond)
             if len(words) >= DESC_WHEN_MIN_WORDS and any(w.lower() not in DESC_WHEN_VAGUE for w in words):
                 return cond
@@ -669,10 +680,10 @@ def check_skill(path):
     r.add("description-when", "single-task", when is not None,
           "description has an English trigger clause outside quotes (sentence-initial 'Use when ...', 'Used when ...', "
           "'Use this skill when ...', 'Use for/to ... when ...', 'Invoke when ...', 'Trigger when ...', "
-          "'... this skill when ...', 'Read this skill before ...') with a concrete condition" + (": %s" % when if when else ""),
+          "'... use this skill when ...', 'This skill should be used when ...', 'Read this skill before ...') with a concrete condition" + (": %s" % when if when else ""),
           "description에 영어 사용 조건 문장(예: 'Use when the user asks to summarize a PDF.')을 문장 첫머리에 넣으세요. "
           "'when'/'before' 뒤에 구체적인 조건(%d단어 이상)을 쓰세요. 'Use this.', 수동형('files loaded when', "
-          "'Applies to X when'), 부정형('Do not use when'), 따옴표 안 문장, 한국어 조건문('…할 때 사용한다')만으로는 "
+          "'Applies to X when', 'This skill is loaded when'), 부정형('Do not use when', 'Skip this skill when'), 따옴표 안 문장, 한국어 조건문('…할 때 사용한다')만으로는 "
           "인정하지 않습니다." % DESC_WHEN_MIN_WORDS, must=True)
     pov = desc_person_words(desc)
     r.add("description-pov", "single-task", not pov,

@@ -38,7 +38,7 @@ python3 eva.py feedback <path> --round 1                # FEEDBACK.md / FEEDBACK
 python3 eva.py index golden                             # INDEX.md / registry.json 생성
 python3 loop.py <path> --builder "<cmd>"                # 자동 피드백 루프 (LOOP.md, 빌더 실패 시 종료코드 2, REVIEW면 3)
 python3 eva.py check <agent> --transcript run.json      # [분리 예정] 에이전트 실행 기록 채점
-python3 -m unittest discover -s tests -v                # 테스트
+python3 -m unittest discover -s tests -v                # 테스트 (pytest도 pytest.ini의 testpaths로 같은 tests/만 수집)
 ```
 
 ## 스킬 구조 (agentskills.io 명세)
@@ -76,7 +76,7 @@ python3 -m unittest discover -s tests -v                # 테스트
 | `description-no-xml` [필수] | description에 `<`, `>` 없음 | B, V |
 | `description-length` [필수] | 1~1024자. 1024자를 넘으면 FAIL | S, B |
 | `description-min-length` | 20자 이상 (명세는 비어 있지만 않으면 됨) | H |
-| `description-when` [필수] | 언제 쓰는지를 **영어 사용 조건 문장**으로 적음(따옴표·백틱 안 글은 보지 않음). 인정: ① `Use`/`Used`/`Invoke`/`Trigger`로 **시작하는 문장**(선택적 `this skill`·`this`·`it`·`-ly` 부사·`for/to <작업>`) + `when`/`whenever`, ② `this skill`이 주어·목적어인 절("… this skill when …", "This skill should be used when …"), ③ "Read this skill before …"/"Read this skill when …". 그 뒤에 구체적인 조건(영어 단어 2개 이상, `needed`·`asked`·`appropriate` 같은 막연한 단어만은 불가). 실패: 다른 말 뒤의 `when`("Counts words when files change"), 수동형·분사형("files loaded when", "hooks called when", "Applies to X when", "…, used when"), 부정형("Do not use when", "Don't use when", "Never use when", "This skill should not be used when"), "Use this.", 한국어 조건문("…할 때 사용한다", "…하면 쓴다")만 있는 경우. 명세는 "Should describe … when to use it"(권장)이라 [필수]로 강제하는 것과 영어 문장만 인정하는 것은 자체 규칙 | S, B, H |
+| `description-when` [필수] | 언제 쓰는지를 **영어 사용 조건 문장**으로 적음(따옴표·백틱 안 글은 보지 않음). 인정: ① `Use`/`Used`/`Invoke`/`Trigger`로 **시작하는 문장**(선택적 `this skill`·`this`·`it`·`-ly` 부사·`for/to <작업>`) + `when`/`whenever`, ② 사용 동사(`use`/`using`/`invoke`/`trigger`/`read`) 바로 뒤의 `this skill` + `when`("… use this skill when …"), 또는 문장 첫머리 `This skill` + 조동사·be + 사용 동사(`should be used`·`can be used`·`must be invoked`·`is used`) + `when`, ③ "Read this skill before …"/"Read this skill when …". 그 뒤에 구체적인 조건(영어 단어 2개 이상, `needed`·`asked`·`appropriate` 같은 막연한 단어만은 불가). 마침표·`!`·`?` 바로 뒤에 대문자가 오면 공백이 없어도 조건은 거기서 끝남("Use when needed.The user …"는 실패). 실패: 다른 말 뒤의 `when`("Counts words when files change"), 수동형·분사형("files loaded when", "hooks called when", "Applies to X when", "…, used when", "This skill is loaded when", "This skill applies when", "Config files for this skill are loaded when"), 다른 동사("This skill counts words when", "Skip/Avoid this skill when"), 부정형("Do not use when", "Don't use when", "Never use when", "This skill should not be used when", "Cannot use this skill when", "Avoid using this skill when"; `not`·`never`·`n't`·`cannot`·`avoid`·`skip`·`without`), "Use this.", 한국어 조건문("…할 때 사용한다", "…하면 쓴다")만 있는 경우. 명세는 "Should describe … when to use it"(권장)이라 [필수]로 강제하는 것과 영어 문장만 인정하는 것은 자체 규칙 | S, B, H |
 | `description-pov` [필수] | 1·2인칭 표현 금지 (B: "Always write in third person", "I can help you…"·"You can use this…" 피하기). 영어 `I`, `me`, `my`, `mine`, `we`, `our`, `us`, `you`, `your`, `yourself`(대소문자 무관: `YOU`, `WE`도 실패)와 한국어 `저는`, `제가`, `저희`, `나는`, `내가`, `우리는/우리가/우리의`, `당신`, `너는`, `네가`, `여러분`을 찾음. 따옴표·백틱 안의 인용(`"fix my code"`, `'…'`, `“…”`, `` `my-app` ``)은 사용자 발화로 보고 제외. 하이픈·밑줄로 붙은 식별자(`my-app`), `I/O`, 로마 숫자(`Phase I`, `Type I`), 대문자 `US`(국가·약어)는 대명사로 보지 않음. 명령형("Use when …")은 허용. 주어를 생략한 한국어 1·2인칭은 찾지 못함 | B |
 | `single-purpose` | 여러 일을 나열하지 않음 | H |
 | `compatibility-length` [있으면 필수] | 1~500자 | S, V |
