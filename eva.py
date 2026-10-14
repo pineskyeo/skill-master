@@ -542,7 +542,7 @@ def _common_name(r, meta, path):
 
 # ---------- skills (agentskills.io specification + Claude skill authoring best practices) ----------
 SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
-WIN_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
+WIN_DRIVE_RE = re.compile(r"^[A-Za-z]:")  # 'C:\x', 'C:/x' and drive-relative 'C:x': a path, never a 1-letter URL scheme
 MD_LINK_RE = re.compile(r"\]\(\s*<?([^)\s>]+)>?(?:\s+[\"'][^)]*[\"'])?\s*\)")
 
 # Spec bundled directories (agentskills.io "Directory structure"); a path into one of them is a file reference
@@ -607,7 +607,7 @@ def local_refs(text):
     refs = set()
     for t in MD_LINK_RE.findall(prose):
         t = t.split("#", 1)[0].split("?", 1)[0]
-        if t and (not SCHEME_RE.match(t) or WIN_DRIVE_RE.match(t)):  # 'C:\x' / 'C:/x' is a path, not a URL scheme
+        if t and (not SCHEME_RE.match(t) or WIN_DRIVE_RE.match(t)):  # 'C:\x' / 'C:/x' / 'C:x' is a path, not a URL scheme
             refs.add(t)
     found = [(m.group(1), len(prose[:m.start()]) - len(prose[:m.start()].rstrip("*")))
              for m in BUNDLED_REF_RE.finditer(prose)]
@@ -620,7 +620,7 @@ def local_refs(text):
 def _ref_problem(ref):
     """Why a reference is not a portable relative path inside the skill root (None if fine)."""
     if "\\" in ref: return "backslash (use forward slashes)"
-    if ref.startswith("/") or ref.startswith("~") or WIN_DRIVE_RE.match(ref): return "absolute path (use a path relative to the skill root)"
+    if ref.startswith("/") or ref.startswith("~") or WIN_DRIVE_RE.match(ref): return "absolute or drive path (use a path relative to the skill root)"
     norm = posixpath.normpath(ref)
     if norm == ".." or norm.startswith("../"): return "points outside the skill directory"
     return None
@@ -649,17 +649,21 @@ def ref_targets(path, refs):
     """Sort refs by where they resolve (after '..' normalization and symlinks). Returns sorted lists
     (missing, repo_refs, up_refs, escaped): missing = found nowhere; repo_refs = absent from the skill folder but found
     from the git repo root (repo_root_ref); up_refs = exist outside the skill folder but inside the repo;
-    escaped = absolute / '~' / backslash paths, or targets outside both the skill folder and the repo, even if they
-    exist. Refs that resolve to an existing file inside the skill folder (bundled) are in none of the lists."""
+    escaped = absolute / '~' / drive / backslash paths, or targets outside both the skill folder and the repo.
+    Escapes are classified before the existence check, so a missing escaping path ('../../../../nope') or a dangling
+    symlink pointing outside is escaped, not missing. Refs that resolve to an existing file inside the skill folder
+    (bundled) are in none of the lists."""
     skill, repo = os.path.realpath(path), git_root(path)
     missing, repo_refs, up_refs, escaped = [], [], [], []
     for x in sorted(refs):
         if "\\" in x or x.startswith(("/", "~")) or WIN_DRIVE_RE.match(x):
-            escaped.append(x); continue  # absolute or backslash: never a portable skill reference
-        target = os.path.realpath(os.path.join(skill, x))
+            escaped.append(x); continue  # absolute, drive or backslash: never a portable skill reference
+        target = os.path.realpath(os.path.join(skill, x))  # resolves dangling symlinks as far as they go
+        if not (_within(skill, target) or _within(repo, target)):
+            escaped.append(x); continue
         if os.path.exists(target):
             if _within(skill, target): continue
-            (up_refs if _within(repo, target) else escaped).append(x)
+            up_refs.append(x)
         elif repo_root_ref(path, x): repo_refs.append(x)
         else: missing.append(x)
     return missing, repo_refs, up_refs, escaped
@@ -843,7 +847,7 @@ def check_skill(path):
               ("; outside the skill folder, inside the git repo, not bundled: %s" % up_refs if up_refs else ""),
               "없는 파일을 만들거나 참조를 지우세요: %s" % ", ".join(missing) if not escaped else
               "스킬 폴더·리포 밖을 가리키는 참조(절대경로, 역슬래시, '..'·심볼릭 링크 탈출)를 지우거나 파일을 스킬 폴더 "
-              "안에 넣고 상대경로로 링크하세요: %s" % ", ".join(escaped + missing), must=bool(escaped))
+              "안에 넣고 상대경로로 링크하세요: %s" % ", ".join(escaped + missing), must=True)
     else:
         r.review("refs-exist", "structure",
                  "; ".join(s for s in (

@@ -1091,7 +1091,7 @@ class TestDocsHouseRules(unittest.TestCase):
         for cid in ("refs-one-level", "description-length", "description-pov"):
             self.assertNotIn("H", [s.strip() for s in self.row(cid)[-1].split(",")], cid)
     def test_must_markers(self):
-        for cid in ("description-length", "description-when", "description-pov"):
+        for cid in ("description-length", "description-when", "description-pov", "refs-exist"):
             self.assertIn("[필수]", self.row(cid)[0], cid)
         for c in eva.check(p("golden/skills/pdf-summarizer")).checks:
             if c["id"] in ("description-length", "description-when", "description-pov"):
@@ -1648,6 +1648,36 @@ class TestRound8EscapingRefs(TmpMixin, unittest.TestCase):
     def test_ref_targets_unit(self):
         d = os.path.join(self.tmp, "repo", "skills", "word-count"); self.make("")
         self.assertEqual(eva.ref_targets(d, {"/etc/hosts", "SKILL.md", "nope.md"}), (["nope.md"], [], [], ["/etc/hosts"]))
+
+class TestRound9RefsExistRequired(TestRound8EscapingRefs):
+    """refs-exist is required: any missing ref fails the unit; escaping refs are classified before the existence check."""
+    def test_missing_escaping_dotdot_fails_overall(self):
+        ref = "../../../../definitely-no-such-file"
+        r = self.make("See [x](%s).\n" % ref)
+        self.assert_escape_fails(r, ref)
+        self.assertIn("outside the skill folder and the git repo", self.refs_exist(r)["reason"])
+        self.assertEqual(eva.ref_targets(os.path.join(self.tmp, "repo", "skills", "word-count"), {ref}),
+                         ([], [], [], [ref]))
+    def test_dangling_symlink_outside_fails(self):
+        r = self.make("Run `scripts/gone.py`.\n", links={"scripts/gone.py": "nowhere/gone.py"})
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "nowhere", "gone.py")))
+        self.assert_escape_fails(r, "scripts/gone.py")
+        self.assertIn("outside the skill folder and the git repo", self.refs_exist(r)["reason"])
+    def test_missing_bundled_ref_fails_overall(self):
+        r = self.make("Run `scripts/missing.py`.\n")
+        c = self.refs_exist(r)
+        self.assertEqual(c["status"], "fail"); self.assertTrue(c["must"], c)
+        self.assertIn("missing ['scripts/missing.py']", c["reason"]); self.assertEqual(r.verdict, "FAIL", r.failed)
+    def test_missing_inside_repo_dotdot_fails_overall(self):
+        r = self.make("See [x](../../NOPE.md).\n")
+        c = self.refs_exist(r)
+        self.assertEqual(c["status"], "fail"); self.assertTrue(c["must"]); self.assertEqual(r.verdict, "FAIL")
+    def test_drive_relative_is_path_not_url(self):
+        self.assertIn("C:relative.txt", eva.local_refs("See [x](C:relative.txt).\n"))
+        self.assertTrue(eva._ref_problem("C:relative.txt"))
+        self.assert_escape_fails(self.make("See [x](C:relative.txt).\n"), "C:relative.txt")
+        self.assertNotIn("https://example.com", eva.local_refs("See [x](https://example.com).\n"))
+        self.assertFalse(eva.local_refs("Mail [me](mailto:a@b.c).\n"))
 
 class TestRound8ArgumentHintString(SkillMixin, unittest.TestCase):
     """argument-hint must be a YAML string: unquoted bool/null/number scalars fail field-types."""
