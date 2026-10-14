@@ -138,3 +138,7 @@ python3 -m unittest discover -s tests -v                # 테스트 (pytest도 p
 - 워크스페이스 밖 탐색: 정규화한 뒤 밖으로 나가는 `..`/`../x`, `~`, 파일시스템 루트 `/`, transcript에 `workspace`가 있으면 그 밖의 절대경로 (예: `find ..`, `find /`, `cat ../answer.txt`, `{"path": "../x"}`)
 - git 이력 뒤지기: `git log --all`/`--reflog`/`-g`, `git rev-list --all`, `git reflog`, `git fsck`, `git cat-file`, `--lost-found`/`--unreachable`
 - 검사 대상: 문자열 `input`(명령으로 봄), 객체 `input`의 경로 키(`path`, `file_path`, `dir`, `cwd`, `target` 등)와 명령 키(`command`, `cmd`, `script`, `args`). `pattern`, `query` 같은 검색어는 보지 않습니다.
+
+## Known limitations
+
+- Sentence splitting in description-when: a period directly followed by a lowercase letter (e.g. "Use when needed.the user wants a summary.") is not treated as a sentence boundary, so the condition is not cut there.
