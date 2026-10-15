@@ -141,7 +141,8 @@ class TestLoopGates(Base):
         self.assertEqual(cmd[cmd.index("--tools") + 1], "Read,Edit,Write,Glob,Grep")
         self.assertNotIn("Bash", " ".join(cmd[3:]))
         self.assertAlmostEqual(b.spent, 5.0)  # round 5: no usage, reported $1.25 < cap $5.00: max(reported, cap)
-        se.ClaudeBuilder("x", "claude-opus-5-5", b, exec_fn=lambda cmd, cwd, timeout, env=None: (0, "not json", ""))(it, "/s")
+        with self.assertRaises(se.EvalError):  # round 7: unreadable output is charged the cap and stops
+            se.ClaudeBuilder("x", "claude-opus-5-5", b, exec_fn=lambda cmd, cwd, timeout, env=None: (0, "not json", ""))(it, "/s")
         self.assertAlmostEqual(b.spent, 5.0 + 2.5)  # no usage reported: the cap (half of $5.00) is charged
         with self.assertRaises(se.LiveDisabled): se.ClaudeBuilder("x", "claude-opus-5-5", se.Budget(5))(it, "/s")
         with self.assertRaises(se.EvalError): se.ClaudeBuilder("x", "m", se.Budget(0.01), exec_fn=fx)(it, "/s")

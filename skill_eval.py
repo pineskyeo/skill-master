@@ -14,7 +14,7 @@ variables are refused and scrubbed from every child, and costs are API-equivalen
 Usage: python3 skill_eval.py <validate|estimate|plan|run|grade|calibrate|report|approve|register|snapshot|loop> <skill> ...
        (also reachable as: python3 eva.py eval <subcommand> ...)
 """
-import argparse, datetime, hashlib, json, math, os, platform, random, re, shutil, subprocess, sys, tempfile, time
+import argparse, datetime, hashlib, json, math, os, platform, random, re, shlex, shutil, subprocess, sys, tempfile, time
 
 LAYERS = ("static", "llm", "human")
 BASELINES = {"none": "without_skill", "old": "old_skill"}  # skill-creator configuration names
@@ -435,9 +435,11 @@ def _read_settings(p):
     return rjson(p, {})
 
 def claude_settings_auth_problems(paths):
-    """API-key auth or provider routing configured in any of these Claude settings files: apiKeyHelper or a
-    NON_SUBSCRIPTION_ENV entry in "env" (key names only, values never read into messages). A file that exists but
-    cannot be parsed fails closed."""
+    """API-key auth, provider routing or a non-Keychain token configured in any of these Claude settings files:
+    apiKeyHelper or a NON_SUBSCRIPTION_ENV / IGNORED_AUTH_ENV entry in "env" (key names only, values never read into
+    messages). Env scrubbing removes CLAUDE_CODE_OAUTH_TOKEN from the shell env only; a settings "env" entry would be
+    set by the CLI itself after scrubbing (whether it then overrides the Keychain login is not verified, 추정), so it
+    is refused. A file that exists but cannot be parsed fails closed."""
     out = []
     for p in paths:
         if not os.path.lexists(p): continue
@@ -451,6 +453,10 @@ def claude_settings_auth_problems(paths):
         if keys:
             out.append("claude: %s configures API-key auth (%s; values not read); eval runs use subscription auth only"
                        % (p, ", ".join(keys)))
+        tok = sorted(k for k in env if k in IGNORED_AUTH_ENV)
+        if tok:
+            out.append("claude: %s sets %s in \"env\" (value not read); eval runs use only the existing Keychain login "
+                       "(`claude auth status`), not a token from settings" % (p, ", ".join(tok)))
     return out
 
 def claude_project_settings(dirs):
@@ -780,11 +786,14 @@ class CodexEngine(Engine):
         if self.model: cmd += ["-m", self.model]
         return cmd + self.extra_args + [prompt]
     def parse(self, stdout):
-        r = new_result()
+        """Raises ValueError when no line is a JSON event with a "type" (empty or unreadable stream): Engine.run then
+        marks the call failed, so max(reported, cap/bound) is charged and the iteration stops."""
+        r, events = new_result(), 0
         for line in stdout.splitlines():
             try: ev = json.loads(line)
             except ValueError: continue
-            if not isinstance(ev, dict): continue
+            if not isinstance(ev, dict) or not isinstance(ev.get("type"), str): continue
+            events += 1
             t = ev.get("type")
             if t == "item.completed" and isinstance(ev.get("item"), dict):
                 it = ev["item"]
@@ -801,6 +810,7 @@ class CodexEngine(Engine):
                 r["output_tokens"] += int(u.get("output_tokens") or 0) + int(u.get("reasoning_output_tokens") or 0)
             elif t in ("turn.failed", "error"):
                 r["error"] = json.dumps(ev.get("error") or ev.get("message") or t, ensure_ascii=False)[:500]
+        if not events: raise ValueError("codex output has no readable JSON event")
         return r
     def triggered(self, result, skill_name):
         needle = "skills/%s/SKILL.md" % skill_name
@@ -1268,7 +1278,8 @@ def preflight(spec, engines, run_root=None, home=None):
       (`user-invocable: false`, claude_undetectable_skill_problems). Other synced and plugin skills are left to the
       init check (plan shows them as notes);
     - any provider-routing variable (PROVIDER_ENV);
-    - claude: API-key auth or provider routing (apiKeyHelper / NON_SUBSCRIPTION_ENV env entry) in ANY settings source
+    - claude: API-key auth, provider routing or CLAUDE_CODE_OAUTH_TOKEN (apiKeyHelper / NON_SUBSCRIPTION_ENV /
+      IGNORED_AUTH_ENV env entry) in ANY settings source
       a run could load: user settings(.local).json of the effective config dir, .claude/settings(.local).json of
       run_root and every ancestor, every managed source (managed-settings.json + managed-settings.d, MDM profile,
       registry: fail closed) and the server-managed cache; the sandbox's own work/.claude settings (fixtures) are
@@ -2066,8 +2077,11 @@ class ClaudeBuilder:
             raise EvalError("builder call failed after launch (%s); charged $%.2f and stopped" % (type(ex).__name__, fallback))
         self.calls += 1
         try: data = json.loads(out or "")
-        except (ValueError, TypeError): data = {}
-        data = data if isinstance(data, dict) else {}
+        except (ValueError, TypeError): data = None
+        if not isinstance(data, dict):  # paid call, unreadable output: charge max(reported, cap) and stop
+            charged = max(fallback, reported_cost(out) or 0.0)
+            self._record(it_dir, 0, 0, charged)
+            raise EvalError("builder output is not a JSON object (exit %s); charged $%.2f and stopped" % (rc, charged))
         try:
             tin, tout = claude_usage(data)
         except Exception as ex:  # paid call, unreadable usage: charge max(reported, cap) and stop
@@ -2253,8 +2267,7 @@ def live_dry_run(a, spec, problems, ws, n, engines, tokens, prices):
     print("live gates that would refuse this command (%d):" % len(fails))
     for r in fails: print("  - " + r.replace("\n", "\n    "))
     if AUTH_STATUS_SKIPPED in report: print("  (%s)" % AUTH_STATUS_SKIPPED)
-    print("live command: python3 skill_eval.py " + " ".join(
-        json.dumps(x, ensure_ascii=False) if (" " in x or not x) else x for x in a.argv if x != "--dry-run"))
+    print("live command: " + shlex.join(["python3", "skill_eval.py"] + [x for x in a.argv if x != "--dry-run"]))
     return 3 if fails else 0
 
 def spec_counts(spec, a):
