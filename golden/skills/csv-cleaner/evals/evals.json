@@ -3,7 +3,7 @@
   "evals": [
     {
       "id": 1,
-      "prompt": "data/orders_2025.csv에 같은 주문이 여러 번 들어가 있어. 분석 전에 중복 행 좀 지워서 orders_clean.csv로 저장해줘",
+      "prompt": "evals/files/orders_2025.csv에 같은 주문이 여러 번 들어가 있어. 분석 전에 중복 행 좀 지워서 orders_clean.csv로 저장해줘",
       "expected_output": "중복 행이 한 번씩만 남은 orders_clean.csv",
       "files": [
         "evals/files/orders_2025.csv"

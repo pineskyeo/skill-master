@@ -260,7 +260,8 @@ class TestCodexSoftBudget(Base):
         rc, out, _ = self.cli("estimate", d, "--engines", "claude")
         self.assertNotIn("SOFT LIMIT", out)
         rc, out, _ = self.cli("plan", d, "--engines", "codex", "--price", "codex=2,10")
-        self.assertIn("SOFT LIMIT: codex", out); self.assertIn("--strict-budget", out)
+        self.assertIn("SOFT LIMIT: codex", out); self.assertIn("--no-strict-budget", out)
+        self.assertIn("budget enforcement: STRICT (default): --live refuses codex", out)  # round 6: strict by default
         self.assertEqual((se.budget_enforcement(se.CodexEngine), se.budget_enforcement(se.ClaudeCodeEngine)),
                          ("soft_limit", "per_call_cap"))
 
@@ -275,7 +276,7 @@ class TestCodexSoftBudget(Base):
                                                       "--engines", engines, "--price", "codex=2,10", "--runs", "1",
                                                       "--run-root", self.runs, "--strict-budget")))
                     self.assertEqual(rc, 2, (argv, engines, out, err))
-                    self.assertIn("--strict-budget: codex has no enforceable per-call budget cap", err)
+                    self.assertIn("--strict-budget (default): codex has no enforceable per-call budget cap", err)
         self.assertEqual(calls, []); self.assertEqual(se.iterations(self.ws), []); self.assertFalse(se._LIVE["on"])
 
     def test_strict_budget_allows_claude_and_default_mode_warns_for_codex(self):
@@ -288,7 +289,12 @@ class TestCodexSoftBudget(Base):
             self.assertEqual(rc, 0, err); self.assertNotIn("SOFT LIMIT", err)
             rc, out, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "50", "--engines", "codex",
                                     "--price", "codex=2,10", "--runs", "1", "--run-root", self.runs)
+        self.assertEqual(rc, 2, err); self.assertIn("--strict-budget (default)", err)  # round 6: refused by default
+        with mock.patch.object(se, "live_exec", live):
+            rc, out, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "50", "--engines", "codex",
+                                    "--price", "codex=2,10", "--runs", "1", "--run-root", self.runs, "--no-strict-budget")
         self.assertEqual(rc, 0, err); self.assertIn("WARNING: budget SOFT LIMIT: codex", err)
+        self.assertIn("readable by the agent under test", err)
         self.assertEqual(plan_of(self.ws, 1)["budget_enforcement"], {"claude": "per_call_cap"})
         self.assertEqual(plan_of(self.ws, 2)["budget_enforcement"], {"codex": "soft_limit"})
         self.assertTrue(fc.calls); self.assertTrue(fx.calls)

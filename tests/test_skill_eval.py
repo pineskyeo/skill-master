@@ -643,6 +643,8 @@ class TestCLI(Base):
         self.cli("approve", d, "--workspace", self.ws, "--gate", "requirements", "--by", "pinesky")
         self.cli("approve", d, "--workspace", self.ws, "--gate", "eval_set", "--by", "pinesky")
         rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "100")
+        self.assertEqual(rc, 2); self.assertIn("--strict-budget (default)", err)  # round 6: default engines include codex
+        rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "100", "--no-strict-budget")
         self.assertEqual(rc, 2); self.assertIn("no price for", err)
         rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "1", "--engines", "claude")
         self.assertEqual(rc, 2); self.assertIn("exceeds budget", err)
@@ -708,7 +710,7 @@ class TestCLI(Base):
         self.assertEqual(rc, 2); self.assertIn("finite prices > 0", err)
         # codex worst case per exec call: 3 x (60000 x 100 + 4000 x 100) / 1e6 = $19.20 > $10 budget
         rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "10", "--engines", "codex",
-                              "--price", "codex=100,100", "--runs", "1")
+                              "--price", "codex=100,100", "--runs", "1", "--no-strict-budget")
         self.assertEqual(rc, 2); self.assertIn("worst-case exec call bound $19.20", err); self.assertIn("no per-call cap", err)
         self.assertEqual(se.iterations(self.ws), [])
 
@@ -758,9 +760,9 @@ class TestCLI(Base):
         synced = os.path.join(self.home, ".claude", "skills", "synced", "abc", "branch-setup")
         os.makedirs(synced); write(os.path.join(synced, "SKILL.md"), SKILL_MD)
         pf = se.preflight(spec, ["claude", "codex"], self.runs)
-        self.assertEqual(len(pf), 2); self.assertTrue(pf[0].startswith("claude: skill 'branch-setup' is also installed"), pf)
-        self.assertIn("synced/plugin skill(s)", pf[1])  # round 5: any synced skill blocks a shared-config-dir run
-        rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "1000", "--price", "codex=1,1",
+        self.assertEqual(len(pf), 1); self.assertTrue(pf[0].startswith("claude: skill 'branch-setup' is also installed"), pf)
+        # round 6: a user-invocable synced skill is left to the post-run init check; only `user-invocable: false` blocks
+        rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "1000", "--engines", "claude",
                               "--run-root", self.runs)
         self.assertEqual(rc, 2); self.assertIn("preflight: claude", err)
         shutil.rmtree(os.path.join(self.home, ".claude", "skills", "synced"))

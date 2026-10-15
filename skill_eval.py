@@ -46,11 +46,15 @@ DEFAULT_BUILDER_MODEL = "claude-opus-5-5"
 # Per-call budget control (H). Claude: --max-budget-usd gets only this share of the remaining budget, because how far
 # the CLI can overshoot its cap is not documented. Codex has no per-call cap, so its budget is a SOFT LIMIT: a call
 # starts only when its estimated worst-case bound (assumed tokens x WORST_CASE_FACTOR x price) fits the remaining
-# budget, but nothing stops one call from costing more. --strict-budget refuses live runs of such engines.
+# budget, but nothing stops one call from costing more. --strict-budget (the default) refuses live runs of such
+# engines; --no-strict-budget is an explicit, risky opt-out.
 CLAUDE_CAP_HEADROOM = 0.5
 WORST_CASE_FACTOR = 3.0
 SOFT_LIMIT_NOTE = ("SOFT LIMIT: %s has no per-call budget cap; the worst-case bound is an estimate, so one call can "
-                   "exceed the remaining budget (use --strict-budget to refuse such engines)")
+                   "exceed the remaining budget (--live refuses it by default; --no-strict-budget allows it, risky)")
+NO_STRICT_WARNING = ("--no-strict-budget: %s runs with a SOFT budget limit (one call can exceed --budget-usd) and its "
+                     "auth.json copy is readable by the agent under test (its tokens may be saved in transcripts or "
+                     "output files)")
 
 def budget_enforcement(engine_cls_or_obj):
     return "per_call_cap" if engine_cls_or_obj.has_call_cap else "soft_limit"
@@ -267,6 +271,9 @@ PROVIDER_ENV = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_COD
                 "ANTHROPIC_VERTEX_BASE_URL", "ANTHROPIC_VERTEX_PROJECT_ID", "ANTHROPIC_FOUNDRY_BASE_URL",
                 "ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_PROFILE", "ANTHROPIC_CONFIG_DIR", "ANTHROPIC_FEDERATION_RULE_ID")
 NON_SUBSCRIPTION_ENV = API_KEY_ENV + PROVIDER_ENV
+# Not refused, but removed from every child: Claude runs authenticate only with the existing Keychain login of the
+# unchanged config dir, the same login `claude auth status` verified. An exported setup-token would replace it.
+IGNORED_AUTH_ENV = ("CLAUDE_CODE_OAUTH_TOKEN",)
 # `--json` and the method values "claude.ai" / "api_key" are from the Claude Code changelog
 # (~/.claude/cache/changelog.md: "Added `configDirectory` to the output of `claude auth status --json`", "it now
 # reports `api_key`"). The JSON key that holds the method is not documented there (추정), so every string value under
@@ -281,8 +288,8 @@ ACTUAL_SPEND_NOTE = ("not metered: subscription runs (claude.ai plan / ChatGPT p
                      "limits and any extra-usage charges are visible only in your account")
 
 def scrub_env(env):
-    """Copy of env without the API-key and provider-routing variables (NON_SUBSCRIPTION_ENV)."""
-    return {k: v for k, v in dict(env).items() if k not in NON_SUBSCRIPTION_ENV}
+    """Copy of env without the API-key and provider-routing variables (NON_SUBSCRIPTION_ENV) and IGNORED_AUTH_ENV."""
+    return {k: v for k, v in dict(env).items() if k not in NON_SUBSCRIPTION_ENV + IGNORED_AUTH_ENV}
 
 def api_key_env_problems(environ=None):
     environ = os.environ if environ is None else environ
@@ -326,14 +333,15 @@ def claude_auth_problems(status_fn=None):
     if rc != 0 or not isinstance(data, dict):
         return ["claude: `claude auth status --json` gave no JSON (exit %s); cannot verify subscription auth" % rc]
     if data.get("loggedIn") is False:
-        return ["claude: not logged in; run `claude` and /login with your claude.ai account (or set CLAUDE_CODE_OAUTH_TOKEN)"]
+        return ["claude: `claude auth status` reports no login; live Claude runs use only the existing claude.ai "
+                "Keychain login of this user session"]
     vals = _string_values(data, re.compile(r"auth|method|source|provider", re.I))
     norm = [re.sub(r"[^a-z0-9]", "", v.lower()) for v in vals]
     api = sorted({_shown(v) for v, n in zip(vals, norm) if "apikey" in n or n == "console"
                   or ("authtoken" in n and "oauth" not in n)})  # ANTHROPIC_AUTH_TOKEN, not oauth_token
     if api:
-        return ["claude: auth status reports API-key auth %s; eval runs use subscription auth only (log in with "
-                "claude.ai, or use a `claude setup-token` token in CLAUDE_CODE_OAUTH_TOKEN)" % api]
+        return ["claude: auth status reports API-key auth %s; eval runs use only the existing claude.ai (OAuth "
+                "subscription) Keychain login" % api]
     if data.get("loggedIn") is not True:
         return ["claude: auth status has no `loggedIn: true`; cannot verify subscription auth"]
     # The method must come from a key named like a method (authMethod, method, ...) and be one of the recognized
@@ -485,6 +493,18 @@ def new_result():
     return {"final": "", "tool_calls": [], "input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0,
             "cost_usd": None, "error": None, "init": None}
 
+def reported_cost(stdout):
+    """Largest numeric total_cost_usd in any JSON line of a CLI output, or None. Used only when the output as a whole
+    could not be parsed, so a reported cost above the cap is still charged."""
+    best = None
+    for line in (stdout or "").splitlines():
+        try: ev = json.loads(line)
+        except ValueError: continue
+        v = ev.get("total_cost_usd") if isinstance(ev, dict) else None
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v > 0:
+            best = v if best is None else max(best, v)
+    return None if best is None else float(best)
+
 def check_extra_args(engine, args):
     """Rejects extra CLI args that would change the priced model or the per-call budget cap."""
     bad, args = [], list(args)
@@ -548,7 +568,9 @@ class Engine:
     def run(self, prompt, workdir, with_skill, budget_usd=None, env=None):
         """A call that raises after it may have started (timeout, crash, ...) is not re-raised: it comes back as an
         error result with no usage and launch_failed set, so the caller charges the cap/bound, records it and stops.
-        LiveDisabled is raised before anything starts and passes through."""
+        Output that cannot be parsed after the call (e.g. nonnumeric usage) is handled the same way, with any
+        CLI-reported cost kept so max(reported, cap) is charged. LiveDisabled is raised before anything starts and
+        passes through."""
         cmd = self.command(prompt, with_skill, budget_usd)
         t0, start = time.monotonic(), now_iso()
         failed = None
@@ -558,7 +580,11 @@ class Engine:
             raise
         except Exception as ex:
             rc, out, err, failed = None, "", "", "call failed after launch (%s)" % type(ex).__name__
-        res = self.parse(out or "")
+        try:
+            res = self.parse(out or "")
+        except Exception as ex:
+            res = dict(new_result(), cost_usd=reported_cost(out))
+            failed = failed or "output could not be parsed after the call (%s)" % type(ex).__name__
         res.update(returncode=rc, stderr_tail=(err or "")[-2000:], duration_ms=int((time.monotonic() - t0) * 1000),
                    executor_start=start, executor_end=now_iso(), command=cmd, launch_failed=failed)
         if failed: res["error"] = failed
@@ -569,11 +595,11 @@ class ClaudeCodeEngine(Engine):
     """claude -p (https://code.claude.com/docs/en/headless, /cli-reference). Skill on: copied to
     <sandbox>/work/.claude/skills/<name>/ (project skill). Skill off: --disable-slash-commands ("Disable all skills").
     Both: --setting-sources project,local (user skills under ~/.claude/skills are the "user" source), no MCP servers,
-    bundled skills off. Config dir: with CLAUDE_CODE_OAUTH_TOKEN exported, every run gets its own empty
-    CLAUDE_CONFIG_DIR (<sandbox>/claude_config), so no user skill, synced skill, plugin, user setting or server-managed
-    cache exists for it. Without the token, HOME and CLAUDE_CONFIG_DIR are left alone (the macOS Keychain login is
-    keyed to the config dir) and the run is refused before launch when the config dir holds a skill source that
-    --setting-sources is not documented to hide (claude.ai synced skills, plugin skills)."""
+    bundled skills off. Auth: only the existing claude.ai Keychain login, so HOME and CLAUDE_CONFIG_DIR are left alone
+    (the macOS Keychain entry is keyed to the config dir) and CLAUDE_CODE_OAUTH_TOKEN is removed from the child env.
+    The shared config dir still holds skill sources --setting-sources is not documented to hide: plugin skills load
+    only through an enabled plugin, which the post-run init check sees (plugins must be []); claude.ai synced skills
+    show up in init `skills` unless `user-invocable: false`, and those are refused before launch."""
     name, skills_rel, has_call_cap = "claude", ".claude/skills", True
     SETTINGS, ENV = CLAUDE_SETTINGS_JSON, CLAUDE_CHILD_ENV
     def command(self, prompt, with_skill, budget_usd=None):
@@ -584,35 +610,24 @@ class ClaudeCodeEngine(Engine):
         if not with_skill: cmd += ["--disable-slash-commands"]
         return cmd + self.extra_args
     def sandbox_env(self, root):
-        """Subscription auth from the user's own session: CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token`) is passed
-        through only if already exported (then with an empty per-run CLAUDE_CONFIG_DIR), otherwise the CLI reads the
-        Keychain login of the unchanged HOME / CLAUDE_CONFIG_DIR. The harness never writes or logs a token. API-key
-        and provider-routing variables are removed."""
-        if "CLAUDE_CODE_OAUTH_TOKEN" not in os.environ: return claude_child_env()
-        cfg = os.path.join(root, "claude_config"); os.makedirs(cfg, mode=0o700)
-        return claude_child_env(cfg)
+        """Subscription auth from the user's own session: the CLI reads the existing Keychain login of the unchanged
+        HOME / CLAUDE_CONFIG_DIR. Nothing is asked of the user; no token is created, passed or written. API-key,
+        provider-routing and CLAUDE_CODE_OAUTH_TOKEN variables are removed."""
+        return claude_child_env()
     def auth_record(self):
-        return {"billing": BILLING, "method": "CLAUDE_CODE_OAUTH_TOKEN (env, value not logged), empty per-run "
-                "CLAUDE_CONFIG_DIR" if "CLAUDE_CODE_OAUTH_TOKEN" in os.environ
-                else "claude.ai login of the current user session (Keychain)"}
+        return {"billing": BILLING, "method": "claude.ai login of the current user session (Keychain)"}
     def sandbox_problems(self, root, work, skill_name, with_skill):
         """Before launch: the project skill set (Engine), no auth/provider setting in any source the run can load
-        (claude_launch_problems: cwd + ancestors, managed sources, the server-managed cache of the config dir it
-        uses), no custom command files in the cwd or an ancestor, and no user-level skill source that is not provably
-        hidden (see the class docstring)."""
+        (claude_launch_problems: cwd + ancestors, managed sources, the server-managed cache of the config dir), no
+        custom command files in the cwd or an ancestor, and no synced skill that the init check could not see
+        (claude_undetectable_skill_problems)."""
         out = Engine.sandbox_problems(self, root, work, skill_name, with_skill)
-        cfg = os.path.join(root, "claude_config")
-        own = os.path.isdir(cfg)
         for a in ancestors(work):
             cd = os.path.join(a, ".claude", "commands")
             if os.path.isdir(cd) and any(f.endswith(".md") for _, _, fn in os.walk(cd) for f in fn):
                 out.append("custom command files in %s would load like skills" % cd)
-        if own:
-            hits = claude_user_skills(cfg, config_dir=True)
-            if hits: out.append("per-run config dir %s is not empty: %s" % (cfg, sorted(n for n, _ in hits)))
-        else:
-            out += claude_unhidden_skill_problems(claude_config_dir())
-        return out + claude_launch_problems(work, cfg if own else None)
+        out += claude_undetectable_skill_problems(claude_config_dir())
+        return out + claude_launch_problems(work)
     def isolation_problems(self, res, with_skill, skill_name, user_names):
         """From the stream-json system/init event: apiKeySource "none" (docs/en/agent-sdk/typescript ApiKeySource:
         "No API key. The session authenticates another way, such as a claude.ai login"), an explicit empty plugin
@@ -686,8 +701,11 @@ class CodexEngine(Engine):
     def sandbox_env(self, root):
         """HOME=<sandbox>/home hides $HOME/.agents/skills; CODEX_HOME=<sandbox>/codex_home hides $CODEX_HOME/skills
         (user + plugin skills) and config.toml. Auth: a read-only copy (0400, in a 0700 folder) of the real
-        $CODEX_HOME/auth.json, only when its auth_mode is ChatGPT. The copy is removed with the sandbox; its content is
-        never printed or logged. A symlink is not used: chmod on it would change the user's own file."""
+        $CODEX_HOME/auth.json, only when its auth_mode is ChatGPT. The copy is removed with the sandbox. The harness
+        itself does not print or log it, but the agent under test runs as the same user and CAN read it (0400 does not
+        stop the owner; Codex workspace-write permits reads), so its tokens may end up in the saved final answer,
+        transcript or output files. That is why Codex is refused by default (--strict-budget) and is not part of the
+        first live run. A symlink is not used: chmod on it would change the user's own file."""
         home, ch = os.path.join(root, "home"), os.path.join(root, "codex_home")
         os.makedirs(home, mode=0o700); os.makedirs(ch, mode=0o700); os.chmod(ch, 0o700)
         probs = codex_auth_problems()
@@ -701,7 +719,8 @@ class CodexEngine(Engine):
         self._auth_digest[root] = hashlib.sha256(data).hexdigest()
         return scrub_env(dict(os.environ, HOME=home, CODEX_HOME=ch))
     def auth_record(self):
-        return {"billing": BILLING, "method": "ChatGPT login (auth_mode chatgpt), read-only copy of auth.json, removed after the run"}
+        return {"billing": BILLING, "method": "ChatGPT login (auth_mode chatgpt), read-only copy of auth.json (readable "
+                "by the agent under test), removed after the run"}
     def sandbox_problems(self, root, work, skill_name, with_skill):
         out = Engine.sandbox_problems(self, root, work, skill_name, with_skill)
         for label, d in (("sandbox HOME", os.path.join(root, "home", ".agents", "skills")),
@@ -726,9 +745,16 @@ class CodexEngine(Engine):
     def remove_credentials(self, root, attempts=3):
         """Deletes <sandbox>/codex_home/auth.json on its own, before the rest of the sandbox, and verifies it is gone.
         A failed unlink is retried after making the folder writable; as a last resort the copy is made writable and
-        truncated, so no token stays on disk even when the file itself cannot be removed."""
+        truncated, so no token stays on disk even when the file itself cannot be removed. The path is checked
+        lexically (the folder holding it must really be inside root), never by resolving auth.json itself: if the run
+        replaced it by a symlink pointing outside, the link is unlinked and its target is left alone."""
         ch = os.path.join(root, "codex_home")
-        p = ensure_inside(root, os.path.join(ch, "auth.json"))
+        p = os.path.join(ch, "auth.json")
+        try:
+            ensure_inside(root, ch)
+        except EvalError:  # codex_home itself was swapped for a link out of the sandbox: never follow it
+            return ("%s was replaced by a link out of the sandbox; it was not followed (the sandbox removal deletes "
+                    "the link itself)" % ch)
         err = None
         for _ in range(attempts):
             if not os.path.lexists(p): return None
@@ -822,19 +848,45 @@ def claude_user_skills(base, config_dir=False):
         if root.count(os.sep) - pc.count(os.sep) > 6: dirs[:] = []
     return out
 
-def claude_unhidden_skill_problems(cfg):
-    """Skill sources in the user's config dir that --setting-sources project,local is not documented to hide. The
-    plain <cfg>/skills/<name> folders are the "user" source (docs/en/agent-sdk/skills: include 'user' "to keep your
-    personal skills"), so they are hidden; claude.ai synced skills and plugin skills are not covered by that sentence
-    (추정 either way), so they block a run that shares the user's config dir. Fix: export CLAUDE_CODE_OAUTH_TOKEN
-    (`claude setup-token`), which gives every run an empty config dir."""
+def _not_user_invocable(skill_dir):
+    """True when SKILL.md frontmatter says `user-invocable: false` (such a skill loads but is missing from the
+    system/init skills list, docs/en/agent-sdk/skills). An unreadable SKILL.md counts as not verifiable (True)."""
+    import eva
+    text, err = eva.read_text(os.path.join(skill_dir, "SKILL.md"))
+    if err: return True
+    meta = eva.parse_frontmatter(text)[0] or {}
+    return str(meta.get("user-invocable", "")).strip().lower() == "false"
+
+def claude_shared_skill_sources(cfg):
+    """(synced, plugin) [(name, path)] in the user's config dir that --setting-sources project,local is not documented
+    to hide. Plain <cfg>/skills/<name> folders are the "user" source (docs/en/agent-sdk/skills: include 'user' "to
+    keep your personal skills") and are left out."""
     top = os.path.normpath(os.path.join(cfg, "skills"))  # logical path: a symlinked <cfg>/skills/<name> is still plain
-    hits = sorted({"%s (%s)" % (n, p) for n, p in claude_user_skills(cfg, config_dir=True)
-                   if os.path.dirname(os.path.normpath(p)) != top})
+    synced, plugin = [], []
+    for n, p in claude_user_skills(cfg, config_dir=True):
+        q = os.path.normpath(p)
+        if os.path.dirname(q) == top: continue
+        (synced if q.startswith(top + os.sep) else plugin).append((n, p))
+    return synced, plugin
+
+def claude_undetectable_skill_problems(cfg):
+    """The runs share the user's config dir (Keychain login). A claude.ai synced skill that loads would be listed in
+    system/init `skills` and stop the run, unless it is `user-invocable: false`: those are refused before launch.
+    Plugin skills need an enabled plugin, which init `plugins` reports, so they are checked after the call."""
+    synced, _ = claude_shared_skill_sources(cfg)
+    hits = sorted({"%s (%s)" % (n, p) for n, p in synced if _not_user_invocable(p)})
     if not hits: return []
-    return ["claude: %d synced/plugin skill(s) in %s may load even with --setting-sources project,local (not "
-            "verified): %s; export CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) so each run gets an empty "
-            "config dir" % (len(hits), cfg, ", ".join(hits[:5]) + (" ..." if len(hits) > 5 else ""))]
+    return ["claude: %d synced skill(s) in %s are `user-invocable: false` (or unreadable), so the post-run init check "
+            "could not see them if --setting-sources project,local does not hide them (not verified): %s"
+            % (len(hits), cfg, ", ".join(hits[:5]) + (" ..." if len(hits) > 5 else ""))]
+
+def claude_shared_skill_notes(cfg):
+    """Plan-only information (not a problem): the user-level skill sources left to the post-run init check."""
+    synced, plugin = claude_shared_skill_sources(cfg)
+    if not (synced or plugin): return []
+    return ["claude: %d synced and %d plugin skill(s) in %s are not hidden before launch (Keychain login shares the "
+            "config dir); if any loads, the post-run init check (skills exactly as expected, plugins == []) stops "
+            "the iteration after that run" % (len(synced), len(plugin), cfg)]
 
 def escaping_links(root):
     """Paths (relative to root) of symlinks a copy of root would follow out of root, or that dangle. SKILL_IGNORE
@@ -894,7 +946,7 @@ class Sandbox:
             if skill_path: engine.install_skill(self.work, skill_path, self.name)
             self.env = engine.sandbox_env(self.root)
         except BaseException as ex:  # never leave a half-built sandbox (it may hold the auth copy)
-            left = "; ".join(x for x in (engine.remove_credentials(self.root), remove_tree(self.run_root, self.root)) if x)
+            left = "; ".join(remove_sandbox(engine, self.run_root, self.root))
             if left and isinstance(ex, Exception): raise EvalError("%s; and %s" % (ex, left)) from ex
             if left: print("WARNING: " + left, file=sys.stderr)
             raise
@@ -916,11 +968,25 @@ class Sandbox:
         the caller: the iteration stops and reports it)."""
         problems = []
         try:
-            problems = self.engine.after_run(self.root)
+            problems = list(self.engine.after_run(self.root))
         finally:
-            for left in (self.engine.remove_credentials(self.root), remove_tree(self.run_root, self.root)):
-                if left: problems = list(problems) + [left]
+            problems += remove_sandbox(self.engine, self.run_root, self.root)
         return problems
+
+def remove_sandbox(engine, run_root, root):
+    """Credential copy first, then the whole tree in its own finally: the temp folder is removed even when the
+    credential step fails or raises. Returns the problems of both steps."""
+    out = []
+    try:
+        try:
+            left = engine.remove_credentials(root)
+        except Exception as ex:
+            left = "removing the credential copy in %s failed (%s)" % (root, type(ex).__name__)
+        if left: out.append(left)
+    finally:
+        left = remove_tree(run_root, root)
+        if left: out.append(left)
+    return out
 
 def isolated_run(eng, prompt, spec, case, skill_path, run_dir, run_root, cap, user_names, keep_workdir):
     """Runs one CLI call in a fresh Sandbox and returns (result, fatal problems). Raises EvalError before the call
@@ -932,13 +998,19 @@ def isolated_run(eng, prompt, spec, case, skill_path, run_dir, run_root, cap, us
         probs = sb.problems()
         if probs: raise EvalError("isolation (%s): %s" % (eng.name, " | ".join(probs)))
         res = eng.run(prompt, sb.work, with_skill=bool(skill_path), budget_usd=cap, env=sb.env)
-        iso = eng.isolation_problems(res, bool(skill_path), spec["skill_name"], user_names)
-        res["isolation"] = dict(sb.record(), problems=iso)
-        if keep_workdir:
-            wd = ensure_inside(run_dir, os.path.join(run_dir, "workdir"))
-            if os.path.islink(wd): os.remove(wd)
-            elif os.path.isdir(wd): shutil.rmtree(wd)
-            sb.copy_back(wd)
+        try:  # the call has happened: a failure from here on is charged and stops, never escapes uncharged
+            iso = eng.isolation_problems(res, bool(skill_path), spec["skill_name"], user_names)
+            res["isolation"] = dict(sb.record(), problems=iso)
+            if keep_workdir:
+                wd = ensure_inside(run_dir, os.path.join(run_dir, "workdir"))
+                if os.path.islink(wd): os.remove(wd)
+                elif os.path.isdir(wd): shutil.rmtree(wd)
+                sb.copy_back(wd)
+        except Exception as ex:
+            iso = []
+            why = "%s: %s" % (type(ex).__name__, ex) if isinstance(ex, EvalError) else type(ex).__name__
+            res["launch_failed"] = res.get("launch_failed") or "output handling failed after the call (%s)" % why
+            res["error"] = res["launch_failed"]
     except BaseException as ex:
         after = sb.cleanup()
         if after and isinstance(ex, Exception):  # a leftover sandbox is never silent
@@ -1001,13 +1073,17 @@ class LLMGrader:
             left = remove_tree(os.path.dirname(cwd), cwd)
             if left: print("WARNING: " + left, file=sys.stderr)
         try: data = json.loads(out)
-        except ValueError:
-            self._charge_unknown(fallback)  # usage unknown: charge the cap
+        except (ValueError, TypeError):
+            self._charge_unknown(max(fallback, reported_cost(out) or 0.0))  # usage unknown: charge the cap
             raise EvalError("grader returned non-JSON (exit %s): %s" % (rc, (err or out or "")[-300:]))
         if not isinstance(data, dict): data = {}
-        u = data.get("usage") or {}
-        tin = int(u.get("input_tokens") or 0) + int(u.get("cache_read_input_tokens") or 0) + int(u.get("cache_creation_input_tokens") or 0)
-        tout = int(u.get("output_tokens") or 0)
+        try:
+            tin, tout = claude_usage(data)
+        except Exception as ex:  # paid call, unreadable usage: charge max(reported, cap) and stop
+            charged = api_equivalent(0, 0, data.get("total_cost_usd"), None, fallback)[0]
+            self._charge_unknown(charged)
+            raise EvalError("grader usage could not be parsed after the call (%s); charged $%.2f and stopped"
+                            % (type(ex).__name__, charged))
         cost = api_equivalent(tin, tout, data.get("total_cost_usd"), price_for("grader", self.model, self.prices), fallback)[0]
         self.usage["calls"] += 1
         self.usage["input_tokens"] += tin; self.usage["output_tokens"] += tout; self.usage["api_equivalent_usd"] += cost
@@ -1188,14 +1264,15 @@ def preflight(spec, engines, run_root=None, home=None):
       should hide user skills (docs: the "user" source loads ~/.claude/skills), but whether the CLI flag hides already
       downloaded claude.ai synced skills and plugin skills is not verified (추정), so a same-named copy still blocks;
     - any API-key variable (API_KEY_ENV) in the environment: subscription auth only;
-    - claude, without CLAUDE_CODE_OAUTH_TOKEN (shared config dir): any claude.ai synced or plugin skill in the config
-      dir (claude_unhidden_skill_problems); with the token every run gets an empty config dir instead;
+    - claude (Keychain login, shared config dir): a claude.ai synced skill the post-run init check could not see
+      (`user-invocable: false`, claude_undetectable_skill_problems). Other synced and plugin skills are left to the
+      init check (plan shows them as notes);
     - any provider-routing variable (PROVIDER_ENV);
     - claude: API-key auth or provider routing (apiKeyHelper / NON_SUBSCRIPTION_ENV env entry) in ANY settings source
       a run could load: user settings(.local).json of the effective config dir, .claude/settings(.local).json of
       run_root and every ancestor, every managed source (managed-settings.json + managed-settings.d, MDM profile,
       registry: fail closed) and the server-managed cache; the sandbox's own work/.claude settings (fixtures) are
-      checked again per run. Also an OAuth token in user env, which --setting-sources would drop;
+      checked again per run;
     - codex: skills in /etc/codex/skills (admin scope, cannot be hidden), and no file-based $CODEX_HOME/auth.json
       whose auth_mode is ChatGPT (only that field is read).
     `claude auth status` is checked in check_live_gates (it runs a CLI, so never in a dry run)."""
@@ -1212,13 +1289,11 @@ def preflight(spec, engines, run_root=None, home=None):
                 out.append("%s: %s has skills %s; every sandbox under %s would see them (use --run-root elsewhere)"
                            % (e, os.path.join(a, rel), sorted(n for n, _ in hits), root))
         if e == "claude":
-            token = "CLAUDE_CODE_OAUTH_TOKEN" in os.environ  # then every run gets an empty config dir
-            if not token:
-                for n_, p in claude_user_skills(cfg, config_dir=True):
-                    if n_ == name:
-                        out.append("claude: skill %r is also installed at %s; hiding it via --setting-sources is not "
-                                   "verified, so it could sit next to the copy under test (move/rename it)" % (name, p))
-                out += claude_unhidden_skill_problems(cfg)
+            for n_, p in claude_user_skills(cfg, config_dir=True):
+                if n_ == name:
+                    out.append("claude: skill %r is also installed at %s; hiding it via --setting-sources is not "
+                               "verified, so it could sit next to the copy under test" % (name, p))
+            out += claude_undetectable_skill_problems(cfg)
             user_settings = [os.path.join(cfg, f) for f in CLAUDE_SETTINGS_FILES]
             # every settings source a run could load: user (dropped by --setting-sources, still refused), the
             # project/local files of run_root and its ancestors, every managed source (always loaded) and the
@@ -1227,15 +1302,6 @@ def preflight(spec, engines, run_root=None, home=None):
             out += mprobs + claude_settings_auth_problems(
                 user_settings + [p for p in claude_project_settings(ancestors(root)) if p not in user_settings]
                 + files + [os.path.join(cfg, CLAUDE_REMOTE_SETTINGS)])
-            try:
-                st = rjson(user_settings[0], {}) or {}
-            except (ValueError, OSError, UnicodeDecodeError):
-                st = {}
-            env = st.get("env") if isinstance(st, dict) and isinstance(st.get("env"), dict) else {}
-            if isinstance(st, dict) and not ("apiKeyHelper" in st or any(k in env for k in API_KEY_ENV)) \
-                    and "CLAUDE_CODE_OAUTH_TOKEN" in env:
-                out.append("claude: ~/.claude/settings.json sets CLAUDE_CODE_OAUTH_TOKEN, but isolated runs use "
-                           "--setting-sources project,local and would not see it; export it in the shell instead")
         if e == "codex":
             hits = skills_under(os.path.join("/etc", "codex", "skills"), 4)
             if hits:
@@ -1299,6 +1365,13 @@ def api_equivalent(tin, tout, reported, price, fallback=0.0):
     if tok is not None and (rep is None or tok >= rep): return tok, "tokens_x_price"
     if rep is not None and (tok is not None or rep >= fallback): return rep, "cli_reported"
     return (fallback, "cap_charged") if fallback else (0.0, "unknown")
+
+def claude_usage(data):
+    """(input tokens incl. cache read/creation, output tokens) of a `claude -p --output-format json` result. Raises on
+    a malformed usage block (nonnumeric, wrong type); callers charge max(reported, cap) and stop."""
+    u = data.get("usage") or {}
+    tin = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+    return tin, int(u.get("output_tokens") or 0)
 
 def run_cost(res, engine, prices, fallback=0.0):
     """API-equivalent USD of one run and where it came from (api_equivalent: tokens x price first, a larger CLI
@@ -1392,8 +1465,14 @@ def run_iteration(spec, ws, engines, runs=DEFAULT_RUNS, baseline="none", old_ski
         res, fatal = isolated_run(eng, prompt, spec, case, skill_path_for(cfg, spec, old_skill), ensure_inside(it_dir, rd),
                                   run_root, cap, user_names, keep)
         api_eq = run_cost(res, eng, prices, fallback)
+        if res.get("launch_failed") and fallback > api_eq[0]:  # failed call: max(reported/usage, cap) is charged
+            api_eq = (fallback, "cap_charged")
         budget.charge(api_eq[0])  # the budget limits API-equivalent cost
-        write_run(rd, res, eng, cfg, prompt, eng.triggered(res, spec["skill_name"]), api_eq)
+        try:
+            write_run(rd, res, eng, cfg, prompt, eng.triggered(res, spec["skill_name"]), api_eq)
+        except Exception as ex:
+            raise _Fatal("[%s %s] could not record the run (%s); charged $%.2f (%s) and stopped"
+                         % (eng.name, cfg, type(ex).__name__, api_eq[0], api_eq[1]))
         if res.get("launch_failed"):  # cleanup problems (e.g. a leftover sandbox) are reported with it
             raise _Fatal("[%s %s] %s; charged $%.2f (%s) and stopped%s" % (
                 eng.name, cfg, res["launch_failed"], api_eq[0], api_eq[1],
@@ -1987,13 +2066,17 @@ class ClaudeBuilder:
             raise EvalError("builder call failed after launch (%s); charged $%.2f and stopped" % (type(ex).__name__, fallback))
         self.calls += 1
         try: data = json.loads(out or "")
-        except ValueError: data = {}
+        except (ValueError, TypeError): data = {}
         data = data if isinstance(data, dict) else {}
-        u = data.get("usage") or {}
-        tin = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
-        cost = api_equivalent(tin, int(u.get("output_tokens") or 0), data.get("total_cost_usd"),
-                              price_for("builder", self.model, self.prices), fallback)[0]
-        self._record(it_dir, tin, int(u.get("output_tokens") or 0), cost)
+        try:
+            tin, tout = claude_usage(data)
+        except Exception as ex:  # paid call, unreadable usage: charge max(reported, cap) and stop
+            charged = api_equivalent(0, 0, data.get("total_cost_usd"), None, fallback)[0]
+            self._record(it_dir, 0, 0, charged)
+            raise EvalError("builder usage could not be parsed after the call (%s); charged $%.2f and stopped"
+                            % (type(ex).__name__, charged))
+        cost = api_equivalent(tin, tout, data.get("total_cost_usd"), price_for("builder", self.model, self.prices), fallback)[0]
+        self._record(it_dir, tin, tout, cost)
         return rc
 
 def loop(spec, ws, engines, grader, builder, max_iterations=MAX_AUTO_ITERATIONS, runs=DEFAULT_RUNS, baseline="none",
@@ -2060,8 +2143,15 @@ def plan_text(spec, problems, a, engines, ws, est):
         "approved" if approval_ok("requirements", spec, ws) else "NOT APPROVED",
         "approved" if approval_ok("eval_set", spec, ws) else "NOT APPROVED")]
     L += ["preflight problems (block --live):"] + ["  - " + w for w in preflight(spec, [e.name for e in engines], a.run_root)]
-    L += ["auth: subscription only (Claude claude.ai OAuth, Codex ChatGPT login); `claude auth status --json` is "
-          "checked only with --live"]
+    names = [e.name for e in engines]
+    notes = claude_shared_skill_notes(claude_config_dir()) if "claude" in names else []
+    if notes: L += ["isolation notes (not blocking):"] + ["  - " + x for x in notes]
+    L += ["auth: subscription only (Claude: existing claude.ai Keychain login; Codex: ChatGPT login); `claude auth "
+          "status --json` is checked only by a real --live (not by --dry-run)"]
+    soft = [e.name for e in engines if budget_enforcement(e) == "soft_limit"]
+    if soft:
+        L += ["budget enforcement: %s" % ("STRICT (default): --live refuses %s (no per-call cap)" % ", ".join(soft)
+              if getattr(a, "strict_budget", True) else "WARNING " + NO_STRICT_WARNING % ", ".join(soft))]
     if spec["cases"]:
         c = spec["cases"][0]
         L.append("sample commands (eval %s, run in <workspace>/iteration-N/<engine>/%s/<config>/run-k/workdir):" % (c["id"], eval_dir_name(c)))
@@ -2109,33 +2199,63 @@ def subscription_problems(a, engines):
         out += claude_auth_problems()
     return out
 
-def check_live_gates(a, spec, problems, ws, n, engines, tokens, prices, budget_left, iterations_left=None):
+AUTH_STATUS_SKIPPED = "skipped in dry run: `claude auth status --json` (runs a CLI; only the real --live checks it)"
+
+def check_live_gates(a, spec, problems, ws, n, engines, tokens, prices, budget_left, iterations_left=None, report=None):
     """Every --live gate; raises EvalError on the first failure. `loop` calls it again before each iteration with the
-    reloaded eval set, the remaining iterations and the remaining budget."""
-    if problems: raise EvalError("eval set has %d validation problem(s); run `validate`" % len(problems))
+    reloaded eval set, the remaining iterations and the remaining budget. report: a list for --dry-run: every failure
+    is appended instead of raised, and `claude auth status` is not executed (AUTH_STATUS_SKIPPED is appended)."""
+    def fail(msg):
+        if report is None: raise EvalError(msg)
+        report.append(msg)
+    if problems: fail("eval set has %d validation problem(s); run `validate`" % len(problems))
     soft = [e.name for e in engines if budget_enforcement(e) == "soft_limit"] if a.cmd in ("run", "loop") else []
-    if getattr(a, "strict_budget", False) is True and soft:
-        raise EvalError("--strict-budget: %s has no enforceable per-call budget cap (its budget is only a soft limit); "
-                        "refusing the live run (drop it from --engines, or run without --strict-budget)" % ", ".join(soft))
-    auth = subscription_problems(a, engines)
-    if auth: raise EvalError("subscription auth: " + " | ".join(auth))
+    if getattr(a, "strict_budget", True) and soft:
+        fail("--strict-budget (default): %s has no enforceable per-call budget cap (its budget is only a soft limit); "
+             "refusing the live run (drop it from --engines; --no-strict-budget overrides this, risky)" % ", ".join(soft))
+    if report is None:
+        auth = subscription_problems(a, engines)
+        if auth: fail("subscription auth: " + " | ".join(auth))
+    else:
+        env = [] if a.cmd in ("run", "loop") else api_key_env_problems()  # run/loop: reported by preflight
+        if env: fail("subscription auth: " + " | ".join(env))
+        if a.cmd in ("grade", "calibrate", "loop") or any(e.name == "claude" for e in engines):
+            report.append(AUTH_STATUS_SKIPPED)
     for g in ("requirements", "eval_set"):
-        if not approval_ok(g, spec, ws): raise EvalError("gate %s not approved (write %s/requirements.md, then `approve --gate %s`)" % (g, ws, g))
+        if not approval_ok(g, spec, ws): fail("gate %s not approved (write %s/requirements.md, then `approve --gate %s`)" % (g, ws, g))
     live_est = live_estimate(a, spec, ws, n, engines, tokens, prices, iterations_left)
-    if live_est["unpriced_models"]: raise EvalError("no price for %s; pass --price" % live_est["unpriced_models"])
+    if live_est["unpriced_models"]: fail("no price for %s; pass --price" % live_est["unpriced_models"])
     if a.cmd in ("run", "loop"):
         pf = preflight(spec, [e.name for e in engines], a.run_root)
-        if pf: raise EvalError("preflight: " + " | ".join(pf))
+        if pf: fail("preflight: " + " | ".join(pf))
         for e in engines:
             if e.has_call_cap: continue
             for kind in ("exec", "trigger"):
                 b = call_bound(e.name, e.model, kind, prices, tokens)
-                if b > budget_left:
-                    raise EvalError("%s worst-case %s call bound $%.2f exceeds budget $%.2f (%s budget is a soft "
-                                    "limit: no per-call cap)" % (e.name, kind, b, budget_left, e.name))
+                if b is not None and b > budget_left:
+                    fail("%s worst-case %s call bound $%.2f exceeds budget $%.2f (%s budget is a soft "
+                         "limit: no per-call cap)" % (e.name, kind, b, budget_left, e.name))
     if live_est["total_usd"] > budget_left:
-        raise EvalError("estimate $%.2f exceeds budget $%.2f\n%s" % (live_est["total_usd"], budget_left, format_estimate(live_est)))
+        fail("estimate $%.2f exceeds budget $%.2f\n%s" % (live_est["total_usd"], budget_left, format_estimate(live_est)))
     return live_est
+
+def live_dry_run(a, spec, problems, ws, n, engines, tokens, prices):
+    """`--live --dry-run`: the plan of this exact command plus every live gate it would face, collected instead of
+    raised. Nothing is executed: live mode stays off, no CLI (not even `claude auth status`) and no model is called,
+    no workspace file is written. Returns 0 when only the skipped auth status check is left, else 3."""
+    report = []
+    live_est = check_live_gates(a, spec, problems, ws, n, engines, tokens, prices, a.budget_usd, report=report)
+    fails = [r for r in report if r != AUTH_STATUS_SKIPPED]
+    print(plan_text(spec, problems, a, engines, ws, live_est))
+    print("\nLIVE DRY RUN: nothing was executed (no model call, no `claude auth status`, no files written).")
+    print("budget: API-equivalent estimate $%.2f vs --budget-usd $%.2f (%s)" % (
+        live_est["total_usd"], a.budget_usd, "fits" if live_est["total_usd"] <= a.budget_usd else "EXCEEDS"))
+    print("live gates that would refuse this command (%d):" % len(fails))
+    for r in fails: print("  - " + r.replace("\n", "\n    "))
+    if AUTH_STATUS_SKIPPED in report: print("  (%s)" % AUTH_STATUS_SKIPPED)
+    print("live command: python3 skill_eval.py " + " ".join(
+        json.dumps(x, ensure_ascii=False) if (" " in x or not x) else x for x in a.argv if x != "--dry-run"))
+    return 3 if fails else 0
 
 def spec_counts(spec, a):
     """Counts from the eval set; a (argparse namespace) may override them for estimate/plan only (a=None: no overrides)."""
@@ -2167,8 +2287,14 @@ def main(argv=None):
             s.add_argument("--live", action="store_true")
             s.add_argument("--budget-usd", type=float, help="limit in API-equivalent USD (usage x API prices); "
                            "subscription runs are not billed per token")
-            s.add_argument("--strict-budget", action="store_true",
-                           help="refuse --live runs of engines without an enforceable per-call cap (codex: soft limit)")
+            s.add_argument("--strict-budget", dest="strict_budget", action="store_true", default=True,
+                           help="(default) refuse --live runs of engines without an enforceable per-call cap (codex)")
+            s.add_argument("--no-strict-budget", dest="strict_budget", action="store_false",
+                           help="RISKY: allow codex --live runs: its budget is only a soft limit (one call can exceed "
+                                "--budget-usd) and its auth.json copy is readable by the agent under test")
+            s.add_argument("--dry-run", action="store_true",
+                           help="with --live: check every live gate for this exact command and print the plan; executes "
+                                "nothing (no model call, no `claude auth status`)")
             s.add_argument("--seed", type=int)
             s.add_argument("--run-root", help="folder for the per-run sandboxes (default: system temp folder)")
     for n in ("validate", "estimate", "plan", "run", "grade", "calibrate", "report", "loop"):
@@ -2186,6 +2312,7 @@ def main(argv=None):
     s = sp.add_parser("register"); common(s, False)
     s = sp.add_parser("snapshot"); common(s, False)
     a = p.parse_args(argv)
+    a.argv = list(sys.argv[1:] if argv is None else argv)
     try:
         return _dispatch(a)
     except EvalError as ex:
@@ -2237,6 +2364,9 @@ def _dispatch(a):
     if a.cmd == "estimate":
         print(format_estimate(est)); return 0
     live_cmds = ("run", "grade", "calibrate", "loop")
+    if a.dry_run and not a.live:
+        raise EvalError("--dry-run checks the gates of a --live command: add --live (with --dry-run it still executes "
+                        "nothing); without --live every command is already a dry run")
     if a.cmd == "plan" or (a.cmd in live_cmds and not a.live and a.cmd != "grade"):
         print(plan_text(spec, problems, a, engines, ws, est))
         print("\nDRY RUN: nothing was executed. Real runs need --live --budget-usd X (API-equivalent USD), subscription "
@@ -2253,10 +2383,14 @@ def _dispatch(a):
     if a.cmd in ("grade", "calibrate"):
         n = a.iteration or (iterations(ws) or [None])[-1]
         if n is None or not os.path.isdir(os.path.join(ws, "iteration-%d" % n)): raise EvalError("no iterations in %s" % ws)
+    if a.dry_run:
+        return live_dry_run(a, spec, problems, ws, n, engines, tokens, prices)
     check_live_gates(a, spec, problems, ws, n, engines, tokens, prices, a.budget_usd)
     if a.cmd in ("run", "loop"):
         for e in engines:
-            if budget_enforcement(e) == "soft_limit": print("WARNING: budget " + SOFT_LIMIT_NOTE % e.name, file=sys.stderr)
+            if budget_enforcement(e) == "soft_limit":
+                print("WARNING: budget " + SOFT_LIMIT_NOTE % e.name, file=sys.stderr)
+                print("WARNING: " + NO_STRICT_WARNING % e.name, file=sys.stderr)
     budget = Budget(a.budget_usd)
     grader = LLMGrader(a.grader_model, budget=budget, prices=prices)
     _LIVE["on"] = True

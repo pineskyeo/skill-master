@@ -354,46 +354,39 @@ class TestSkillSourcesBeforeLaunch(Base):
         return d
 
     def test_hidden_from_init_skill_blocks_before_launch(self):
+        """Round 6 (Keychain login only, shared config dir): a synced `user-invocable: false` skill, which init would
+        not list, is refused before the call; plugin skills are left to the post-run plugins == [] check."""
         spec, _ = self.spec(evals=evals_doc(human=False))
-        for rel in ("skills/synced/abc/quiet-helper", "plugins/cache/mp/pl/1.0/skills/quiet-helper"):
-            self.user_skill(rel, invocable=False)  # would never appear in system/init skills
-            pf = se.preflight(spec, ["claude"], self.runs)
-            self.assertEqual(len(pf), 1, pf); self.assertIn("quiet-helper", pf[0]); self.assertIn("CLAUDE_CODE_OAUTH_TOKEN", pf[0])
-            shutil.rmtree(self.ws, ignore_errors=True)
-            n = se.run_iteration(spec, self.ws, self.engines()[:1], runs=1, log=quiet)
-            self.assertIn("synced/plugin skill(s)", plan_of(self.ws, n)["stopped"])
-            self.assertEqual(self.fc.calls, [])  # refused before the paid call
-            shutil.rmtree(os.path.join(self.home, ".claude"))
+        self.user_skill("skills/synced/abc/quiet-helper", invocable=False)  # would never appear in system/init skills
+        pf = se.preflight(spec, ["claude"], self.runs)
+        self.assertEqual(len(pf), 1, pf); self.assertIn("quiet-helper", pf[0]); self.assertIn("user-invocable: false", pf[0])
+        self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", pf[0]); self.assertNotIn("setup-token", pf[0])
+        n = se.run_iteration(spec, self.ws, self.engines()[:1], runs=1, log=quiet)
+        self.assertIn("user-invocable: false", plan_of(self.ws, n)["stopped"])
+        self.assertEqual(self.fc.calls, [])  # refused before the paid call
+        shutil.rmtree(os.path.join(self.home, ".claude"))
+        self.user_skill("skills/synced/abc/loud-helper")  # listed by init if it loads: the post-run check stops it
+        self.user_skill("plugins/cache/mp/pl/1.0/skills/quiet-plugin", invocable=False)  # needs an enabled plugin
         self.user_skill("skills/plain-user-skill")  # the documented "user" source: hidden by --setting-sources
         self.assertEqual(se.preflight(spec, ["claude"], self.runs), [])
+        notes = se.claude_shared_skill_notes(se.claude_config_dir())
+        self.assertEqual(len(notes), 1); self.assertIn("1 synced and 1 plugin skill(s)", notes[0])
+        shutil.rmtree(self.ws, ignore_errors=True)
+        fx = lambda cmd, cwd, t, env=None: (0, claude_stream("x", skills=["branch-setup"], plugins=[{"name": "pl"}]), "")
+        n = se.run_iteration(spec, self.ws, [se.ClaudeCodeEngine("claude-opus-5-5", exec_fn=fx)], runs=1, log=quiet)
+        self.assertIn("plugins loaded", plan_of(self.ws, n)["stopped"])
 
-    def test_oauth_token_gives_each_run_an_empty_config_dir(self):
-        tok = "sk-ant-oat01-FAKE-R5"
+    def test_runs_keep_the_keychain_config_dir(self):
+        """Round 6: no per-run config dir and no token: HOME / CLAUDE_CONFIG_DIR are untouched for the Keychain login."""
         spec, _ = self.spec(evals=evals_doc(human=False))
-        self.user_skill("skills/synced/abc/quiet-helper", invocable=False)
-        wjson(os.path.join(self.home, ".claude", "remote-settings.json"), {"model": "x"})
-        with mock.patch.dict(os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": tok}):
-            self.assertEqual(se.preflight(spec, ["claude"], self.runs), [])
-            n = se.run_iteration(spec, self.ws, self.engines()[:1], runs=1, log=quiet)
-        self.assertIsNone(plan_of(self.ws, n)["stopped"]); self.assertEqual(len(self.fc.calls), 4 + 20)  # + triggers
-        for (cmd, cwd), env in zip(self.fc.calls, self.fc.envs):
-            cfg = env["CLAUDE_CONFIG_DIR"]
-            self.assertEqual(os.path.basename(cfg), "claude_config")
-            self.assertEqual(os.path.dirname(cfg), os.path.dirname(cwd))  # inside this run's own sandbox
-            self.assertEqual(env["CLAUDE_CODE_OAUTH_TOKEN"], tok)
-        self.assertEqual(os.listdir(self.runs), [])
-        rec = rjson(os.path.join(self.ws, "iteration-%d" % n, *EVAL1[:-1], "run-1", "timing.json"))
-        self.assertNotIn(tok, json.dumps(rec))
-
-    def test_nonempty_per_run_config_dir_is_refused(self):
-        spec, _ = self.spec(evals=evals_doc(human=False))
-        eng = se.ClaudeCodeEngine("claude-opus-5-5")
-        with mock.patch.dict(os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": "t"}):
-            sb = se.Sandbox(eng, spec, {"files": []}, spec["skill_dir"], self.runs)
-            self.addCleanup(sb.cleanup)
-            os.makedirs(os.path.join(sb.root, "claude_config", "skills", "x")); write(
-                os.path.join(sb.root, "claude_config", "skills", "x", "SKILL.md"), SKILL_MD)
-            self.assertTrue(any("per-run config dir" in p for p in sb.problems()))
+        n = se.run_iteration(spec, self.ws, self.engines()[:1], runs=1, log=quiet)
+        self.assertIsNone(plan_of(self.ws, n)["stopped"]); self.assertEqual(len(self.fc.calls), 4 + 20)
+        for env in self.fc.envs:
+            self.assertEqual(env["HOME"], self.home); self.assertNotIn("CLAUDE_CONFIG_DIR", env)
+            self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", env)
+        rec = rjson(os.path.join(self.ws, "iteration-%d" % n, *EVAL1[:-1], "run-1", "outputs", "transcript.json"))
+        self.assertIsNone(rec["error"])
+        self.assertEqual(se.ClaudeCodeEngine().auth_record()["method"], "claude.ai login of the current user session (Keychain)")
 
     def test_custom_command_files_are_refused(self):
         spec, _ = self.spec(evals=evals_doc(human=False))

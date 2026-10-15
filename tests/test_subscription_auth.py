@@ -78,8 +78,10 @@ class TestApiKeysRefusedAndScrubbed(Base):
                 se._LIVE["on"] = False
         for env in [claude_env, codex_env] + seen:
             self.assertFalse(set(se.API_KEY_ENV) & set(env), sorted(set(se.API_KEY_ENV) & set(env)))
-        self.assertEqual(claude_env["CLAUDE_CODE_OAUTH_TOKEN"], "oat-fake")  # subscription token passes through
-        self.assertEqual(rec["env_removed"], sorted(se.API_KEY_ENV)); self.assertNotIn(SECRET, json.dumps(rec))
+        for env in [claude_env, codex_env] + seen:  # round 6: Keychain login only, an exported token is removed too
+            self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", env)
+        self.assertEqual(rec["env_removed"], sorted(se.API_KEY_ENV + ("CLAUDE_CODE_OAUTH_TOKEN",)))
+        self.assertNotIn(SECRET, json.dumps(rec)); self.assertNotIn("oat-fake", json.dumps(rec))
 
 class TestClaudeAuthStatus(Base):
     def status(self, rc=0, out=None, raise_=None):
@@ -96,7 +98,8 @@ class TestClaudeAuthStatus(Base):
                     {"apiKeySource": "ANTHROPIC_API_KEY", "authMethod": "claude.ai"}, {"authMethod": "console"}):
             p = self.status(out=bad)
             self.assertEqual(len(p), 1, bad); self.assertIn("API-key auth", p[0])
-        self.assertIn("not logged in", self.status(out={"loggedIn": False, "authMethod": "claude.ai"})[0])
+        p = self.status(out={"loggedIn": False, "authMethod": "claude.ai"})[0]
+        self.assertIn("reports no login", p); self.assertNotIn("setup-token", p); self.assertNotIn("/login", p)
         self.assertIn("gave no JSON", self.status(out="Logged in with claude.ai")[0])  # text output: fail closed
         self.assertIn("gave no JSON (exit 1)", self.status(rc=1, out={"authMethod": "claude.ai"})[0])
         self.assertIn("could not run (FileNotFoundError)", self.status(raise_=FileNotFoundError())[0])
@@ -117,7 +120,7 @@ class TestClaudeAuthStatus(Base):
     def test_status_is_never_run_in_a_dry_run(self):
         d = self.approved_skill(evals=evals_doc(human=False))
         rc, out, _ = self.cli("plan", d, "--workspace", self.ws, "--engines", "claude")
-        self.assertEqual(rc, 0); self.assertIn("checked only with --live", out)
+        self.assertEqual(rc, 0); self.assertIn("checked only by a real --live", out)
         self.assertEqual(self.status_calls, [])
 
     def test_codex_only_run_does_not_need_claude_status(self):
@@ -179,12 +182,15 @@ class TestCodexChatGPTAuth(Base):
         self.assertIn("not ChatGPT", rjson(os.path.join(self.ws, "iteration-%d" % n, "plan.json"))["stopped"])
         fx.assert_not_called(); self.assertEqual(os.listdir(self.runs), [])
 
-    def test_claude_oauth_token_is_passed_but_never_written(self):
+    def test_claude_oauth_token_is_removed_and_never_written(self):
+        """Round 6: Claude runs use only the existing Keychain login; an exported setup-token is not passed on."""
         tok = "sk-ant-oat01-FAKE-OAUTH-TOKEN"
         spec, _ = self.spec(evals=evals_doc(human=False))
         with mock.patch.dict(os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": tok}):
+            self.assertEqual(se.preflight(spec, ["claude"], self.runs), [])  # not refused: just not used
             n = se.run_iteration(spec, self.ws, self.engines()[:1], runs=1, log=quiet)
-        self.assertEqual(self.fc.envs[0]["CLAUDE_CODE_OAUTH_TOKEN"], tok)
+        for env in self.fc.envs:
+            self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", env); self.assertNotIn("CLAUDE_CONFIG_DIR", env)
         self.assertNotIn(tok, tree_text(self.ws))
         iso = rjson(os.path.join(self.ws, "iteration-%d" % n, "claude", "eval-1-start-the-login-fix-task", "with_skill",
                                  "run-1", "outputs", "transcript.json"))
