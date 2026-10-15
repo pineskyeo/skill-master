@@ -101,7 +101,7 @@ class TestClaudeAuthStatus(Base):
         self.assertIn("gave no JSON (exit 1)", self.status(rc=1, out={"authMethod": "claude.ai"})[0])
         self.assertIn("could not run (FileNotFoundError)", self.status(raise_=FileNotFoundError())[0])
         p = self.status(out={"loggedIn": True, "authMethod": "bedrock", "authEmail": "me@example.com"})
-        self.assertIn("no claude.ai/OAuth login", p[0]); self.assertIn("bedrock", p[0])
+        self.assertIn("no recognized claude.ai/OAuth auth method", p[0]); self.assertIn("bedrock", p[0])
         self.assertNotIn("me@example.com", p[0])  # an email is never echoed
 
     def test_live_gate_refuses_api_key_login_before_any_call(self):

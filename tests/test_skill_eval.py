@@ -151,6 +151,8 @@ class Base(unittest.TestCase):
         self.runs = os.path.join(self.tmp, "runs"); os.makedirs(self.runs)
         td = mock.patch.object(tempfile, "tempdir", self.runs)  # per-run sandboxes land here
         td.start(); self.addCleanup(td.stop)
+        self.managed = os.path.join(self.tmp, "managed", "managed-settings.json")  # never the machine's real file
+        ms = mock.patch.object(se, "CLAUDE_MANAGED_SETTINGS", (self.managed,)); ms.start(); self.addCleanup(ms.stop)
     def tearDown(self): shutil.rmtree(self.tmp)
     def spec(self, **kw):
         spec, problems = se.load_eval_set(make_skill(self.tmp, **kw))
@@ -468,7 +470,7 @@ class TestRunAndGrade(Base):
         # worst-case exec = 3 x (64000 x 10) / 1e6 = $1.92, trigger = 3 x 25500 x 10 / 1e6 = $0.765
         n = se.run_iteration(spec, self.ws, [eng], runs=1, budget=se.Budget(1.925), prices=prices, log=quiet)
         plan = rjson(os.path.join(self.ws, "iteration-%d" % n, "plan.json"))
-        self.assertIn("codex worst-case exec call $1.92 > remaining $1.92 (codex has no per-call cap)", plan["stopped"])
+        self.assertIn("codex worst-case exec call $1.92 > remaining $1.92 (codex budget is a soft limit: no per-call cap)", plan["stopped"])
         # 1 exec call ($0.0056 spent, then the $1.92 bound no longer fits) + 20 trigger calls (smaller bound)
         self.assertEqual(len(fx.calls), 21)
         self.assertNotIn("--max-budget-usd", se.CodexEngine().command("p", True, 5.0))

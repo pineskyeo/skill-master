@@ -288,7 +288,7 @@ class TestIsolation(Base):
         write(os.path.join(user, "SKILL.md"), SKILL_MD)
         for out, frag in ((claude_stream("x", skills=["branch-setup", "style-lab"]), "user-level skills visible: ['style-lab']"),
                           (claude_stream("x", skills=["branch-setup"], plugins=[{"name": "p"}]), "plugins loaded"),
-                          (claude_stream("x", skills=[]), "skill under test 'branch-setup' not loaded"),
+                          (claude_stream("x", skills=[]), "with_skill run are [], expected exactly ['branch-setup']"),
                           (json.dumps({"type": "result", "result": "x"}), "no system/init event")):
             shutil.rmtree(self.ws, ignore_errors=True)
             calls = []
@@ -300,7 +300,7 @@ class TestIsolation(Base):
                                    "run-1", "outputs", "transcript.json"))
             self.assertIn("isolation:", t["error"])
         e = se.ClaudeCodeEngine()
-        self.assertIn("skills loaded in without_skill run", e.isolation_problems({"init": {"skills": ["x"]}}, False, "b", [])[0])
+        self.assertIn("skills loaded in without_skill run", e.isolation_problems({"init": {"skills": ["x"], "plugins": []}}, False, "b", [])[0])
         self.assertEqual(e.isolation_problems({"init": {"skills": [], "plugins": []}}, False, "b", []), [])
 
     def test_sandbox_removed_when_the_cli_raises(self):
