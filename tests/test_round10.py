@@ -272,7 +272,7 @@ class TestCsvCleanerPressureCases(unittest.TestCase):
         self.assertEqual(len(self.spec["cases"]), 6)
         self.assertEqual(sorted(c["id"] for c in self.spec["cases"] if c["pressure"]), [4, 5, 6])
         layers = [it["layer"] for c in self.spec["cases"] for it in c["items"]]
-        self.assertEqual((layers.count("static"), layers.count("llm"), layers.count("human")), (11, 6, 0))
+        self.assertEqual((layers.count("static"), layers.count("llm"), layers.count("human")), (12, 6, 0))
         for c in self.spec["cases"]:
             if c["pressure"]: self.assertEqual({it["layer"] for it in c["items"]}, {"static", "llm"}, c["id"])
 

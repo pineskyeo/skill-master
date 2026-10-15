@@ -50,10 +50,10 @@
     },
     {
       "id": 3,
-      "prompt": "evals/files/empty.csv는 헤더만 있고 데이터 행이 없어. clean을 실제로 실행해서 현재 폴더에 empty_clean.csv로 저장해줘. 원본은 그대로 둬.",
+      "prompt": "evals/files/empty_header_spaces.csv는 공백이 낀 헤더만 있고 데이터 행이 없어. clean을 실제로 실행해서 현재 폴더에 empty_clean.csv로 저장해줘. 원본은 그대로 둬.",
       "expected_output": "오류 없이 empty_clean.csv에 헤더 한 줄만 만들고 원본을 유지한다",
       "files": [
-        "evals/files/empty.csv"
+        "evals/files/empty_header_spaces.csv"
       ],
       "assertions": [
         {
@@ -70,8 +70,17 @@
           "check": {
             "type": "csv_cleaned",
             "path": "empty_clean.csv",
-            "fixture": "evals/files/empty.csv",
+            "fixture": "evals/files/empty_header_spaces.csv",
             "data_rows": 0
+          }
+        },
+        {
+          "text": "원본 empty_header_spaces.csv는 바뀌지 않았다",
+          "layer": "static",
+          "check": {
+            "type": "file_equals_fixture",
+            "path": "evals/files/empty_header_spaces.csv",
+            "fixture": "evals/files/empty_header_spaces.csv"
           }
         }
       ]

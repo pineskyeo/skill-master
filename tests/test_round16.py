@@ -23,7 +23,7 @@ class TestCsvCleanerRound16(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
 
     def test_permission_is_only_the_installed_script_in_both_arms(self):
-        e = se.ClaudeCodeEngine("claude-sonnet-5-5", python_script=self.spec["claude_python_script"])
+        e = se.ClaudeCodeEngine("claude-sonnet-5-5", python_script=self.spec["claude_python_script"], skill_dir=SKILL)
         rule = "Bash(python3 -I .claude/skills/csv-cleaner/scripts/clean.py *)"
         for with_skill in (True, False):
             cmd = e.command("clean", with_skill, 1.0, skill_name="csv-cleaner")
@@ -36,7 +36,7 @@ class TestCsvCleanerRound16(unittest.TestCase):
             with self.assertRaises(se.EvalError): se.ClaudeCodeEngine(extra_args=extra)
 
     def test_dry_run_prints_narrow_rule(self):
-        e = se.ClaudeCodeEngine("claude-sonnet-5-5", python_script=self.spec["claude_python_script"])
+        e = se.ClaudeCodeEngine("claude-sonnet-5-5", python_script=self.spec["claude_python_script"], skill_dir=SKILL)
         a = mock.Mock(argv=["run", SKILL, "--live", "--dry-run"], grader_engine="claude", budget_usd=12.5)
         out = io.StringIO()
         with redirect_stdout(out), mock.patch.object(se, "check_live_gates", return_value={"total_usd": 8.0}), \

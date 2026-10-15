@@ -79,7 +79,7 @@ def budget_enforcement(engine_cls_or_obj):
 FORBIDDEN_EXTRA_ARGS = {"claude": ("--model", "--fallback-model", "--max-budget-usd", "--settings", "--setting-sources",
                                    "--plugin-dir", "--plugin-url", "--add-dir", "--mcp-config", "--effort",
                                    "--allowedTools", "--allowed-tools", "--dangerously-skip-permissions",
-                                   "--allow-dangerously-skip-permissions"),
+                                   "--allow-dangerously-skip-permissions", "--bare", "--safe-mode"),
                         "codex": ("-m", "--model", "-p", "--profile", "--oss", "-C", "--cd", "--add-dir")}
 
 SAFE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")  # an eval `name` must be one safe path component
@@ -325,7 +325,11 @@ ACTUAL_SPEND_NOTE = ("not metered: subscription runs (claude.ai plan / ChatGPT p
 
 def scrub_env(env):
     """Copy of env without the API-key and provider-routing variables (NON_SUBSCRIPTION_ENV) and IGNORED_AUTH_ENV."""
-    return {k: v for k, v in dict(env).items() if k not in NON_SUBSCRIPTION_ENV + IGNORED_AUTH_ENV}
+    return {k: v for k, v in dict(env).items()
+            if k not in NON_SUBSCRIPTION_ENV + IGNORED_AUTH_ENV + (
+                "BASH_ENV", "ENV", "BASHOPTS", "SHELLOPTS", "CLAUDE_CODE_SAFE_MODE",
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
+            and not k.startswith("BASH_FUNC_")}
 
 def api_key_env_problems(environ=None):
     environ = os.environ if environ is None else environ
@@ -498,12 +502,19 @@ def claude_settings_auth_problems(paths):
 def claude_project_settings(dirs):
     return [os.path.join(d, ".claude", f) for d in dirs for f in CLAUDE_SETTINGS_FILES]
 
-def claude_launch_problems(cwd, config_dir=None):
+def claude_launch_problems(cwd, config_dir=None, require_hooks=False):
     """Everything a `claude -p` started in cwd could load auth from and that env scrubbing does not cover: project /
     local settings of cwd and every ancestor, every managed source, and the server-managed cache of the config dir
     the call uses. Checked before every Claude launch (executor, grader, builder); nothing is spent on a refusal."""
     files, probs = claude_managed_sources()
     cfg = config_dir or claude_config_dir()
+    if require_hooks:
+        for p in files:
+            if not os.path.lexists(p): continue
+            try: st = _read_settings(p)
+            except Exception: continue  # the existing auth/settings validation reports unreadable sources
+            if isinstance(st, dict) and (st.get("allowManagedHooksOnly") is True or st.get("disableAllHooks") is True):
+                probs.append("claude: managed hook policy in %s may disable the Bash gate" % p)
     return api_key_env_problems() + probs + claude_settings_auth_problems(
         claude_project_settings(ancestors(cwd)) + files + [os.path.join(cfg, CLAUDE_REMOTE_SETTINGS)])
 
@@ -656,15 +667,23 @@ def claude_bundled_skills(path=None, refresh=False):
                              binary=path, scanned=sorted(found), error=err)
     return dict(_BUNDLED_SCAN)
 
-def claude_settings(skill_name=None):
+def claude_settings(skill_name=None, bash_gate=None):
     """The --settings object of every Claude launch: bundled skills off (kill switch plus skillOverrides "off" for every
     known bundled name except skill_name, the skill under test) and every known built-in plugin disabled."""
-    return {"disableBundledSkills": True,
+    settings = {"disableBundledSkills": True,
             "enabledPlugins": {i: False for i in claude_builtin_plugins()["ids"]},
             "skillOverrides": {n: "off" for n in claude_bundled_skills()["names"] if n != skill_name}}
+    if bash_gate:
+        settings["disableAllHooks"] = False
+        settings["hooks"] = {"PreToolUse": [{"matcher": "Bash", "hooks": [{
+            "type": "command", "command": sys.executable,
+            "args": [os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude_bash_gate.py"),
+                     skill_name, bash_gate["script"], bash_gate["sha256"], bash_gate["python3"]],
+            "onFailure": "block"}]}]}
+    return settings
 
-def claude_settings_json(skill_name=None):
-    return json.dumps(claude_settings(skill_name), sort_keys=True)
+def claude_settings_json(skill_name=None, bash_gate=None):
+    return json.dumps(claude_settings(skill_name, bash_gate), sort_keys=True)
 
 # One sanitized launch shape for every claude -p call (executor, grader, builder): project/local setting sources only,
 # no MCP servers, bundled skills and built-in plugins off, auto memory, claude.ai MCP servers and /doctor off,
@@ -672,8 +691,8 @@ def claude_settings_json(skill_name=None):
 CLAUDE_CHILD_ENV = {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
                     "DISABLE_DOCTOR_COMMAND": "1"}
 
-def claude_isolation_args(skill_name=None):
-    return ["--setting-sources", "project,local", "--strict-mcp-config", "--settings", claude_settings_json(skill_name)]
+def claude_isolation_args(skill_name=None, bash_gate=None):
+    return ["--setting-sources", "project,local", "--strict-mcp-config", "--settings", claude_settings_json(skill_name, bash_gate)]
 
 def builtin_plugin_check_command():
     """Free check (plugin management only, no model call) of what the launch settings do to the built-in plugins."""
@@ -854,16 +873,29 @@ class ClaudeCodeEngine(Engine):
     name, skills_rel, has_call_cap = "claude", ".claude/skills", True
     ENV = CLAUDE_CHILD_ENV
     EFFORTS = CLAUDE_EFFORTS
-    def __init__(self, *args, python_script=None, **kwargs):
+    def __init__(self, *args, python_script=None, skill_dir=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.python_script = python_script
+        self.python_script, self.skill_dir = python_script, skill_dir
+    def bash_gate(self):
+        if not self.python_script: return None
+        if not self.skill_dir: raise EvalError("script gate needs the source skill directory")
+        source = os.path.join(self.skill_dir, self.python_script)
+        with open(source, "rb") as f: digest = hashlib.sha256(f.read()).hexdigest()
+        python3 = shutil.which("python3")
+        if not python3: raise EvalError("script gate needs python3 on PATH")
+        return {"script": self.python_script, "sha256": digest, "python3": os.path.realpath(python3)}
     def script_allow_rule(self, skill_name):
         if not self.python_script: return None
         if not safe_name(skill_name): raise EvalError("script permission needs a safe skill name")
         return "Bash(python3 -I .claude/skills/%s/%s *)" % (skill_name, self.python_script)
     def command(self, prompt, with_skill, budget_usd=None, skill_name=None):
+        if self.python_script and any(
+                arg == "--permission-mode=acceptEdits" or
+                (arg == "--permission-mode" and i + 1 < len(self.extra_args) and self.extra_args[i + 1] == "acceptEdits")
+                for i, arg in enumerate(self.extra_args)):
+            raise EvalError("acceptEdits is not allowed with a gated Python script")
         cmd = ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose", "--no-session-persistence"]
-        cmd += claude_isolation_args(skill_name)
+        cmd += claude_isolation_args(skill_name, self.bash_gate())
         if self.model: cmd += ["--model", self.model]
         if self.effort: cmd += ["--effort", self.effort]
         if budget_usd is not None: cmd += ["--max-budget-usd", "%.2f" % budget_usd]
@@ -875,7 +907,9 @@ class ClaudeCodeEngine(Engine):
         """Subscription auth from the user's own session: the CLI reads the existing Keychain login of the unchanged
         HOME / CLAUDE_CONFIG_DIR. Nothing is asked of the user; no token is created, passed or written. API-key,
         provider-routing and CLAUDE_CODE_OAUTH_TOKEN variables are removed."""
-        return claude_child_env()
+        env = claude_child_env()
+        env["SKILL_EVAL_WORKDIR"] = os.path.realpath(os.path.join(root, "work"))
+        return env
     def auth_record(self):
         return {"billing": BILLING, "method": "claude.ai login of the current user session (Keychain)"}
     def sandbox_problems(self, root, work, skill_name, with_skill):
@@ -892,7 +926,7 @@ class ClaudeCodeEngine(Engine):
         if skill_name and skill_name in claude_bundled_skills()["names"]:
             out.append("skill name %r is also a bundled skill: the launch cannot set it off without hiding the skill "
                        "under test, and the init check cannot tell the two apart" % skill_name)
-        return out + claude_launch_problems(work)
+        return out + claude_launch_problems(work, require_hooks=bool(self.python_script))
     def isolation_problems(self, res, with_skill, skill_name, user_names):
         """From the stream-json system/init event: apiKeySource "none" (docs/en/agent-sdk/typescript ApiKeySource:
         "No API key. The session authenticates another way, such as a claude.ai login"), an explicit empty plugin
@@ -1875,7 +1909,8 @@ def run_iteration(spec, ws, engines, runs=DEFAULT_RUNS, baseline="none", old_ski
     (default: the system temp folder). Returns the iteration number."""
     configs = configs_for(baseline)
     for engine in engines:
-        if isinstance(engine, ClaudeCodeEngine): engine.python_script = spec.get("claude_python_script")
+        if isinstance(engine, ClaudeCodeEngine):
+            engine.python_script, engine.skill_dir = spec.get("claude_python_script"), spec["skill_dir"]
     if baseline == "old" and not (old_skill and os.path.isfile(os.path.join(old_skill, "SKILL.md"))):
         raise EvalError("baseline old needs --old-skill (or `snapshot` first): %s" % old_skill)
     run_root = os.path.realpath(run_root or tempfile.gettempdir())
@@ -2614,7 +2649,7 @@ def make_engines(a, spec=None):
         model = a.claude_model if name == "claude" else a.codex_model
         extra = a.claude_arg if name == "claude" else a.codex_arg
         effort = _str_opt(a, "claude_effort" if name == "claude" else "codex_effort")
-        kw = {"python_script": spec.get("claude_python_script")} if name == "claude" and spec else {}
+        kw = {"python_script": spec.get("claude_python_script"), "skill_dir": spec["skill_dir"]} if name == "claude" and spec else {}
         out.append(ENGINES[name](model=model, extra_args=extra or (), effort=effort, **kw))
     return out
 
@@ -2795,8 +2830,9 @@ def live_dry_run(a, spec, problems, ws, n, engines, tokens, prices):
         if r in report: print("  (%s)" % r)
     if any(e.name == "claude" for e in engines) or getattr(a, "grader_engine", None) == "claude":
         info, bs = claude_builtin_plugins(), claude_bundled_skills()
-        print("claude --settings (executor/builder launches; the grader has no skill under test): %s"
-              % claude_settings_json(spec["skill_name"]))
+        print("claude --settings (executor launches; grader/builder use separate settings): %s"
+              % claude_settings_json(spec["skill_name"], next((e.bash_gate() for e in engines
+                  if isinstance(e, ClaudeCodeEngine) and e.python_script), None)))
         print("  built-in plugins disabled: %d (binary %s: %s)" % (len(info["ids"]), info["binary"],
               info["error"] or "%d cc-plugin-* names found" % len(info["scanned"])))
         print("  bundled skills set off: %d, never %r (binary scan: %s); kill-switch survivors: %s; child env %s" % (
