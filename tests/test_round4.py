@@ -220,13 +220,13 @@ class TestCostPrecedence(Base):
         self.assertAlmostEqual(b.spent, (100 * 2 + 10 * 10) / 1e6)
         spec, _ = self.spec(evals=evals_doc(human=False))
         it = os.path.join(self.tmp, "it"); os.makedirs(it)
-        out = json.dumps({"total_cost_usd": 0, "usage": {"input_tokens": 1000, "output_tokens": 100}})
+        out = json.dumps({"type": "result", "total_cost_usd": 0, "usage": {"input_tokens": 1000, "output_tokens": 100}})
         bb = se.Budget(10.0)
         se.ClaudeBuilder("fix", "claude-opus-5-5", bb, exec_fn=lambda cmd, cwd, timeout, env=None: (0, out, ""))(it, spec["skill_dir"])
         self.assertAlmostEqual(bb.spent, (1000 * 4 + 100 * 20) / 1e6)
         bc = se.Budget(10.0)  # zero report and no usage: the cap ($5.00) is charged
         se.ClaudeBuilder("fix", "claude-opus-5-5", bc,
-                         exec_fn=lambda cmd, cwd, timeout, env=None: (0, json.dumps({"total_cost_usd": 0}), ""))(it, spec["skill_dir"])
+                         exec_fn=lambda cmd, cwd, timeout, env=None: (0, json.dumps({"type": "result", "total_cost_usd": 0}), ""))(it, spec["skill_dir"])
         self.assertEqual(bc.spent, 5.0)
 
 class TestClaudeAuthStatusStrict(Base):

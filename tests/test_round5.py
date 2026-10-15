@@ -42,7 +42,7 @@ class TestOneClaudeLaunchPath(Base):
                          seen.append((cmd, cwd, env)) or FakeGraderExec()(cmd, cwd, timeout, env))
         grade_once(g)
         it = os.path.join(self.tmp, "it"); os.makedirs(it)
-        se.ClaudeBuilder("fix", "claude-opus-5-5", se.Budget(10.0), exec_fn=rec(json.dumps({"usage": {}})))(it, spec["skill_dir"])
+        se.ClaudeBuilder("fix", "claude-opus-5-5", se.Budget(10.0), exec_fn=rec(json.dumps({"type": "result", "usage": {}})))(it, spec["skill_dir"])
         calls = [(c, w, e) for c, w, e in [(c, w, self.fc.envs[i]) for i, (c, w) in enumerate(self.fc.calls)]] + seen
         self.assertEqual(len(calls), 4 + 20 + 2)  # 2 cases x (with_skill, without_skill), 20 trigger runs, grader, builder
         for cmd, cwd, env in calls:

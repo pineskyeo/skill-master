@@ -259,6 +259,10 @@ python3 -m unittest discover -s tests -v                # 테스트 (pytest도 p
 - **settings `env`의 `CLAUDE_CODE_OAUTH_TOKEN`도 거부**(P2): 셸 환경의 토큰은 자식 환경에서 지우지만, settings 소스의 `env`는 CLI가 스스로 적용하므로 지울 수 없습니다. 그래서 run이 읽을 수 있는 모든 settings 소스(사용자 settings(.local).json, run-root와 상위 폴더·sandbox의 project/local, managed, server-managed 캐시)의 `env`에 이 키가 있으면 API 키와 같이 실행 전에 거부합니다(키 이름만 확인, 값은 읽어 출력하지 않음). 그 토큰이 실제로 Keychain 로그인보다 우선하는지는 확인하지 못했습니다 **(추정)** — 확인하지 않고 막습니다.
 - **live command 출력은 `shlex.join`**(P3): `--live --dry-run`이 출력하는 실제 명령은 셸 따옴표 규칙으로 만듭니다. `$`, 백틱, 작은따옴표가 든 인자도 그대로 복사해 실행할 수 있습니다(이전 JSON 따옴표는 `$`·백틱이 셸에서 해석됨).
 
+#### Round 8 (Codex r7 리뷰)
+- **끝 이벤트가 없는 Codex 스트림도 실패 호출**(P2): 읽을 수 있는 이벤트가 있어도 `turn.completed`나 `turn.failed`가 한 줄도 없으면(예: `thread.started`만 있고 끊긴 스트림, `error` 이벤트만 있음) 파싱 오류로 처리합니다. 종료코드가 0이어도 그 run은 "output could not be parsed after the call (ValueError)"로 기록되고, max(reported, 호출당 최악 비용 상한)을 차감한 뒤 iteration을 멈춥니다.
+- **result가 아닌 builder JSON 객체도 차감 후 중단**(P2): builder 출력이 JSON 객체여도 `type`이 `"result"`가 아니면(예: `{}`) 정상 반환하지 않고 **max(reported, cap)** 를 차감·`cost.json`에 기록한 뒤 "builder output is not a result object … charged $X and stopped"로 멈춥니다.
+
 **참고한 표준 방식**: skill-creator `scripts/run_eval.py`는 격리를 거의 하지 않습니다 — `.claude`가 있는 프로젝트 루트를 cwd로 쓰고 `.claude/commands/<name>.md`를 잠깐 만들었다 지우며, 환경에서 `CLAUDECODE`만 뺍니다(https://github.com/anthropics/skills/blob/main/skills/skill-creator/scripts/run_eval.py, 조사 에이전트 확인). agentskills.io는 "Each eval run should start with a clean context — no leftover state from previous runs or from the skill development process."라고만 합니다(https://agentskills.io/skill-creation/evaluating-skills). 이 하네스의 sandbox·사용자 스킬 차단·init 검사는 그보다 엄격한 자체 규칙(H)입니다.
 
 **채점**

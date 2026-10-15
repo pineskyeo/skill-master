@@ -151,7 +151,7 @@ class TestMalformedUsageIsCharged(Base):
     def test_builder_malformed_usage_is_charged(self):
         it = os.path.join(self.tmp, "it"); os.makedirs(it)
         b = se.Budget(10.0)
-        out = json.dumps({"usage": {"output_tokens": "many"}, "total_cost_usd": 0.2})
+        out = json.dumps({"type": "result", "usage": {"output_tokens": "many"}, "total_cost_usd": 0.2})
         bld = se.ClaudeBuilder("fix", "claude-opus-5-5", b, exec_fn=lambda *a, **k: (0, out, ""))
         with self.assertRaises(se.EvalError) as cm: bld(it, self.tmp)
         self.assertIn("builder usage could not be parsed after the call (ValueError); charged $5.00", str(cm.exception))

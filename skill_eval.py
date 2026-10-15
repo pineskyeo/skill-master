@@ -786,9 +786,10 @@ class CodexEngine(Engine):
         if self.model: cmd += ["-m", self.model]
         return cmd + self.extra_args + [prompt]
     def parse(self, stdout):
-        """Raises ValueError when no line is a JSON event with a "type" (empty or unreadable stream): Engine.run then
-        marks the call failed, so max(reported, cap/bound) is charged and the iteration stops."""
-        r, events = new_result(), 0
+        """Raises ValueError when no line is a JSON event with a "type" (empty or unreadable stream) or when the stream
+        has no terminal turn.completed / turn.failed event (truncated stream): Engine.run then marks the call failed,
+        so max(reported, cap/bound) is charged and the iteration stops."""
+        r, events, terminal = new_result(), 0, False
         for line in stdout.splitlines():
             try: ev = json.loads(line)
             except ValueError: continue
@@ -803,14 +804,17 @@ class CodexEngine(Engine):
                 else:
                     r["tool_calls"].append({"tool": it.get("type"), "input": it})
             elif t == "turn.completed":
+                terminal = True
                 u = ev.get("usage") or {}
                 r["input_tokens"] += int(u.get("input_tokens") or 0)
                 r["cached_input_tokens"] += int(u.get("cached_input_tokens") or 0)
                 # reasoning_output_tokens counted as output: upper bound for cost (billing rule not verified)
                 r["output_tokens"] += int(u.get("output_tokens") or 0) + int(u.get("reasoning_output_tokens") or 0)
             elif t in ("turn.failed", "error"):
+                terminal = terminal or t == "turn.failed"
                 r["error"] = json.dumps(ev.get("error") or ev.get("message") or t, ensure_ascii=False)[:500]
         if not events: raise ValueError("codex output has no readable JSON event")
+        if not terminal: raise ValueError("codex output has no turn.completed or turn.failed event (truncated stream)")
         return r
     def triggered(self, result, skill_name):
         needle = "skills/%s/SKILL.md" % skill_name
@@ -2082,6 +2086,11 @@ class ClaudeBuilder:
             charged = max(fallback, reported_cost(out) or 0.0)
             self._record(it_dir, 0, 0, charged)
             raise EvalError("builder output is not a JSON object (exit %s); charged $%.2f and stopped" % (rc, charged))
+        if data.get("type") != "result":  # a JSON object but not the CLI result (e.g. {}): same charge and stop
+            charged = max(fallback, reported_cost(out) or 0.0)
+            self._record(it_dir, 0, 0, charged)
+            raise EvalError("builder output is not a result object (type %r, exit %s); charged $%.2f and stopped"
+                            % (data.get("type"), rc, charged))
         try:
             tin, tout = claude_usage(data)
         except Exception as ex:  # paid call, unreadable usage: charge max(reported, cap) and stop

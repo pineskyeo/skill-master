@@ -132,7 +132,7 @@ class TestLoopGates(Base):
         b = se.Budget(10.0)
         seen = []
         def fx(cmd, cwd, timeout, env=None):
-            seen.append((cmd, cwd)); return 0, json.dumps({"total_cost_usd": 1.25}), ""
+            seen.append((cmd, cwd)); return 0, json.dumps({"type": "result", "total_cost_usd": 1.25}), ""
         it = os.path.join(self.tmp, "it"); os.makedirs(it); write(os.path.join(it, "comparison.md"), "# report\nregression")
         self.assertEqual(se.ClaudeBuilder("Improve it.", "claude-opus-5-5", b, exec_fn=fx)(it, "/skill"), 0)
         cmd, cwd = seen[0]
