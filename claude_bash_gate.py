@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed PreToolUse gate for the CSV skill's one permitted Bash invocation."""
+"""PreToolUse gate for file edits and the CSV skill's one permitted Bash invocation."""
 import hashlib
 import json
 import os
@@ -23,6 +23,58 @@ def carries_command(value):
     if isinstance(value, list):
         return any(carries_command(v) for v in value)
     return False
+
+
+EDIT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
+READ_TOOLS = {"Read", "Glob", "Grep"}
+EDIT_PATH_KEYS = {"file_path", "notebook_path"}
+
+
+def edit_paths(value):
+    """Find every file target, including targets in a future tool's nested input."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in EDIT_PATH_KEYS:
+                yield item
+            else:
+                yield from edit_paths(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from edit_paths(item)
+
+
+def under_skill_tree(path, root):
+    relative = os.path.relpath(path, root)
+    parts = relative.split(os.sep)
+    return any(parts[i:i + 2] == [".claude", "skills"] for i in range(len(parts) - 1))
+
+
+def check_edit(payload, root, paths, skill_name, script_relative):
+    if not isinstance(root, str) or not os.path.isabs(root) or os.path.realpath(root) != root:
+        return "invalid workdir"
+    if payload.get("cwd") != root or os.getcwd() != root:
+        return "file edits must run from the original workdir"
+    if not paths:
+        return "file edit has no target path"
+    for requested in paths:
+        if not isinstance(requested, str) or not requested or "\x00" in requested:
+            return "invalid file edit path"
+        requested_path = os.path.normpath(requested if os.path.isabs(requested) else os.path.join(root, requested))
+        target = os.path.realpath(requested_path)
+        try:
+            relative = os.path.relpath(target, root)
+        except ValueError:
+            return "file edit resolves outside the workdir"
+        if relative == ".." or relative.startswith(".." + os.sep) or relative == ".":
+            return "file edit resolves outside the workdir or targets its root"
+        if under_skill_tree(requested_path, root) or under_skill_tree(target, root):
+            return "installed skills are read-only during evaluation"
+        # A hard link has no symlink to resolve; still protect the harness hook and installed script.
+        protected = (os.path.realpath(__file__),
+                     os.path.join(root, ".claude", "skills", skill_name, script_relative))
+        if any(os.path.exists(target) and os.path.exists(p) and os.path.samefile(target, p) for p in protected):
+            return "protected harness or installed skill file"
+    return None
 
 
 def regular_path(root, relative, existing, allow_hidden=False):
@@ -85,7 +137,14 @@ def main():
         if (isinstance(payload, dict) and payload.get("hook_event_name") == "PreToolUse" and
                 payload.get("tool_name") not in ("Bash", "Monitor", "PowerShell") and
                 not carries_command(payload.get("tool_input"))):
-            return  # no decision: ordinary tools follow their normal permission flow
+            tool_name = payload.get("tool_name")
+            paths = list(edit_paths(payload.get("tool_input")))
+            if tool_name in READ_TOOLS or (tool_name not in EDIT_TOOLS and not paths):
+                return  # non-editing tools keep their normal permission flow
+            problem = check_edit(payload, root, paths, skill_name, script_relative)
+            if problem:
+                print(json.dumps(decision("deny", problem)))
+            return  # allowed edits still go through Claude's normal permission checks
         problem = check(payload, root, skill_name, script_relative, script_hash, python3)
     except (OSError, ValueError, TypeError, AttributeError, KeyError) as ex:
         problem = "gate validation failed: %s" % type(ex).__name__

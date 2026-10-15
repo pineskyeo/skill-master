@@ -59,7 +59,8 @@ class TestRound17(unittest.TestCase):
             cmd = engine.command("p", with_skill, skill_name="csv-cleaner")
             self.assertEqual(cmd[cmd.index("--permission-mode") + 1], "default")
             self.assertEqual(cmd[cmd.index("--allowedTools") + 1],
-                             "Write,Edit,Bash(python3 -I .claude/skills/csv-cleaner/scripts/clean.py *)")
+                             "Edit(/**),Bash(python3 -I .claude/skills/csv-cleaner/scripts/clean.py *)")
+            self.assertFalse({"Write", "Edit"} & set(cmd[cmd.index("--allowedTools") + 1].split(",")))
             self.assertEqual(cmd[cmd.index("--disallowedTools") + 1:cmd.index("--disallowedTools") + 3],
                              ["Monitor", "PowerShell"])
             self.assertEqual(cmd[cmd.index("--setting-sources") + 1], "project,local")
@@ -169,6 +170,28 @@ class TestRound17(unittest.TestCase):
         self.assertEqual(self.gate("cat input.csv")["permissionDecision"], "deny")
         self.assertEqual(self.gate(INVOCATION, cwd=self.tmp.name)["permissionDecision"], "deny")
 
+    def test_file_edits_are_scoped_in_both_arms(self):
+        engine = se.ClaudeCodeEngine("claude-sonnet-5-5", python_script="scripts/clean.py", skill_dir=SKILL)
+        installed = os.path.join(self.work, ".claude", "skills", "csv-cleaner", "scripts", "clean.py")
+        outside = os.path.join(self.tmp.name, "outside.csv")
+        os.symlink(self.tmp.name, os.path.join(self.work, "escape"))
+        for with_skill in (True, False):
+            with self.subTest(with_skill=with_skill):
+                cmd = engine.command("p", with_skill, skill_name="csv-cleaner")
+                self.assertEqual(cmd[cmd.index("--allowedTools") + 1].split(",")[0], "Edit(/**)")
+                for tool, key in (("Write", "file_path"), ("Edit", "file_path"),
+                                  ("MultiEdit", "file_path"), ("NotebookEdit", "notebook_path")):
+                    for path in (GATE, installed, "../outside.csv", "escape/outside.csv"):
+                        result = json.loads(self.gate_without_command(tool, {key: path}))
+                        self.assertEqual(result["hookSpecificOutput"]["permissionDecision"], "deny", (tool, path))
+                    self.assertEqual(self.gate_without_command(tool, {key: "normal_output.csv"}), "")
+                self.assertEqual(json.loads(self.gate_without_command("FutureEdit", {"file_path": outside}))
+                                 ["hookSpecificOutput"]["permissionDecision"], "deny")
+                self.assertEqual(self.gate_without_command("FutureEdit", {"file_path": "normal_output.csv"}), "")
+                self.assertEqual(json.loads(self.gate_without_command("MultiEdit", {
+                    "edits": [{"file_path": "normal_output.csv"}, {"file_path": installed}]}))
+                                 ["hookSpecificOutput"]["permissionDecision"], "deny")
+
     def test_non_command_tools_get_no_hook_decision(self):
         for tool_name, tool_input in (("Read", {"file_path": "input.csv"}),
                                       ("Write", {"file_path": "out.csv", "content": "x"}),
@@ -186,7 +209,7 @@ class TestRound17(unittest.TestCase):
             readme = f.read()
         self.assertIn('PreToolUse`/`*` 훅', readme)
         self.assertIn('--disallowedTools Monitor PowerShell', readme)
-        self.assertIn('명령 필드가 없는 Read, Write, Edit, Glob, Grep, Skill, TodoWrite', readme)
+        self.assertIn('Read, Glob, Grep, Skill, TodoWrite', readme)
 
     def test_gate_rejects_symlinks_existing_output_and_changed_script(self):
         src = os.path.join(self.work, "evals", "files", "empty_header_spaces.csv")

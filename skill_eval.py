@@ -906,7 +906,9 @@ class ClaudeCodeEngine(Engine):
         if self.effort: cmd += ["--effort", self.effort]
         if budget_usd is not None: cmd += ["--max-budget-usd", "%.2f" % budget_usd]
         rule = self.script_allow_rule(skill_name)
-        if rule: cmd += ["--permission-mode", "default", "--allowedTools", "Write,Edit," + rule,
+        # CLI path rules with one leading slash anchor at this session's primary workdir.
+        # Edit covers the built-in file-editing tools, including Write and NotebookEdit.
+        if rule: cmd += ["--permission-mode", "default", "--allowedTools", "Edit(/**)," + rule,
                          "--disallowedTools", "Monitor", "PowerShell"]
         if not with_skill: cmd += ["--disable-slash-commands"]
         return cmd + self.extra_args
@@ -2849,7 +2851,7 @@ def live_dry_run(a, spec, problems, ws, n, engines, tokens, prices):
         for e in engines:
             if isinstance(e, ClaudeCodeEngine) and e.script_allow_rule(spec["skill_name"]):
                 print("claude --permission-mode (with_skill and without_skill): default")
-                print("claude --allowedTools (with_skill and without_skill): Write,Edit,%s"
+                print("claude --allowedTools (with_skill and without_skill): Edit(/**),%s"
                       % e.script_allow_rule(spec["skill_name"]))
                 print("claude --disallowedTools (with_skill and without_skill): Monitor PowerShell")
     print("live command: " + shlex.join(["python3", "skill_eval.py"] + [x for x in a.argv if x != "--dry-run"]))

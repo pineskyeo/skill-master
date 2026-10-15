@@ -165,3 +165,27 @@ python3 skill_eval.py grade golden/skills/csv-cleaner --workspace golden/skills/
 ```
 
 위 명령에 `--dry-run`을 붙인 결과 종료 코드 **2**: 작업공간에 iteration 결과가 없어 grade dry run이 시작되지 않았다. 남은 순서는 변경된 eval-set 승인, 승인 후 run, 결과 생성 후 grade이다. 이 라운드에서는 규칙에 따라 실제 `--live`를 실행하지 않았다.
+
+## Round 22 — codex-r21 P1 수정 및 검증
+
+- 두 arm의 `--allowedTools`에서 bare `Write,Edit`를 제거하고 `Edit(/**),Bash(python3 -I .claude/skills/csv-cleaner/scripts/clean.py *)`로 통일했다. [Claude 권한 문서](https://code.claude.com/docs/en/permissions)를 확인했다. 내장 파일 편집 도구는 `Edit(path)` 규칙을 참조하고, `Write(path)`·`NotebookEdit(path)`·`MultiEdit(path)` 규칙은 받아들여도 경로 검사에 사용하지 않는다. CLI 플래그의 단일 `/`은 세션의 기본 작업 폴더에 고정되므로 `Edit(/**)`는 해당 평가의 workdir 이하를 승인한다. 파일시스템 절대경로 접두사는 `//`이며, `/Users/...` 같은 단일 `/` 경로는 절대경로가 아니다. 이 문서 규칙과 생성된 두 arm의 인자는 확인했다. 실제 모델 호출에서 승인·훅 발화 여부는 모델 호출 금지로 확인하지 않았다.
+- `claude_bash_gate.py`의 `PreToolUse`는 Write, Edit, MultiEdit, NotebookEdit 및 다른 도구의 `file_path`/`notebook_path` 대상 전체를 검사한다. `..`와 심볼릭 링크를 포함한 실경로가 workdir 밖이면 거부한다. 요청 경로나 실경로가 `.claude/skills/**`이면 거부하고, 하네스 훅과 설치 스크립트의 동일 파일 대상도 거부한다. workdir 내부 일반 출력 파일은 훅 결정을 내리지 않아 기존 Claude 권한 검사로 진행한다. Read·Glob·Grep 등 비편집 도구와 기존 Bash 명령 게이트의 동작은 유지한다.
+- 회귀 테스트: 두 arm에서 hook/설치 스크립트 편집, `../`·심볼릭 링크 탈출, 중첩된 MultiEdit 경로를 검사했다. 일반 출력 파일은 허용 흐름이고 생성된 `--allowedTools`에는 bare Write/Edit가 없다. `python3 -m pytest -q`: **522 passed**. `git diff --check`: 통과.
+- 현재 스킬 SHA-256: `05d9f9876fe7b2d53a7abc2289262a39dbdb458ed4d03ce51995d2fd0f93bd58`
+- 현재 eval-set SHA-256: `2c1cb707840f1824072ba92da0aec14c864b0e81695f97b9afbd5986a37e8095`
+
+최종 run live 명령(기록만 함, 실행하지 않음):
+
+```sh
+python3 skill_eval.py run golden/skills/csv-cleaner --workspace golden/skills/csv-cleaner-workspace --engines claude --runs 1 --claude-model claude-sonnet-5-5 --claude-effort high --grader-engine codex --grader-effort high --tokens exec=135000,2000 --tokens trigger=190000,1500 --budget-usd 12.5 --live
+```
+
+위 명령에 `--dry-run`을 붙여 재검사한 결과 종료 코드 **3**: validation **0**, preflight **0**, 예상 비용 **$11.38 / $12.50**. 두 arm의 샘플 명령과 요약에 동일한 `Edit(/**),Bash(...)` 허용 규칙, `--disallowedTools Monitor PowerShell`, `PreToolUse` matcher `*`가 표시됐다. 유일한 live gate는 변경된 **eval_set 미승인**이다. dry run은 모델·인증 CLI 호출 및 파일 쓰기를 하지 않았다.
+
+최종 grade live 명령(기록만 함, 실행하지 않음):
+
+```sh
+python3 skill_eval.py grade golden/skills/csv-cleaner --workspace golden/skills/csv-cleaner-workspace --iteration 3 --engines claude --runs 1 --claude-model claude-sonnet-5-5 --claude-effort high --grader-engine codex --grader-effort high --budget-usd 9.5 --live
+```
+
+위 명령의 `--dry-run`은 종료 코드 **2**: iteration 3 결과가 없어 채점을 시작할 수 없었다. 남은 순서는 변경된 eval-set 승인, 허용 시 run, iteration 3 결과 생성 후 grade이다.

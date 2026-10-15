@@ -28,7 +28,7 @@ class TestCsvCleanerRound16(unittest.TestCase):
         for with_skill in (True, False):
             cmd = e.command("clean", with_skill, 1.0, skill_name="csv-cleaner")
             self.assertEqual(cmd[cmd.index("--permission-mode") + 1], "default")
-            self.assertEqual(cmd[cmd.index("--allowedTools") + 1], "Write,Edit," + rule)
+            self.assertEqual(cmd[cmd.index("--allowedTools") + 1], "Edit(/**)," + rule)
             self.assertNotIn("Bash", cmd)
             self.assertNotIn("Bash(*)", cmd)
         self.assertNotIn("--allowedTools", se.ClaudeCodeEngine().command("x", True, skill_name="other"))
@@ -44,7 +44,7 @@ class TestCsvCleanerRound16(unittest.TestCase):
                 mock.patch.object(se, "plan_text", return_value=""):
             se.live_dry_run(a, self.spec, [], self.tmp.name, None, [e], {}, {})
         self.assertIn("claude --permission-mode (with_skill and without_skill): default", out.getvalue())
-        self.assertIn("claude --allowedTools (with_skill and without_skill): Write,Edit," +
+        self.assertIn("claude --allowedTools (with_skill and without_skill): Edit(/**)," +
                       e.script_allow_rule("csv-cleaner"), out.getvalue())
         self.assertIn("claude --disallowedTools (with_skill and without_skill): Monitor PowerShell", out.getvalue())
 
