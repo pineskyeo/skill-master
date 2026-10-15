@@ -861,19 +861,24 @@ def ancestors(path):
 
 def skills_under(root, max_depth):
     """[(name, path)] of folders below root (depth <= max_depth) that hold a SKILL.md. Depth is counted on the visible
-    path under root (a direct link to a deep folder is depth 1), not on the link target. Follows symlinked folders
-    once; dangling links and unreadable folders are skipped, never raised."""
+    path under root (a direct link to a deep folder is depth 1), not on the link target. Breadth-first, so each real
+    folder is first reached by its shallowest visible path (a deeper alias seen first cannot hide it). Follows
+    symlinked folders once; dangling links and unreadable folders are skipped, never raised."""
     out, seen = [], set()
     if not os.path.isdir(root): return out
-    for dp, dn, fn in os.walk(root, followlinks=True, onerror=lambda e: None):
-        real, rel = os.path.realpath(dp), os.path.relpath(dp, root)
-        depth = 0 if rel == os.curdir else rel.count(os.sep) + 1
-        if real in seen or depth > max_depth: dn[:] = []; continue
-        seen.add(real)
-        if dp != root and os.path.isfile(os.path.join(dp, "SKILL.md")):
-            out.append((os.path.basename(dp), dp)); dn[:] = []
-        else:
-            dn[:] = [d for d in dn if os.path.isdir(os.path.join(dp, d))]
+    level = [root]
+    for depth in range(max_depth + 1):
+        nxt = []
+        for dp in level:
+            real = os.path.realpath(dp)
+            if real in seen: continue
+            seen.add(real)
+            if depth and os.path.isfile(os.path.join(dp, "SKILL.md")):
+                out.append((os.path.basename(dp), dp)); continue
+            try: names = sorted(os.listdir(dp))
+            except OSError: continue
+            nxt += [os.path.join(dp, d) for d in names if os.path.isdir(os.path.join(dp, d))]
+        level = nxt
     return out
 
 def real_codex_home():
