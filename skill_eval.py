@@ -14,7 +14,7 @@ variables are refused and scrubbed from every child, and costs are API-equivalen
 Usage: python3 skill_eval.py <validate|estimate|plan|run|grade|calibrate|report|approve|register|snapshot|loop> <skill> ...
        (also reachable as: python3 eva.py eval <subcommand> ...)
 """
-import argparse, datetime, hashlib, json, math, os, platform, random, re, shlex, shutil, subprocess, sys, tempfile, time
+import argparse, datetime, hashlib, json, math, mmap, os, platform, random, re, shlex, shutil, subprocess, sys, tempfile, time
 
 LAYERS = ("static", "llm", "human")
 BASELINES = {"none": "without_skill", "old": "old_skill"}  # skill-creator configuration names
@@ -540,21 +540,123 @@ def claude_builtin_plugins(path=None, refresh=False):
                              binary=path, scanned=sorted(found), error=err)
     return dict(_BUILTIN_SCAN)
 
-def claude_settings():
-    """The --settings object of every Claude launch: bundled skills off and every known built-in plugin disabled."""
-    return {"disableBundledSkills": True,
-            "enabledPlugins": {i: False for i in claude_builtin_plugins()["ids"]}}
+# Bundled skills are registered in the CLI through registerBundledSkill({name, ...}). disableBundledSkills turns them
+# all off EXCEPT those registered with survivesBundledKillSwitch (2.1.300: getBundledSkills returns only
+# bundledSkillKillSwitchSurvivors under the kill switch); those are 'design' and 'doctor', the two the first live run
+# still loaded. https://code.claude.com/docs/en/skills ("Override skill visibility from settings"): disableBundledSkills
+# leaves /doctor (v2.1.205+), hidden by DISABLE_DOCTOR_COMMAND or skillOverrides {"doctor": "off"}; "off" hides a skill
+# from Claude and the / menu and applies to bundled skills (plugin skills: enabledPlugins). So every launch also sets
+# skillOverrides "off" for every bundled name: the static list below (the registerBundledSkill names in the 2.1.300
+# binary, including the template-registered ones the scan cannot resolve) plus what a launch-time scan of the installed
+# binary finds. The skill under test is never overridden. The init check is unchanged: anything still loaded stops the run.
+CLAUDE_BUNDLED_SKILL_NAMES = (
+    "artifact-capabilities", "artifact-components", "artifact-data-table", "artifact-design", "artifact-diagramming",
+    "artifact-explainer", "artifact-pr-review", "artifact-report", "batch", "claude-api", "claude-code-docs",
+    "claude-in-chrome", "code-review", "commit", "cowork-plugin", "dataviz", "debug", "design", "design-sync", "doc",
+    "doctor", "explain-usage", "fewer-permission-prompts", "keybindings-help", "loop", "memory-types", "pr", "prototype",
+    "run", "run-skill-generator", "schedule", "setup-claude", "simplify", "slides", "update-config", "verify",
+    "whiteboard", "workflow-authoring", "workshop")
+CLAUDE_BUNDLED_KILL_SWITCH_SURVIVORS = ("design", "doctor")
+_SKILL_NAME_RE = re.compile(rb"[a-z0-9][a-z0-9-]{0,63}")
+_BUN_CHUNK = b"// @bun @bytecode"
+_BUNDLED_SCAN = {}  # cache like _BUILTIN_SCAN
 
-def claude_settings_json():
-    return json.dumps(claude_settings(), sort_keys=True)
+def _js_boundary(mm, i):
+    """True when position i does not continue an identifier or member access (i is the start of a token)."""
+    return i == 0 or not (mm[i - 1:i].isalnum() or mm[i - 1:i] in (b"_", b"$", b"."))
+
+def _find_all(mm, needle, start=0, end=None):
+    end = len(mm) if end is None else end
+    i = mm.find(needle, start, end)
+    while i >= 0:
+        yield i
+        i = mm.find(needle, i + 1, end)
+
+def _assigned_names(mm, ident, start=0, end=None):
+    """Distinct skill-name strings assigned as <ident>="<name>" in mm[start:end]."""
+    out = set()
+    for i in _find_all(mm, ident + b'="', start, end):
+        if not _js_boundary(mm, i): continue
+        j = i + len(ident) + 2
+        m = _SKILL_NAME_RE.match(mm[j:j + 66])
+        if m and mm[j + m.end():j + m.end() + 1] == b'"': out.add(m.group().decode("ascii"))
+    return out
+
+def scan_bundled_skill_names(path):
+    """(names, survivors): the literal or resolvable names passed to registerBundledSkill in the file at path, and those
+    registered with survivesBundledKillSwitch. The minified alias comes from `<alias> as registerBundledSkill`; a name
+    given as an identifier is resolved from `<ident>="<name>"` in the same bundle chunk, else in the whole file, and
+    only when exactly one value is found. Template names (`artifact-${e}`) stay unresolved. Nothing is executed;
+    literal searches only (a regex scan of the ~200 MB binary takes tens of seconds)."""
+    with open(path, "rb") as f:
+        try: mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        except ValueError: return set(), set()  # empty file
+    with mm:
+        aliases = set()
+        tag = b" as registerBundledSkill"
+        for i in _find_all(mm, tag):
+            nxt = mm[i + len(tag):i + len(tag) + 1]
+            if nxt.isalnum() or nxt in (b"_", b"$"): continue  # registerBundledSkillSessionReset, ...
+            m = re.search(rb"[\w$]+$", mm[max(0, i - 40):i])
+            if m: aliases.add(m.group())
+        names, survivors, pending = set(), set(), []
+        def add(n, surv):
+            names.add(n)
+            if surv: survivors.add(n)
+        for alias in sorted(aliases):
+            for i in _find_all(mm, alias + b"({name:"):
+                if not _js_boundary(mm, i): continue
+                j = i + len(alias) + 7
+                body = mm[j:j + 3000].split(b"getPromptForCommand")[0]
+                surv = b"survivesBundledKillSwitch:!0" in body
+                lit = re.match(b'"(' + _SKILL_NAME_RE.pattern + b')"', body)
+                if lit: add(lit.group(1).decode("ascii"), surv); continue
+                ident = re.match(rb"([\w$]+)[,}]", body)
+                if not ident: continue  # template literal or member access: static list only
+                ident = ident.group(1)
+                cs = mm.rfind(_BUN_CHUNK, 0, i); ce = mm.find(_BUN_CHUNK, j)
+                local = _assigned_names(mm, ident, max(cs, 0), ce if ce >= 0 else None)
+                if len(local) == 1: add(local.pop(), surv)
+                elif not local: pending.append((ident, surv))
+        for ident, surv in pending:
+            found = _assigned_names(mm, ident)
+            if len(found) == 1: add(found.pop(), surv)
+    return names, survivors
+
+def claude_bundled_skills(path=None, refresh=False):
+    """{"names": sorted bundled skill names (static list + scan), "survivors": the kill-switch survivors among them,
+    "binary", "scanned", "error"} — same shape and caching as claude_builtin_plugins."""
+    if refresh or not _BUNDLED_SCAN:
+        path = path or claude_binary_path()
+        found, surv, err = set(), set(), None
+        if not path: err = "claude not found on PATH"
+        else:
+            try: found, surv = scan_bundled_skill_names(path)
+            except OSError as ex: err = "%s: %s" % (type(ex).__name__, ex)
+        _BUNDLED_SCAN.clear()
+        _BUNDLED_SCAN.update(names=sorted(set(CLAUDE_BUNDLED_SKILL_NAMES) | found),
+                             survivors=sorted(set(CLAUDE_BUNDLED_KILL_SWITCH_SURVIVORS) | surv),
+                             binary=path, scanned=sorted(found), error=err)
+    return dict(_BUNDLED_SCAN)
+
+def claude_settings(skill_name=None):
+    """The --settings object of every Claude launch: bundled skills off (kill switch plus skillOverrides "off" for every
+    known bundled name except skill_name, the skill under test) and every known built-in plugin disabled."""
+    return {"disableBundledSkills": True,
+            "enabledPlugins": {i: False for i in claude_builtin_plugins()["ids"]},
+            "skillOverrides": {n: "off" for n in claude_bundled_skills()["names"] if n != skill_name}}
+
+def claude_settings_json(skill_name=None):
+    return json.dumps(claude_settings(skill_name), sort_keys=True)
 
 # One sanitized launch shape for every claude -p call (executor, grader, builder): project/local setting sources only,
-# no MCP servers, bundled skills and built-in plugins off, auto memory and claude.ai MCP servers off, API-key/provider
-# variables scrubbed.
-CLAUDE_CHILD_ENV = {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "ENABLE_CLAUDEAI_MCP_SERVERS": "false"}
+# no MCP servers, bundled skills and built-in plugins off, auto memory, claude.ai MCP servers and /doctor off,
+# API-key/provider variables scrubbed.
+CLAUDE_CHILD_ENV = {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
+                    "DISABLE_DOCTOR_COMMAND": "1"}
 
-def claude_isolation_args():
-    return ["--setting-sources", "project,local", "--strict-mcp-config", "--settings", claude_settings_json()]
+def claude_isolation_args(skill_name=None):
+    return ["--setting-sources", "project,local", "--strict-mcp-config", "--settings", claude_settings_json(skill_name)]
 
 def builtin_plugin_check_command():
     """Free check (plugin management only, no model call) of what the launch settings do to the built-in plugins."""
@@ -600,11 +702,11 @@ def claude_child_env(config_dir=None):
     if config_dir: env["CLAUDE_CONFIG_DIR"] = config_dir
     return scrub_env(env)
 
-def launch_claude(exec_fn, cmd, cwd, timeout, env=None):
-    """Grader and builder launch path: refuses (EvalError, before the call) unless cmd carries the isolation args and
-    cwd passes claude_launch_problems; the child gets claude_child_env(). The executor uses the same args, env and
-    checks through its Sandbox."""
-    iso = claude_isolation_args()
+def launch_claude(exec_fn, cmd, cwd, timeout, env=None, skill_name=None):
+    """Grader and builder launch path: refuses (EvalError, before the call) unless cmd carries the isolation args (for
+    skill_name, the skill the launch must not override) and cwd passes claude_launch_problems; the child gets
+    claude_child_env(). The executor uses the same args, env and checks through its Sandbox."""
+    iso = claude_isolation_args(skill_name)
     if cmd[:2] != ["claude", "-p"] or not any(cmd[i:i + len(iso)] == iso for i in range(len(cmd))):
         raise EvalError("refusing a claude call without the isolation arguments")
     probs = claude_launch_problems(cwd)
@@ -667,7 +769,7 @@ class Engine:
         dst = ensure_inside(os.path.join(workdir, self.skills_rel), os.path.join(workdir, self.skills_rel, name))
         shutil.copytree(skill_dir, dst, ignore=shutil.ignore_patterns(*SKILL_IGNORE))
         return dst
-    def command(self, prompt, with_skill, budget_usd=None): raise NotImplementedError
+    def command(self, prompt, with_skill, budget_usd=None, skill_name=None): raise NotImplementedError
     def parse(self, stdout): raise NotImplementedError
     def triggered(self, result, skill_name): raise NotImplementedError
     def sandbox_env(self, root):
@@ -693,13 +795,13 @@ class Engine:
         return []
     def after_run(self, root):
         return []
-    def run(self, prompt, workdir, with_skill, budget_usd=None, env=None):
+    def run(self, prompt, workdir, with_skill, budget_usd=None, env=None, skill_name=None):
         """A call that raises after it may have started (timeout, crash, ...) is not re-raised: it comes back as an
         error result with no usage and launch_failed set, so the caller charges the cap/bound, records it and stops.
         Output that cannot be parsed after the call (e.g. nonnumeric usage) is handled the same way, with any
         CLI-reported cost kept so max(reported, cap) is charged. LiveDisabled is raised before anything starts and
         passes through."""
-        cmd = self.command(prompt, with_skill, budget_usd)
+        cmd = self.command(prompt, with_skill, budget_usd, skill_name=skill_name)
         t0, start = time.monotonic(), now_iso()
         failed = None
         try:
@@ -731,9 +833,9 @@ class ClaudeCodeEngine(Engine):
     name, skills_rel, has_call_cap = "claude", ".claude/skills", True
     ENV = CLAUDE_CHILD_ENV
     EFFORTS = CLAUDE_EFFORTS
-    def command(self, prompt, with_skill, budget_usd=None):
+    def command(self, prompt, with_skill, budget_usd=None, skill_name=None):
         cmd = ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose", "--no-session-persistence"]
-        cmd += claude_isolation_args()
+        cmd += claude_isolation_args(skill_name)
         if self.model: cmd += ["--model", self.model]
         if self.effort: cmd += ["--effort", self.effort]
         if budget_usd is not None: cmd += ["--max-budget-usd", "%.2f" % budget_usd]
@@ -757,6 +859,9 @@ class ClaudeCodeEngine(Engine):
             if os.path.isdir(cd) and any(f.endswith(".md") for _, _, fn in os.walk(cd) for f in fn):
                 out.append("custom command files in %s would load like skills" % cd)
         out += claude_undetectable_skill_problems(claude_config_dir())
+        if skill_name and skill_name in claude_bundled_skills()["names"]:
+            out.append("skill name %r is also a bundled skill: the launch cannot set it off without hiding the skill "
+                       "under test, and the init check cannot tell the two apart" % skill_name)
         return out + claude_launch_problems(work)
     def isolation_problems(self, res, with_skill, skill_name, user_names):
         """From the stream-json system/init event: apiKeySource "none" (docs/en/agent-sdk/typescript ApiKeySource:
@@ -907,7 +1012,7 @@ class CodexEngine(Engine):
             pass
         return ("the Codex auth.json copy %s could not be deleted (%s)%s: delete it yourself" % (
             p, err or "still present", "; its content was erased" if emptied else "; IT MAY STILL HOLD A TOKEN"))
-    def command(self, prompt, with_skill, budget_usd=None):
+    def command(self, prompt, with_skill, budget_usd=None, skill_name=None):
         cmd = ["codex", "exec", "--json", "--skip-git-repo-check", "--ephemeral", "--sandbox", "workspace-write"]
         if self.model: cmd += ["-m", self.model]
         if self.effort: cmd += ["-c", CODEX_EFFORT_CONFIG % self.effort]
@@ -1144,7 +1249,7 @@ def isolated_run(eng, prompt, spec, case, skill_path, run_dir, run_root, cap, us
     try:
         probs = sb.problems()
         if probs: raise EvalError("isolation (%s): %s" % (eng.name, " | ".join(probs)))
-        res = eng.run(prompt, sb.work, with_skill=bool(skill_path), budget_usd=cap, env=sb.env)
+        res = eng.run(prompt, sb.work, with_skill=bool(skill_path), budget_usd=cap, env=sb.env, skill_name=sb.name)
         try:  # the call has happened: a failure from here on is charged and stops, never escapes uncharged
             iso = eng.isolation_problems(res, bool(skill_path), spec["skill_name"], user_names)
             res["isolation"] = dict(sb.record(), problems=iso)
@@ -2339,14 +2444,15 @@ class ClaudeBuilder:
     skill folder with file tools only (no Bash, so it cannot start other paid CLIs), a --max-budget-usd cap from the
     shared Budget, and its cost charged to that Budget. The iteration's comparison.md is inlined into the prompt."""
     TOOLS = "Read,Edit,Write,Glob,Grep"
-    def __init__(self, instructions, model, budget, prices=None, exec_fn=None, timeout=900):
+    def __init__(self, instructions, model, budget, prices=None, exec_fn=None, timeout=900, skill_name=None):
         self.instructions, self.model, self.budget, self.prices = instructions, model, budget, prices or {}
         self.exec_fn, self.timeout, self.calls = exec_fn or live_exec, timeout, 0
+        self.skill_name = skill_name  # the skill being built: never set off by skillOverrides
         self.usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0, "api_equivalent_usd": 0.0}
     def command(self, prompt, cap):
         cmd = ["claude", "-p", prompt, "--model", self.model, "--output-format", "json", "--no-session-persistence",
                "--permission-mode", "acceptEdits", "--tools", self.TOOLS, "--disable-slash-commands"]
-        cmd += claude_isolation_args()
+        cmd += claude_isolation_args(self.skill_name)
         return cmd + (["--max-budget-usd", "%.2f" % cap] if cap is not None else [])
     def _record(self, it_dir, tin, tout, cost):
         if self.budget is not None: self.budget.charge(cost)
@@ -2369,7 +2475,8 @@ class ClaudeBuilder:
         bound = call_bound("builder", self.model, "builder", self.prices, DEFAULT_TOKENS) or 0.0
         fallback = cap if cap is not None else bound  # no usage: the cap
         try:
-            rc, out, err = launch_claude(self.exec_fn, self.command(prompt, cap), skill_dir, self.timeout)
+            rc, out, err = launch_claude(self.exec_fn, self.command(prompt, cap), skill_dir, self.timeout,
+                                         skill_name=self.skill_name)
         except (EvalError, LiveDisabled):
             raise  # refused before launch: nothing spent
         except Exception as ex:
@@ -2498,7 +2605,8 @@ def plan_text(spec, problems, a, engines, ws, est):
         L.append("sample commands (eval %s, run in <workspace>/iteration-N/<engine>/%s/<config>/run-k/workdir):" % (c["id"], eval_dir_name(c)))
         for e in engines:
             for cfg in configs:
-                cmd = e.command(full_prompt(c)[:60] + "…", bool(skill_path_for(cfg, spec, a.old_skill or "<old>")))
+                cmd = e.command(full_prompt(c)[:60] + "…", bool(skill_path_for(cfg, spec, a.old_skill or "<old>")),
+                                skill_name=spec["skill_name"])
                 L.append("  [%s %s] %s" % (e.name, cfg, " ".join(json.dumps(x, ensure_ascii=False) if " " in x else x for x in cmd)))
     L += ["cost estimate:", format_estimate(est)]
     return "\n".join(L)
@@ -2624,10 +2732,15 @@ def live_dry_run(a, spec, problems, ws, n, engines, tokens, prices):
     for r in skipped:
         if r in report: print("  (%s)" % r)
     if any(e.name == "claude" for e in engines) or getattr(a, "grader_engine", None) == "claude":
-        info = claude_builtin_plugins()
-        print("claude --settings (every launch): %s" % claude_settings_json())
+        info, bs = claude_builtin_plugins(), claude_bundled_skills()
+        print("claude --settings (executor/builder launches; the grader has no skill under test): %s"
+              % claude_settings_json(spec["skill_name"]))
         print("  built-in plugins disabled: %d (binary %s: %s)" % (len(info["ids"]), info["binary"],
               info["error"] or "%d cc-plugin-* names found" % len(info["scanned"])))
+        print("  bundled skills set off: %d, never %r (binary scan: %s); kill-switch survivors: %s; child env %s" % (
+            len([n for n in bs["names"] if n != spec["skill_name"]]), spec["skill_name"],
+            bs["error"] or "%d registerBundledSkill names found" % len(bs["scanned"]), ", ".join(bs["survivors"]),
+            " ".join("%s=%s" % kv for kv in sorted(CLAUDE_CHILD_ENV.items()))))
     print("live command: " + shlex.join(["python3", "skill_eval.py"] + [x for x in a.argv if x != "--dry-run"]))
     return 3 if fails else 0
 
@@ -2800,7 +2913,8 @@ def _dispatch(a):
         wjson(os.path.join(ws, "iteration-%d" % n, "calibration.json"), cal)
         print("agreement %.2f kappa %.2f (n=%d)" % (cal["agreement"], cal["kappa"], cal["n"])); return 0
     if a.cmd == "loop":
-        builder = ClaudeBuilder(read_builder_prompt(a), a.builder_model, budget, prices) if a.builder_prompt else None
+        builder = ClaudeBuilder(read_builder_prompt(a), a.builder_model, budget, prices,
+                                skill_name=spec["skill_name"]) if a.builder_prompt else None
         def precheck(spec_now, left):
             _, probs = load_eval_set(spec_now["skill_dir"])
             try:

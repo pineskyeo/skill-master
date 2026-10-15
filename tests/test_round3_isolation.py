@@ -252,7 +252,8 @@ class TestIsolation(Base):
             self.assertIn("--strict-mcp-config", cmd)
             st = json.loads(cmd[cmd.index("--settings") + 1])
             self.assertIs(st["disableBundledSkills"], True)
-            self.assertEqual(set(st), {"disableBundledSkills", "enabledPlugins"})  # round 14: built-in plugins off
+            # round 14: built-in plugins off; round 15: bundled skills (kill-switch survivors included) set off
+            self.assertEqual(set(st), {"disableBundledSkills", "enabledPlugins", "skillOverrides"})
             self.assertFalse(any(st["enabledPlugins"].values()))
             self.assertTrue(cwd.startswith(os.path.realpath(self.runs)))
         t = rjson(os.path.join(self.ws, "iteration-1", "claude", "eval-1-start-the-login-fix-task", "with_skill", "run-1",
