@@ -507,16 +507,18 @@ def claude_launch_problems(cwd, config_dir=None, require_hooks=False):
     local settings of cwd and every ancestor, every managed source, and the server-managed cache of the config dir
     the call uses. Checked before every Claude launch (executor, grader, builder); nothing is spent on a refusal."""
     files, probs = claude_managed_sources()
+    probs = list(probs)
     cfg = config_dir or claude_config_dir()
+    remote = os.path.join(cfg, CLAUDE_REMOTE_SETTINGS)
     if require_hooks:
-        for p in files:
+        for p in files + [remote]:
             if not os.path.lexists(p): continue
             try: st = _read_settings(p)
             except Exception: continue  # the existing auth/settings validation reports unreadable sources
             if isinstance(st, dict) and (st.get("allowManagedHooksOnly") is True or st.get("disableAllHooks") is True):
                 probs.append("claude: managed hook policy in %s may disable the Bash gate" % p)
     return api_key_env_problems() + probs + claude_settings_auth_problems(
-        claude_project_settings(ancestors(cwd)) + files + [os.path.join(cfg, CLAUDE_REMOTE_SETTINGS)])
+        claude_project_settings(ancestors(cwd)) + files + [remote])
 
 # Built-in plugins ship inside the CLI as "<name>@builtin" and load unless settings.enabledPlugins["<name>@builtin"]
 # is false (https://code.claude.com/docs/en/plugins/mods/admin: enabledPlugins / pluginConfigs with @builtin ids;
@@ -889,18 +891,16 @@ class ClaudeCodeEngine(Engine):
         if not safe_name(skill_name): raise EvalError("script permission needs a safe skill name")
         return "Bash(python3 -I .claude/skills/%s/%s *)" % (skill_name, self.python_script)
     def command(self, prompt, with_skill, budget_usd=None, skill_name=None):
-        if self.python_script and any(
-                arg == "--permission-mode=acceptEdits" or
-                (arg == "--permission-mode" and i + 1 < len(self.extra_args) and self.extra_args[i + 1] == "acceptEdits")
-                for i, arg in enumerate(self.extra_args)):
-            raise EvalError("acceptEdits is not allowed with a gated Python script")
+        if self.python_script and any(arg == "--permission-mode" or arg.startswith("--permission-mode=")
+                                      for arg in self.extra_args):
+            raise EvalError("a gated Python script pins --permission-mode default")
         cmd = ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose", "--no-session-persistence"]
         cmd += claude_isolation_args(skill_name, self.bash_gate())
         if self.model: cmd += ["--model", self.model]
         if self.effort: cmd += ["--effort", self.effort]
         if budget_usd is not None: cmd += ["--max-budget-usd", "%.2f" % budget_usd]
         rule = self.script_allow_rule(skill_name)
-        if rule: cmd += ["--allowedTools", rule]
+        if rule: cmd += ["--permission-mode", "default", "--allowedTools", "Write,Edit," + rule]
         if not with_skill: cmd += ["--disable-slash-commands"]
         return cmd + self.extra_args
     def sandbox_env(self, root):
@@ -2841,7 +2841,9 @@ def live_dry_run(a, spec, problems, ws, n, engines, tokens, prices):
             " ".join("%s=%s" % kv for kv in sorted(CLAUDE_CHILD_ENV.items()))))
         for e in engines:
             if isinstance(e, ClaudeCodeEngine) and e.script_allow_rule(spec["skill_name"]):
-                print("claude --allowedTools (with_skill and without_skill): %s" % e.script_allow_rule(spec["skill_name"]))
+                print("claude --permission-mode (with_skill and without_skill): default")
+                print("claude --allowedTools (with_skill and without_skill): Write,Edit,%s"
+                      % e.script_allow_rule(spec["skill_name"]))
     print("live command: " + shlex.join(["python3", "skill_eval.py"] + [x for x in a.argv if x != "--dry-run"]))
     return 3 if fails else 0
 

@@ -22,12 +22,13 @@ class TestCsvCleanerRound16(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
 
-    def test_permission_is_only_the_installed_script_in_both_arms(self):
+    def test_permissions_include_writes_edits_and_only_the_installed_script_for_bash_in_both_arms(self):
         e = se.ClaudeCodeEngine("claude-sonnet-5-5", python_script=self.spec["claude_python_script"], skill_dir=SKILL)
         rule = "Bash(python3 -I .claude/skills/csv-cleaner/scripts/clean.py *)"
         for with_skill in (True, False):
             cmd = e.command("clean", with_skill, 1.0, skill_name="csv-cleaner")
-            self.assertEqual(cmd[cmd.index("--allowedTools") + 1], rule)
+            self.assertEqual(cmd[cmd.index("--permission-mode") + 1], "default")
+            self.assertEqual(cmd[cmd.index("--allowedTools") + 1], "Write,Edit," + rule)
             self.assertNotIn("Bash", cmd)
             self.assertNotIn("Bash(*)", cmd)
         self.assertNotIn("--allowedTools", se.ClaudeCodeEngine().command("x", True, skill_name="other"))
@@ -42,7 +43,9 @@ class TestCsvCleanerRound16(unittest.TestCase):
         with redirect_stdout(out), mock.patch.object(se, "check_live_gates", return_value={"total_usd": 8.0}), \
                 mock.patch.object(se, "plan_text", return_value=""):
             se.live_dry_run(a, self.spec, [], self.tmp.name, None, [e], {}, {})
-        self.assertIn("claude --allowedTools (with_skill and without_skill): " + e.script_allow_rule("csv-cleaner"), out.getvalue())
+        self.assertIn("claude --permission-mode (with_skill and without_skill): default", out.getvalue())
+        self.assertIn("claude --allowedTools (with_skill and without_skill): Write,Edit," +
+                      e.script_allow_rule("csv-cleaner"), out.getvalue())
 
     def test_file_checks_reject_missing_modified_and_partial_outputs(self):
         src = "evals/files/events_large.csv"

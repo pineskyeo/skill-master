@@ -47,6 +47,9 @@ class TestRound17(unittest.TestCase):
         engine = se.ClaudeCodeEngine("claude-sonnet-5-5", python_script="scripts/clean.py", skill_dir=SKILL)
         for with_skill in (True, False):
             cmd = engine.command("p", with_skill, skill_name="csv-cleaner")
+            self.assertEqual(cmd[cmd.index("--permission-mode") + 1], "default")
+            self.assertEqual(cmd[cmd.index("--allowedTools") + 1],
+                             "Write,Edit,Bash(python3 -I .claude/skills/csv-cleaner/scripts/clean.py *)")
             self.assertEqual(cmd[cmd.index("--setting-sources") + 1], "project,local")
             self.assertEqual("--disable-slash-commands" in cmd, not with_skill)
             settings = json.loads(cmd[cmd.index("--settings") + 1])
@@ -62,6 +65,26 @@ class TestRound17(unittest.TestCase):
         with self.assertRaises(se.EvalError):
             se.ClaudeCodeEngine(python_script="scripts/clean.py", skill_dir=SKILL,
                                 extra_args=["--permission-mode", "acceptEdits"]).command("p", True, skill_name="csv-cleaner")
+        with self.assertRaises(se.EvalError):
+            se.ClaudeCodeEngine(python_script="scripts/clean.py", skill_dir=SKILL,
+                                extra_args=["--permission-mode=plan"]).command("p", False, skill_name="csv-cleaner")
+
+    def test_server_managed_cache_hook_restrictions_refuse_gated_launch(self):
+        cfg = os.path.join(self.tmp.name, "config")
+        os.makedirs(cfg)
+        remote = os.path.join(cfg, se.CLAUDE_REMOTE_SETTINGS)
+        with mock.patch.object(se, "claude_managed_sources", return_value=([], [])), \
+                mock.patch.object(se, "api_key_env_problems", return_value=[]):
+            for key in ("allowManagedHooksOnly", "disableAllHooks"):
+                with self.subTest(key=key):
+                    with open(remote, "w") as f: json.dump({key: True}, f)
+                    problems = se.claude_launch_problems(self.work, cfg, require_hooks=True)
+                    self.assertTrue(any("managed hook policy" in p and remote in p for p in problems), problems)
+                    self.assertFalse(any("managed hook policy" in p for p in
+                                         se.claude_launch_problems(self.work, cfg, require_hooks=False)))
+            with open(remote, "w") as f: json.dump({"allowManagedHooksOnly": False, "disableAllHooks": False}, f)
+            self.assertFalse(any("managed hook policy" in p for p in
+                                 se.claude_launch_problems(self.work, cfg, require_hooks=True)))
 
     def test_gate_allows_only_the_exact_invocation(self):
         self.assertEqual(self.gate(INVOCATION)["permissionDecision"], "allow")

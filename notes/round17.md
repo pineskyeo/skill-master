@@ -89,3 +89,20 @@ error: no iterations in /Users/pinesky/workspace/스킬_마스터/golden/skills/
 3. iteration 3 생성 후 grade와 report를 실행하고, 실제 결과에서 훅 발화와 기준군의 차단을 확인한다. Codex 채점 예산은 호출당 강제 한도가 없는 추정치다.
 
 4. 별도 평가셋 작업으로 트리거 should-use 라벨과 fixture 부재 정책을 정한다.
+
+## Round 18 — codex-r17 수정 및 검증
+
+- P1: CSV 스크립트를 사용하는 Claude 실행의 **두 arm** 모두 `--permission-mode default`를 고정하고 `--allowedTools "Write,Edit,Bash(python3 -I .claude/skills/csv-cleaner/scripts/clean.py *)"`를 전달한다. `PreToolUse` Bash 게이트는 그대로 적용한다. 추가 인자로 permission mode를 덮어쓰려는 시도는 거부한다. `Write`와 `Edit`는 eval 4의 원본 파일에도 쓸 수 있지만, 이를 사전에 차단하지 않는다. eval 4의 기존 정적 검사가 도구 호출과 원본 바이트 변경을 측정한다.
+- P2: 실행 전 검사에서 엔드포인트 관리 설정뿐 아니라 유효 Claude 설정 디렉터리의 `remote-settings.json`도 확인한다. `allowManagedHooksOnly` 또는 `disableAllHooks`가 `true`이면 Bash 게이트가 작동하지 않을 수 있으므로 실행을 거부한다. 두 제한값의 거부와 `false`일 때 허용을 테스트했다.
+- 문서 확인: [Claude headless](https://code.claude.com/docs/en/headless)는 `-p`에서 `--allowedTools`의 도구 사전 승인과 시작 권한 모드 명시를 설명한다. [Claude permissions](https://code.claude.com/docs/en/permissions)는 `default` 모드와 차단 훅이 허용 규칙보다 우선함을 설명한다. 실제 훅 발화는 모델 호출 금지 때문에 확인하지 않았다.
+- `python3 -m pytest -q`: **517 passed**.
+
+준비된 run 명령을 다시 실행했다. 플래그 변경은 없어 정확한 명령은 아래와 같다.
+
+```sh
+python3 skill_eval.py run golden/skills/csv-cleaner --workspace golden/skills/csv-cleaner-workspace --engines claude --runs 1 --claude-model claude-sonnet-5-5 --claude-effort high --grader-engine codex --grader-effort high --tokens exec=135000,2000 --tokens trigger=190000,1500 --budget-usd 12.5 --live --dry-run
+```
+
+종료 코드 **3**. 검증 문제 **0**, preflight 문제 **0**, 예산 추정 **$11.38 / $12.50**. `with_skill`과 `without_skill` 샘플 명령 모두 `--permission-mode default --allowedTools "Write,Edit,Bash(python3 -I .claude/skills/csv-cleaner/scripts/clean.py *)"`를 출력했다. 실평가를 막는 유일한 게이트는 **eval_set 미승인**이다. `--dry-run`이므로 모델 호출과 파일 쓰기는 없었다.
+
+남은 작업: 변경된 평가셋을 검토하고 `eval_set` 승인을 갱신한 뒤, 모델 호출이 허용되는 시점에 실평가를 실행한다.
