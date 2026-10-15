@@ -54,7 +54,7 @@ class TestRound17(unittest.TestCase):
             self.assertEqual("--disable-slash-commands" in cmd, not with_skill)
             settings = json.loads(cmd[cmd.index("--settings") + 1])
             hook = settings["hooks"]["PreToolUse"][0]
-            self.assertEqual(hook["matcher"], "Bash")
+            self.assertEqual(hook["matcher"], "Bash|PowerShell")
             self.assertEqual(hook["hooks"][0]["onFailure"], "block")
             self.assertEqual(hook["hooks"][0]["args"][0], GATE)
             self.assertFalse(settings["disableAllHooks"])
@@ -105,8 +105,31 @@ class TestRound17(unittest.TestCase):
             self.assertFalse(any("managed permission policy" in p for p in
                                  se.claude_launch_problems(self.work, cfg, require_hooks=True)))
 
+    def test_managed_policy_helper_refuses_gated_launch(self):
+        cfg = os.path.join(self.tmp.name, "config")
+        os.makedirs(cfg)
+        remote = os.path.join(cfg, se.CLAUDE_REMOTE_SETTINGS)
+        managed = os.path.join(self.tmp.name, "managed-settings.json")
+        with mock.patch.object(se, "claude_managed_sources", return_value=([managed], [])), \
+                mock.patch.object(se, "api_key_env_problems", return_value=[]):
+            for source in (managed, remote):
+                with self.subTest(source=source):
+                    with open(source, "w") as f: json.dump({"policyHelper": "managed-helper"}, f)
+                    problems = se.claude_launch_problems(self.work, cfg, require_hooks=True)
+                    self.assertTrue(any("managed policyHelper" in p and source in p for p in problems), problems)
+                    self.assertFalse(any("managed policyHelper" in p for p in
+                                         se.claude_launch_problems(self.work, cfg, require_hooks=False)))
+            for source in (managed, remote):
+                with open(source, "w") as f: json.dump({"policyHelper": ""}, f)
+            self.assertTrue(any("managed policyHelper" in p for p in
+                                se.claude_launch_problems(self.work, cfg, require_hooks=True)))
+            for source in (managed, remote): os.unlink(source)
+            self.assertFalse(any("managed policyHelper" in p for p in
+                                 se.claude_launch_problems(self.work, cfg, require_hooks=True)))
+
     def test_gate_allows_only_the_exact_invocation(self):
         self.assertEqual(self.gate(INVOCATION)["permissionDecision"], "allow")
+        self.assertEqual(self.gate(INVOCATION, tool_name="PowerShell")["permissionDecision"], "deny")
         bad = [
             INVOCATION + "; mv a b", INVOCATION + " && mv a b", INVOCATION + " || true",
             INVOCATION + " | cat", INVOCATION + " > log", INVOCATION + " 2> log",

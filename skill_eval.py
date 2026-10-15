@@ -520,6 +520,8 @@ def claude_launch_problems(cwd, config_dir=None, require_hooks=False):
                     probs.append("claude: managed hook policy in %s may disable the Bash gate" % p)
                 if st.get("allowManagedPermissionRulesOnly") is True:
                     probs.append("claude: managed permission policy in %s may discard --allowedTools approvals" % p)
+                if "policyHelper" in st:
+                    probs.append("claude: managed policyHelper in %s may override the gated launch policy" % p)
     return api_key_env_problems() + probs + claude_settings_auth_problems(
         claude_project_settings(ancestors(cwd)) + files + [remote])
 
@@ -680,7 +682,7 @@ def claude_settings(skill_name=None, bash_gate=None):
             "skillOverrides": {n: "off" for n in claude_bundled_skills()["names"] if n != skill_name}}
     if bash_gate:
         settings["disableAllHooks"] = False
-        settings["hooks"] = {"PreToolUse": [{"matcher": "Bash", "hooks": [{
+        settings["hooks"] = {"PreToolUse": [{"matcher": "Bash|PowerShell", "hooks": [{
             "type": "command", "command": sys.executable,
             "args": [os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude_bash_gate.py"),
                      skill_name, bash_gate["script"], bash_gate["sha256"], bash_gate["python3"]],

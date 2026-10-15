@@ -120,3 +120,25 @@ python3 skill_eval.py run golden/skills/csv-cleaner --workspace golden/skills/cs
 ```
 
 결과: 종료 코드 **3**. validation **0**, preflight **0**, 예상 API 환산 비용 **$11.38 / $12.50**. 두 arm 모두 위의 동일한 `--permission-mode default` 및 `--allowedTools`를 출력했다. 유일한 live gate는 기존과 같이 `eval_set` 미승인이다. `--dry-run`으로 모델 호출·파일 쓰기는 없었다.
+
+## Round 20 — codex-r19 P2 수정 및 검증
+
+- P2: 생성되는 `PreToolUse` matcher를 `Bash|PowerShell`로 넓혔다. 기존 게이트는 `tool_name != Bash`를 거부하므로 PowerShell 요청은 명시적으로 차단된다. 두 arm의 생성 settings에서 matcher를 검사하고 PowerShell 도구명으로 게이트 거부를 확인하는 회귀 테스트를 추가했다.
+- P2: 게이트가 필요한 Claude 실행은 관리 설정과 유효 설정 디렉터리의 `remote-settings.json` 등 `allowManagedPermissionRulesOnly` 검사와 같은 출처에서 `policyHelper` 키가 설정되면 거부한다. 엔드포인트 관리 설정·서버 관리 캐시 각각의 거부와 게이트 없는 호출을 검사하는 회귀 테스트를 추가했다.
+- `python3 -m pytest -q`: **519 passed**.
+
+준비된 run dry-run 명령:
+
+```sh
+python3 skill_eval.py run golden/skills/csv-cleaner --workspace golden/skills/csv-cleaner-workspace --engines claude --runs 1 --claude-model claude-sonnet-5-5 --claude-effort high --grader-engine codex --grader-effort high --tokens exec=135000,2000 --tokens trigger=190000,1500 --budget-usd 12.5 --live --dry-run
+```
+
+결과: 종료 코드 **3**. validation **0**, preflight **0**, 예상 비용 **$11.38 / $12.50**. 두 arm에서 matcher `Bash|PowerShell`이 생성되는 것을 출력으로 확인했다. 유일한 live gate는 `eval_set` 미승인이다. `--dry-run`으로 모델 호출과 파일 쓰기는 없었다.
+
+준비된 grade dry-run 명령:
+
+```sh
+python3 skill_eval.py grade golden/skills/csv-cleaner --workspace golden/skills/csv-cleaner-workspace --iteration 3 --engines claude --runs 1 --claude-model claude-sonnet-5-5 --claude-effort high --grader-engine codex --grader-effort high --budget-usd 9.5 --live --dry-run
+```
+
+결과: 종료 코드 **2**. 작업공간에 iteration 결과가 없어 grade dry-run이 시작되지 않았다. 모델 호출과 파일 쓰기는 없었다.
