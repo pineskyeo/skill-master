@@ -14,6 +14,7 @@ SKILL_FIELDS = ("name", "description", "license", "compatibility", "metadata", "
 # reference (https://code.claude.com/docs/en/skills). Other hosts' validators (skills-ref, quick_validate) reject them.
 HOST_SKILL_FIELDS = ("argument-hint", "disable-model-invocation")
 EVAL_LAYERS = ("static", "llm", "human")  # optional evals[].layer: how the case is graded
+EVAL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")  # optional evals[].name: one safe path component (H)
 RESERVED_NAME_WORDS = ("anthropic", "claude")  # Claude skill authoring best practices: name "cannot contain"
 COMPATIBILITY_MAX = 500
 REF_TOC_LINES = 100  # Claude best practices: reference files longer than 100 lines get a table of contents
@@ -765,6 +766,9 @@ def evals_errors(path, name):
         for k in ("assertions", "expectations"):
             if k in it and not _assertion_list(it[k]):
                 e.append("evals[%d].%s: non-empty list of strings or {\"text\", \"layer\"} objects required" % (i, k))
+        if "name" in it and not (isinstance(it["name"], str) and EVAL_NAME_RE.match(it["name"]) and ".." not in it["name"]):
+            e.append("evals[%d].name: %r must match %s without '..' (it becomes a directory name)"
+                     % (i, it["name"], EVAL_NAME_RE.pattern))
         if "layer" in it and it["layer"] not in EVAL_LAYERS:
             e.append("evals[%d].layer: must be one of %s (lowercase), got %r" % (i, "|".join(EVAL_LAYERS), it["layer"]))
     dup = sorted({x for x in ids if ids.count(x) > 1})
@@ -1028,9 +1032,15 @@ def check(path):
     return r
 
 def find_units(root):
-    out = []
-    for dp, dn, fn in os.walk(root):
-        dn[:] = sorted(d for d in dn if not d.startswith("."))
+    """Folders holding SKILL.md/AGENT.md. Symlinked folders are followed (skills are often installed as links,
+    e.g. ~/.agents/skills/<name> -> repo); dangling links are skipped and each real folder is visited once."""
+    out, seen = [], set()
+    for dp, dn, fn in os.walk(root, followlinks=True):
+        real = os.path.realpath(dp)
+        if real in seen:
+            dn[:] = []; continue
+        seen.add(real)
+        dn[:] = sorted(d for d in dn if not d.startswith(".") and os.path.isdir(os.path.join(dp, d)))
         if "SKILL.md" in fn or "AGENT.md" in fn:
             out.append(dp); dn[:] = []
     return out

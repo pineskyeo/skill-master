@@ -60,8 +60,8 @@ def make_skill(root, evals=None, triggers=TRIGGERS, extra_files=None):
         with open(fp, "w", encoding="utf-8") as f: f.write(text)
     return d
 
-def claude_stream(final, tools=(), usage=(1000, 200, 300), cost=0.05):
-    lines = [{"type": "system", "subtype": "init"}]
+def claude_stream(final, tools=(), usage=(1000, 200, 300), cost=0.05, skills=(), plugins=()):
+    lines = [{"type": "system", "subtype": "init", "skills": list(skills), "plugins": list(plugins)}]
     for name, inp in tools:
         lines.append({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": name, "input": inp}]}})
     lines.append({"type": "assistant", "message": {"content": [{"type": "text", "text": final}]}})
@@ -72,18 +72,19 @@ def claude_stream(final, tools=(), usage=(1000, 200, 300), cost=0.05):
 
 class FakeClaude:
     """Fake claude -p: with the skill installed (no --disable-slash-commands) it calls Skill and reports a branch."""
-    def __init__(self, regress=False): self.calls, self.regress = [], regress
-    def __call__(self, cmd, cwd, timeout):
-        self.calls.append((cmd, cwd))
+    def __init__(self, regress=False): self.calls, self.envs, self.regress = [], [], regress
+    def __call__(self, cmd, cwd, timeout, env=None):
+        self.calls.append((cmd, cwd)); self.envs.append(env)
         prompt, off = cmd[2], "--disable-slash-commands" in cmd
         installed = os.path.isdir(os.path.join(cwd, ".claude", "skills", "branch-setup"))
         if off or not installed:
             return 0, claude_stream("Here is a plain answer."), ""
+        sk = ["branch-setup"]
         if self.regress:  # broken skill: over-triggers and never reports a branch
-            return 0, claude_stream("I could not decide.", [("Skill", {"skill": "branch-setup"})]), ""
+            return 0, claude_stream("I could not decide.", [("Skill", {"skill": "branch-setup"})], skills=sk), ""
         if prompt.startswith("explain repo") or prompt == "describe this repo":
-            return 0, claude_stream("Here is a plain answer."), ""
-        return 0, claude_stream("Created worktree ../x on branch feat/login-fix", [("Skill", {"skill": "branch-setup"})]), ""
+            return 0, claude_stream("Here is a plain answer.", skills=sk), ""
+        return 0, claude_stream("Created worktree ../x on branch feat/login-fix", [("Skill", {"skill": "branch-setup"})], skills=sk), ""
 
 def codex_jsonl(final, cmds=(), usage=(500, 50, 10)):
     ev = [{"type": "thread.started", "thread_id": "t"}, {"type": "turn.started"}]
@@ -95,9 +96,9 @@ def codex_jsonl(final, cmds=(), usage=(500, 50, 10)):
     return "\n".join(json.dumps(x) for x in ev)
 
 class FakeCodex:
-    def __init__(self): self.calls = []
-    def __call__(self, cmd, cwd, timeout):
-        self.calls.append((cmd, cwd))
+    def __init__(self): self.calls, self.envs = [], []
+    def __call__(self, cmd, cwd, timeout, env=None):
+        self.calls.append((cmd, cwd)); self.envs.append(env)
         prompt = cmd[-1]
         installed = os.path.isdir(os.path.join(cwd, ".agents", "skills", "branch-setup"))
         if installed and not (prompt.startswith("explain repo") or prompt == "describe this repo"):
@@ -108,7 +109,7 @@ class FakeGraderExec:
     """Fake `claude -p --json-schema` grader: yes when the run's final message names a feat/ branch."""
     def __init__(self, compare_pick=None, cost=0.001, report_cost=True):
         self.calls, self.compare_pick, self.cost, self.report_cost = [], compare_pick, cost, report_cost
-    def __call__(self, cmd, cwd, timeout):
+    def __call__(self, cmd, cwd, timeout, env=None):
         self.calls.append(cmd)
         prompt, schema = cmd[2], json.loads(cmd[cmd.index("--json-schema") + 1])
         if "winner" in schema["properties"]:
@@ -136,6 +137,12 @@ class Base(unittest.TestCase):
         self.home = os.path.join(self.tmp, "home"); os.makedirs(self.home)
         env = mock.patch.dict(os.environ, {"HOME": self.home, "CODEX_HOME": os.path.join(self.home, ".codex")})
         env.start(); self.addCleanup(env.stop)  # preflight looks only at a fake home
+        os.environ.pop("CODEX_API_KEY", None)
+        self.auth = os.path.join(self.home, ".codex", "auth.json")  # fake file-based Codex login (never real)
+        wjson(self.auth, {"fake": True})
+        self.runs = os.path.join(self.tmp, "runs"); os.makedirs(self.runs)
+        td = mock.patch.object(tempfile, "tempdir", self.runs)  # per-run sandboxes land here
+        td.start(); self.addCleanup(td.stop)
     def tearDown(self): shutil.rmtree(self.tmp)
     def spec(self, **kw):
         spec, problems = se.load_eval_set(make_skill(self.tmp, **kw))
@@ -265,8 +272,12 @@ class TestRunAndGrade(Base):
         t = rjson(os.path.join(rd, "timing.json"))
         self.assertEqual(t["total_tokens"], 1500); self.assertEqual(t["cost_usd"], 0.05)
         self.assertIn("duration_ms", t); self.assertIn("total_duration_seconds", t)
-        self.assertTrue(os.path.isdir(os.path.join(rd, "workdir", ".claude", "skills", "branch-setup")))
-        self.assertFalse(os.path.exists(os.path.join(rd, "workdir", ".claude", "skills", "branch-setup", "evals")))
+        # the run happened in a sandbox (with the skill, minus evals/); only its outputs are copied back
+        cmd, cwd = next(c for c in self.fc.calls if "--disable-slash-commands" not in c[0])
+        self.assertTrue(cwd.startswith(os.path.join(os.path.realpath(self.runs), "skill-eval-claude-")))
+        self.assertTrue(os.path.isdir(os.path.join(rd, "workdir")))
+        self.assertFalse(os.path.exists(os.path.join(rd, "workdir", ".claude", "skills", "branch-setup")))
+        self.assertEqual(os.listdir(self.runs), [])  # every sandbox removed
         off = os.path.join(it, "claude", "eval-1-start-the-login-fix-task", "without_skill", "run-1", "workdir")
         self.assertFalse(os.path.exists(os.path.join(off, ".claude")))
         self.assertTrue(rjson(os.path.join(rd, "outputs", "transcript.json"))["triggered"])
@@ -364,7 +375,8 @@ class TestRunAndGrade(Base):
         se.grade_iteration(spec, self.ws, n, self.grader(), seed=1, log=quiet)
         bench, gate = se.report_iteration(spec, self.ws, n)
         self.assertEqual(bench["completeness"]["claude"], {"expected_runs": 18, "graded_runs": 18, "expected_trigger_runs": 60,
-                                                           "trigger_runs": 60, "trigger_errors": 0})
+                                                           "trigger_runs": 60, "trigger_errors": 0,
+                                                           "expected_comparisons": 9, "comparisons": 9})
         it = os.path.join(self.ws, "iteration-1")
         b = rjson(os.path.join(it, "benchmark.json"))
         run0 = b["runs"][0]
@@ -400,9 +412,11 @@ class TestRunAndGrade(Base):
         rs = lambda w, b: {"e": {"with_skill": {"pass_rate": {"mean": w}, "graded_runs": 3},
                                  "without_skill": {"pass_rate": {"mean": b}, "graded_runs": 3}}}
         comp = {"e": {"expected_runs": 6, "graded_runs": 6, "expected_trigger_runs": 60, "trigger_runs": 60, "trigger_errors": 0}}
-        self.assertEqual(se.compute_gate({"per_engine": rs(0.9, 0.5), "completeness": comp,
+        meta = {"skill_sha256": "s", "current_skill_sha256": "s", "eval_set_sha256": "e", "current_eval_set_sha256": "e"}
+        self.assertEqual(se.compute_gate({"per_engine": rs(0.9, 0.5), "completeness": comp, "metadata": meta,
                                           "calibration": {"agreement": 0.9, "n": 10}})["problems"], [])
-        g = se.compute_gate({"per_engine": rs(0.7, 0.5), "completeness": comp, "calibration": {"agreement": 0.6, "n": 10}},
+        g = se.compute_gate({"per_engine": rs(0.7, 0.5), "completeness": comp, "calibration": {"agreement": 0.6, "n": 10},
+                             "metadata": meta},
                             prev={"per_engine": rs(0.9, 0.5)})
         self.assertEqual(len(g["problems"]), 2)
         self.assertTrue(any("previous iteration" in p for p in g["problems"]))
@@ -435,7 +449,7 @@ class TestRunAndGrade(Base):
 
     def test_loop_stops_for_human_review(self):
         spec, _ = self.spec()
-        r = se.loop(spec, self.ws, self.engines()[:1], self.grader(), lambda d: self.fail("builder called"), runs=1, log=quiet)
+        r = se.loop(spec, self.ws, self.engines()[:1], self.grader(), lambda d, s: self.fail("builder called"), runs=1, log=quiet)
         self.assertEqual(r, {"status": "needs-human-review", "iteration": 1})
 
     def test_codex_guard_and_unknown_usage_charge(self):
@@ -554,26 +568,26 @@ class TestLoop(Base):
             se.loop(spec, self.ws, self.engines(), self.grader(), None, max_iterations=6, log=quiet)
     def test_stops_when_clean(self):
         spec, _ = self.spec()
-        r = se.loop(spec, self.ws, self.engines()[:1], self.grader(), lambda d: self.fail("builder called"), runs=1, log=quiet)
+        r = se.loop(spec, self.ws, self.engines()[:1], self.grader(), lambda d, s: self.fail("builder called"), runs=1, log=quiet)
         self.assertEqual(r, {"status": "clean", "iteration": 1})
     def test_builder_until_max_then_needs_approval(self):
         spec, _ = self.spec()
         seen = []
-        r = se.loop(spec, self.ws, self.engines(regress=True)[:1], self.grader(), lambda d: seen.append(d) or 0,
+        r = se.loop(spec, self.ws, self.engines(regress=True)[:1], self.grader(), lambda d, s: seen.append(d) or 0,
                     max_iterations=3, runs=1, log=quiet)
         self.assertEqual(r, {"status": "needs-approval", "iteration": 3})
         self.assertEqual([os.path.basename(d) for d in seen], ["iteration-1", "iteration-2"])
     def test_builder_fixes_skill(self):
         spec, _ = self.spec()
         engs = self.engines(regress=True)[:1]
-        def builder(d):
+        def builder(d, s):
             self.fc.regress = False; return 0
         r = se.loop(spec, self.ws, engs, self.grader(), builder, runs=1, log=quiet)
         self.assertEqual(r, {"status": "clean", "iteration": 2})
-        self.assertEqual(se.loop(spec, self.ws, engs, self.grader(), lambda d: 1, runs=1, log=quiet)["status"], "clean")
+        self.assertEqual(se.loop(spec, self.ws, engs, self.grader(), lambda d, s: 1, runs=1, log=quiet)["status"], "clean")
     def test_builder_failure(self):
         spec, _ = self.spec()
-        r = se.loop(spec, self.ws, self.engines(regress=True)[:1], self.grader(), lambda d: 7, runs=1, log=quiet)
+        r = se.loop(spec, self.ws, self.engines(regress=True)[:1], self.grader(), lambda d, s: 7, runs=1, log=quiet)
         self.assertEqual(r["status"], "builder-failed")
 
 class TestCLI(Base):
@@ -629,7 +643,7 @@ class TestCLI(Base):
     def test_live_run_with_mocked_exec(self):
         d = self.approved_skill(evals=evals_doc(human=False))
         fake, fg, seen_live = FakeClaude(), FakeGraderExec(), []
-        def fake_live(cmd, cwd, timeout):
+        def fake_live(cmd, cwd, timeout, env=None):
             seen_live.append(se._LIVE["on"])
             return fg(cmd, cwd, timeout) if "--json-schema" in cmd else fake(cmd, cwd, timeout)
         with mock.patch.object(se, "live_exec", fake_live):
@@ -716,21 +730,34 @@ class TestCLI(Base):
         self.assertAlmostEqual(g.usage["cost_usd"], (100 + 10) * 1000.0 / 1e6)
         self.assertAlmostEqual(g.budget.spent, 0.11)
 
-    # P1e
-    def test_preflight_blocks_discoverable_copies(self):
+    # P1e (round 3: runs are sandboxed; preflight checks what a sandbox cannot hide)
+    def test_preflight_blocks_what_isolation_cannot_hide(self):
         d = self.approved_skill()
         spec = se.load_eval_set(d)[0]
-        self.assertEqual(se.preflight(spec, ["claude", "codex"], self.ws), [])
+        self.assertEqual(se.preflight(spec, ["claude", "codex"], self.runs), [])
+        # user-level Codex skills are hidden by the sandbox HOME/CODEX_HOME: not a preflight problem any more
         user = os.path.join(self.home, ".agents", "skills", "branch-setup")
         os.makedirs(user); write(os.path.join(user, "SKILL.md"), SKILL_MD)
-        pf = se.preflight(spec, ["claude", "codex"], self.ws)
-        self.assertEqual(len(pf), 1); self.assertTrue(pf[0].startswith("codex: skill 'branch-setup' is also discoverable"))
-        rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "1000", "--price", "codex=1,1")
-        self.assertEqual(rc, 2); self.assertIn("preflight: codex", err)
-        shutil.rmtree(user)
-        anc = os.path.join(self.tmp, ".claude", "skills", "branch-setup")  # ancestor of the workspace
+        self.assertEqual(se.preflight(spec, ["codex"], self.runs), [])
+        # a same-named Claude copy (claude.ai synced layout) still blocks: hiding it is not verified
+        synced = os.path.join(self.home, ".claude", "skills", "synced", "abc", "branch-setup")
+        os.makedirs(synced); write(os.path.join(synced, "SKILL.md"), SKILL_MD)
+        pf = se.preflight(spec, ["claude", "codex"], self.runs)
+        self.assertEqual(len(pf), 1); self.assertTrue(pf[0].startswith("claude: skill 'branch-setup' is also installed"), pf)
+        rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "1000", "--price", "codex=1,1",
+                              "--run-root", self.runs)
+        self.assertEqual(rc, 2); self.assertIn("preflight: claude", err)
+        shutil.rmtree(os.path.join(self.home, ".claude", "skills", "synced"))
+        anc = os.path.join(self.tmp, ".agents", "skills", "other")  # any skill in an ancestor of the run root
         os.makedirs(anc); write(os.path.join(anc, "SKILL.md"), SKILL_MD)
-        self.assertTrue(se.preflight(spec, ["claude"], self.ws)[0].startswith("claude: skill 'branch-setup'"))
+        self.assertIn("has skills ['other']", se.preflight(spec, ["codex"], self.runs)[0])
+        shutil.rmtree(os.path.join(self.tmp, ".agents"))
+        os.remove(self.auth)  # no file login and no CODEX_API_KEY: cannot isolate Codex auth
+        self.assertIn("no CODEX_API_KEY", se.preflight(spec, ["codex"], self.runs)[0])
+        with mock.patch.dict(os.environ, {"CODEX_API_KEY": "x"}):
+            self.assertEqual(se.preflight(spec, ["codex"], self.runs), [])
+        write(os.path.join(self.home, ".claude", "settings.json"), json.dumps({"apiKeyHelper": "/bin/echo"}))
+        self.assertIn("supplies auth", se.preflight(spec, ["claude"], self.runs)[0])
         self.assertEqual(se.iterations(self.ws), [])
 
     # P2a

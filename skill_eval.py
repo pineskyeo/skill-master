@@ -12,7 +12,7 @@ plan and the estimated cost. Engines and graders take an injectable exec_fn so t
 Usage: python3 skill_eval.py <validate|estimate|plan|run|grade|calibrate|report|approve|register|snapshot|loop> <skill> ...
        (also reachable as: python3 eva.py eval <subcommand> ...)
 """
-import argparse, datetime, hashlib, json, math, os, random, re, shutil, subprocess, sys, time
+import argparse, datetime, hashlib, json, math, os, random, re, shutil, subprocess, sys, tempfile, time
 
 LAYERS = ("static", "llm", "human")
 BASELINES = {"none": "without_skill", "old": "old_skill"}  # skill-creator configuration names
@@ -38,18 +38,36 @@ PRICES = {
 DEFAULT_EXECUTOR_MODELS = {"claude": "claude-opus-5-5", "codex": None}  # codex: CLI default (model unknown)
 DEFAULT_GRADER_MODEL = "claude-sonnet-5-5"
 # Assumed tokens per call (input, output). Assumptions, not measurements: replace with --tokens after a pilot.
-DEFAULT_TOKENS = {"exec": (60000, 4000), "trigger": (25000, 500), "grader": (12000, 800), "pairwise": (16000, 800)}
+DEFAULT_TOKENS = {"exec": (60000, 4000), "trigger": (25000, 500), "grader": (12000, 800), "pairwise": (16000, 800),
+                  "builder": (80000, 8000)}
+DEFAULT_BUILDER_MODEL = "claude-opus-5-5"
 # Per-call budget control (H). Claude: --max-budget-usd gets only this share of the remaining budget, because how far
 # the CLI can overshoot its cap is not documented. Codex has no per-call cap: a call starts only when its worst-case
 # bound (assumed tokens x WORST_CASE_FACTOR x price) fits the remaining budget. That bound is NOT a hard cap.
 CLAUDE_CAP_HEADROOM = 0.5
 WORST_CASE_FACTOR = 3.0
 # Extra CLI args that would change the priced model or the per-call cap (exact flag or flag=value).
-FORBIDDEN_EXTRA_ARGS = {"claude": ("--model", "--fallback-model", "--max-budget-usd", "--settings"),
-                        "codex": ("-m", "--model", "-p", "--profile", "--oss")}
+# Also flags that would add skill/plugin/config sources back into an isolated run (README "Eval isolation").
+FORBIDDEN_EXTRA_ARGS = {"claude": ("--model", "--fallback-model", "--max-budget-usd", "--settings", "--setting-sources",
+                                   "--plugin-dir", "--plugin-url", "--add-dir", "--mcp-config"),
+                        "codex": ("-m", "--model", "-p", "--profile", "--oss", "-C", "--cd", "--add-dir")}
+
+SAFE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")  # an eval `name` must be one safe path component
+SKILL_IGNORE = ("evals", "__pycache__", "*-workspace")      # not installed into runs, not part of the skill hash
 
 class EvalError(Exception): pass
 class LiveDisabled(RuntimeError): pass
+
+def safe_name(name):
+    return isinstance(name, str) and bool(SAFE_NAME_RE.match(name)) and ".." not in name
+
+def ensure_inside(root, path):
+    """Raises unless path (after resolving symlinks and '..') is root itself or inside it. Called before every
+    write under the workspace that uses eval-derived names, and before every rmtree."""
+    r, p = os.path.realpath(root), os.path.realpath(path)
+    if p != r and not p.startswith(r.rstrip(os.sep) + os.sep):
+        raise EvalError("refusing to touch %s: outside %s" % (path, root))
+    return path
 
 def now_iso():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -87,6 +105,19 @@ def sha256_labeled(pairs):
             h.update(b"<missing>")
         h.update(b"\0")
     return h.hexdigest()
+
+def skill_tree_hash(skill_dir):
+    """sha256 over every file a run installs (the skill folder minus SKILL_IGNORE), labeled by relative path.
+    Symlinks are followed and hashed by content, as copytree copies content too."""
+    pairs, ign = [], shutil.ignore_patterns(*SKILL_IGNORE)
+    for dp, dn, fn in os.walk(skill_dir, followlinks=True):
+        skip = ign(dp, dn + fn)
+        dn[:] = sorted(d for d in dn if d not in skip)
+        for f in sorted(fn):
+            if f not in skip:
+                p = os.path.join(dp, f)
+                pairs.append((os.path.relpath(p, skill_dir).replace(os.sep, "/"), p))
+    return sha256_labeled(pairs)
 
 def cents_floor(x):
     return math.floor(x * 100 + 1e-9) / 100.0
@@ -158,7 +189,11 @@ def load_eval_set(skill_dir):
                                          and isinstance(pressure.get("context", ""), str)):
             problems.append("evals[id=%s].pressure: {\"kinds\": [str, ...], \"context\": str} required" % c.get("id"))
             pressure = None
-        cases.append({"id": c["id"], "name": c.get("name") or slug(c["prompt"]) or str(c["id"]), "prompt": c["prompt"],
+        if "name" in c and not safe_name(c["name"]):
+            problems.append("evals[id=%s].name: %r must match %s without '..' (one path component)"
+                            % (c["id"], c["name"], SAFE_NAME_RE.pattern))
+        name_ = c["name"] if safe_name(c.get("name")) else (slug(c["prompt"]) or str(c["id"]))
+        cases.append({"id": c["id"], "name": name_, "prompt": c["prompt"],
                       "expected_output": c["expected_output"], "files": c.get("files") or [], "items": items,
                       "pressure": pressure})
     triggers, tp = load_triggers(skill_dir)
@@ -197,18 +232,18 @@ def full_prompt(case):
 # ---------- engines ----------
 _LIVE = {"on": False}
 
-def live_exec(cmd, cwd, timeout):
+def live_exec(cmd, cwd, timeout, env=None):
     """The only place a real CLI is started. Refuses unless main() enabled live mode (--live + --budget-usd + gates)."""
     if not _LIVE["on"]:
         raise LiveDisabled("refusing to execute %r: live mode needs --live and --budget-usd" % (cmd[0],))
-    env = dict(os.environ)
+    env = dict(os.environ if env is None else env)
     env.pop("CLAUDECODE", None)  # as skill-creator run_eval.py: allow nesting claude -p inside a Claude Code session
     p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, env=env)
     return p.returncode, p.stdout, p.stderr
 
 def new_result():
     return {"final": "", "tool_calls": [], "input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0,
-            "cost_usd": None, "error": None}
+            "cost_usd": None, "error": None, "init": None}
 
 def check_extra_args(engine, args):
     """Rejects extra CLI args that would change the priced model or the per-call budget cap."""
@@ -236,15 +271,32 @@ class Engine:
     def install_skill(self, workdir, skill_dir, name):
         """Copy the skill without evals/ (the eval set must not leak into the run)."""
         dst = os.path.join(workdir, self.skills_rel, name)
-        shutil.copytree(skill_dir, dst, ignore=shutil.ignore_patterns("evals", "__pycache__", "*-workspace"))
+        shutil.copytree(skill_dir, dst, ignore=shutil.ignore_patterns(*SKILL_IGNORE))
         return dst
     def command(self, prompt, with_skill, budget_usd=None): raise NotImplementedError
     def parse(self, stdout): raise NotImplementedError
     def triggered(self, result, skill_name): raise NotImplementedError
-    def run(self, prompt, workdir, with_skill, budget_usd=None):
+    def sandbox_env(self, root):
+        """Environment for one isolated run whose sandbox folder is root (see README "Eval isolation")."""
+        return dict(os.environ)
+    def sandbox_problems(self, root, work, skill_name, with_skill):
+        """Static check of what the engine could discover from this sandbox, before the CLI starts."""
+        found = sorted(n for n, _ in skills_under(os.path.join(work, self.skills_rel), 1))
+        want = [skill_name] if with_skill else []
+        out = [] if found == want else ["project skills in the sandbox are %s, expected %s" % (found, want)]
+        for a in ancestors(os.path.dirname(os.path.realpath(root))):
+            hits = skills_under(os.path.join(a, self.skills_rel), 3)
+            if hits: out.append("ancestor %s has skills %s" % (os.path.join(a, self.skills_rel), sorted(n for n, _ in hits)))
+        return out
+    def isolation_problems(self, res, with_skill, skill_name, user_names):
+        """Checks of the finished run's own report of what it loaded (fail closed when it cannot be verified)."""
+        return []
+    def after_run(self, root):
+        return []
+    def run(self, prompt, workdir, with_skill, budget_usd=None, env=None):
         cmd = self.command(prompt, with_skill, budget_usd)
         t0, start = time.monotonic(), now_iso()
-        rc, out, err = self.exec_fn(cmd, workdir, self.timeout)
+        rc, out, err = self.exec_fn(cmd, workdir, self.timeout, env=env)
         res = self.parse(out or "")
         res.update(returncode=rc, stderr_tail=(err or "")[-2000:], duration_ms=int((time.monotonic() - t0) * 1000),
                    executor_start=start, executor_end=now_iso(), command=cmd)
@@ -253,22 +305,45 @@ class Engine:
 
 class ClaudeCodeEngine(Engine):
     """claude -p (https://code.claude.com/docs/en/headless, /cli-reference). Skill on: copied to
-    <workdir>/.claude/skills/<name>/ (project skill). Skill off: --disable-slash-commands ("Disable all skills and
-    commands for this session") so a user-level copy of the same skill cannot leak into the baseline."""
+    <sandbox>/work/.claude/skills/<name>/ (project skill). Skill off: --disable-slash-commands ("Disable all skills").
+    Both: --setting-sources project,local (user skills under ~/.claude/skills are the "user" source), no MCP servers,
+    bundled skills off. HOME and CLAUDE_CONFIG_DIR are left alone: the macOS Keychain login is keyed to the config
+    dir, so changing it would lose the login (code.claude.com/docs/en/authentication)."""
     name, skills_rel, has_call_cap = "claude", ".claude/skills", True
+    SETTINGS = json.dumps({"disableBundledSkills": True})
+    ENV = {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "ENABLE_CLAUDEAI_MCP_SERVERS": "false"}
     def command(self, prompt, with_skill, budget_usd=None):
-        cmd = ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose", "--no-session-persistence"]
+        cmd = ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose", "--no-session-persistence",
+               "--setting-sources", "project,local", "--strict-mcp-config", "--settings", self.SETTINGS]
         if self.model: cmd += ["--model", self.model]
         if budget_usd is not None: cmd += ["--max-budget-usd", "%.2f" % budget_usd]
         if not with_skill: cmd += ["--disable-slash-commands"]
         return cmd + self.extra_args
+    def sandbox_env(self, root):
+        return dict(os.environ, **self.ENV)
+    def isolation_problems(self, res, with_skill, skill_name, user_names):
+        """From the stream-json system/init event: no plugins, the skill under test loaded only in with_skill, and no
+        user-level skill name. The init field names are (추정) from the Agent SDK docs; if absent we fail closed."""
+        init = res.get("init")
+        if not isinstance(init, dict): return ["no system/init event: cannot verify which skills were loaded"]
+        if not isinstance(init.get("skills"), list): return ["system/init has no skills list: cannot verify isolation"]
+        names = {str(s.get("name") if isinstance(s, dict) else s).split(":")[-1] for s in init["skills"]}
+        out = []
+        if init.get("plugins"): out.append("plugins loaded: %s" % json.dumps(init["plugins"], ensure_ascii=False)[:200])
+        if with_skill and skill_name not in names: out.append("skill under test %r not loaded" % skill_name)
+        if not with_skill and names: out.append("skills loaded in without_skill run: %s" % sorted(names))
+        leaked = sorted((names & set(user_names)) - {skill_name})
+        if leaked: out.append("user-level skills visible: %s" % leaked)
+        return out
     def parse(self, stdout):
         r, texts = new_result(), []
         for line in stdout.splitlines():
             try: ev = json.loads(line)
             except ValueError: continue
             if not isinstance(ev, dict): continue
-            if ev.get("type") == "assistant":
+            if ev.get("type") == "system" and ev.get("subtype") == "init":
+                r["init"] = {"skills": ev.get("skills"), "plugins": ev.get("plugins")}
+            elif ev.get("type") == "assistant":
                 for b in (ev.get("message") or {}).get("content") or []:
                     if not isinstance(b, dict): continue
                     if b.get("type") == "tool_use": r["tool_calls"].append({"tool": b.get("name"), "input": b.get("input")})
@@ -300,6 +375,30 @@ class CodexEngine(Engine):
     Trigger detection is (추정): Codex documents no skill-invocation event, so a run counts as triggered when an
     item mentions .../skills/<name>/SKILL.md."""
     name, skills_rel = "codex", ".agents/skills"
+    def sandbox_env(self, root):
+        """HOME=<sandbox>/home hides $HOME/.agents/skills; CODEX_HOME=<sandbox>/codex_home hides $CODEX_HOME/skills
+        (user + plugin skills) and config.toml. Auth: CODEX_API_KEY when set, else a symlink to the real
+        $CODEX_HOME/auth.json (the secret is never copied or logged; after_run fails closed if Codex replaced it)."""
+        home, ch = os.path.join(root, "home"), os.path.join(root, "codex_home")
+        os.makedirs(home); os.makedirs(ch)
+        if not os.environ.get("CODEX_API_KEY"):
+            auth = os.path.join(real_codex_home(), "auth.json")
+            if os.path.isfile(auth): os.symlink(auth, os.path.join(ch, "auth.json"))
+        return dict(os.environ, HOME=home, CODEX_HOME=ch)
+    def sandbox_problems(self, root, work, skill_name, with_skill):
+        out = Engine.sandbox_problems(self, root, work, skill_name, with_skill)
+        for label, d in (("sandbox HOME", os.path.join(root, "home", ".agents", "skills")),
+                         ("sandbox CODEX_HOME", os.path.join(root, "codex_home", "skills")),
+                         ("admin", os.path.join("/etc", "codex", "skills"))):
+            hits = [n for n, p in skills_under(d, 4) if os.sep + ".system" + os.sep not in p + os.sep]
+            if hits: out.append("%s skills folder %s has %s" % (label, d, sorted(hits)))
+        return out
+    def after_run(self, root):
+        link = os.path.join(root, "codex_home", "auth.json")
+        if os.path.lexists(link) and not os.path.islink(link):
+            return ["codex replaced the auth.json link in the isolated CODEX_HOME %s (token refresh?); your real "
+                    "auth.json may now be stale. The sandbox is kept, not deleted; check `codex login status`" % root]
+        return []
     def command(self, prompt, with_skill, budget_usd=None):
         cmd = ["codex", "exec", "--json", "--skip-git-repo-check", "--ephemeral", "--sandbox", "workspace-write"]
         if self.model: cmd += ["-m", self.model]
@@ -332,6 +431,99 @@ class CodexEngine(Engine):
         return any(needle in json.dumps(c.get("input"), ensure_ascii=False) for c in result["tool_calls"])
 
 ENGINES = {"claude": ClaudeCodeEngine, "codex": CodexEngine}
+
+# ---------- per-run isolation (README "Eval isolation") ----------
+def ancestors(path):
+    out, d = [], os.path.realpath(path)
+    while True:
+        out.append(d)
+        if os.path.dirname(d) == d: return out
+        d = os.path.dirname(d)
+
+def skills_under(root, max_depth):
+    """[(name, path)] of folders below root (depth <= max_depth) that hold a SKILL.md. Follows symlinked folders once;
+    dangling links and unreadable folders are skipped, never raised."""
+    out, seen = [], set()
+    if not os.path.isdir(root): return out
+    base = os.path.realpath(root).count(os.sep)
+    for dp, dn, fn in os.walk(root, followlinks=True, onerror=lambda e: None):
+        real = os.path.realpath(dp)
+        if real in seen or real.count(os.sep) - base > max_depth: dn[:] = []; continue
+        seen.add(real)
+        if dp != root and os.path.isfile(os.path.join(dp, "SKILL.md")):
+            out.append((os.path.basename(dp), dp)); dn[:] = []
+        else:
+            dn[:] = [d for d in dn if os.path.isdir(os.path.join(dp, d))]
+    return out
+
+def real_codex_home():
+    return os.environ.get("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex")
+
+def claude_user_skills(home):
+    """[(name, path)] of user-level Claude skills: ~/.claude/skills (incl. claude.ai synced/<id>/<name>) and plugins."""
+    out = skills_under(os.path.join(home, ".claude", "skills"), 3)
+    pc = os.path.join(home, ".claude", "plugins")
+    for root, dirs, _ in os.walk(pc, onerror=lambda e: None) if os.path.isdir(pc) else []:
+        if os.path.basename(root) == "skills":
+            out += [(d, os.path.join(root, d)) for d in dirs if os.path.isfile(os.path.join(root, d, "SKILL.md"))]
+            dirs[:] = []
+        if root.count(os.sep) - pc.count(os.sep) > 6: dirs[:] = []
+    return out
+
+class Sandbox:
+    """One fresh temp folder per run: <run_root>/skill-eval-<engine>-XXXX/{work, home, codex_home}. work holds the
+    case's fixture files plus, for with_skill, only the skill under test. Removed after the run."""
+    def __init__(self, engine, spec, case, skill_path, run_root):
+        self.engine, self.run_root = engine, os.path.realpath(run_root)
+        self.root = tempfile.mkdtemp(prefix="skill-eval-%s-" % engine.name, dir=self.run_root)
+        self.work = os.path.join(self.root, "work"); os.makedirs(self.work)
+        for f in case.get("files") or []:
+            dst = os.path.join(self.work, f); os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(os.path.join(spec["skill_dir"], f), dst)
+        self.name, self.with_skill = spec["skill_name"], bool(skill_path)
+        if skill_path: engine.install_skill(self.work, skill_path, self.name)
+        self.env = engine.sandbox_env(self.root)
+    def problems(self):
+        return self.engine.sandbox_problems(self.root, self.work, self.name, self.with_skill)
+    def record(self):
+        """What the run saw (names and paths only; no environment values)."""
+        return {"sandbox": self.root, "with_skill": self.with_skill,
+                "env_overrides": sorted(k for k in self.env if os.environ.get(k) != self.env[k])}
+    def copy_back(self, dst):
+        """Keeps the run's output files for static checks (file_exists), without the installed skill copy."""
+        skills = os.path.realpath(os.path.join(self.work, self.engine.skills_rel))
+        ign = lambda d, names: [self.name] if os.path.realpath(d) == skills else []
+        shutil.copytree(self.work, dst, symlinks=True, ignore=ign)
+    def cleanup(self):
+        problems = self.engine.after_run(self.root)
+        if not problems:
+            shutil.rmtree(ensure_inside(self.run_root, self.root), ignore_errors=True)
+        return problems
+
+def isolated_run(eng, prompt, spec, case, skill_path, run_dir, run_root, cap, user_names, keep_workdir):
+    """Runs one CLI call in a fresh Sandbox and returns (result, fatal problems). Raises EvalError before the call
+    (fail closed, nothing spent) when the sandbox could expose another skill. Afterwards, a leak shown by the run's
+    own init report, or Codex replacing its auth link, is returned as fatal: the caller charges the run, records it
+    as an error and stops the iteration."""
+    sb = Sandbox(eng, spec, case, skill_path, run_root)
+    ran = False
+    try:
+        probs = sb.problems()
+        if probs: raise EvalError("isolation (%s): %s" % (eng.name, " | ".join(probs)))
+        ran = True
+        res = eng.run(prompt, sb.work, with_skill=bool(skill_path), budget_usd=cap, env=sb.env)
+        iso = eng.isolation_problems(res, bool(skill_path), spec["skill_name"], user_names)
+        res["isolation"] = dict(sb.record(), problems=iso)
+        if keep_workdir:
+            wd = ensure_inside(run_dir, os.path.join(run_dir, "workdir"))
+            if os.path.islink(wd): os.remove(wd)
+            elif os.path.isdir(wd): shutil.rmtree(wd)
+            sb.copy_back(wd)
+    finally:
+        after = sb.cleanup() if ran else (shutil.rmtree(ensure_inside(sb.run_root, sb.root), ignore_errors=True) or [])
+    fatal = iso + after
+    if fatal and not res.get("error"): res["error"] = "isolation: " + "; ".join(fatal)
+    return res, fatal
 
 # ---------- LLM grader (yes/no rubric) and blind pairwise comparator ----------
 GRADE_SCHEMA = {"type": "object", "required": ["items"], "properties": {"items": {"type": "array", "items": {
@@ -538,43 +730,57 @@ def approve(gate, spec, ws, by):
     wjson(fp, data)
     return data[gate]
 
-def preflight(spec, engines, ws, home=None):
-    """Read-only. Returns contamination problems that block --live: a same-named skill the engine could discover
-    besides the copy under test (user level, plugins, or a .claude/.agents skills folder in any ancestor of the
-    workspace, since run workdirs live under it). The harness does not edit CLI config to hide such copies."""
+AUTH_ENV_KEYS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+
+def preflight(spec, engines, run_root=None, home=None):
+    """Read-only, blocks --live (fail closed). Runs execute in per-run sandboxes under run_root (README "Eval
+    isolation"); this checks what the sandboxes cannot hide:
+    - any .claude/skills (claude) or .agents/skills (codex) folder with skills in run_root or its ancestors
+      (project skills are discovered from the cwd upward);
+    - claude: a same-named copy in ~/.claude/skills (incl. synced/) or a plugin. --setting-sources project,local
+      should hide user skills (docs: the "user" source loads ~/.claude/skills), but whether the CLI flag hides already
+      downloaded claude.ai synced skills and plugin skills is not verified (추정), so a same-named copy still blocks;
+    - claude: user settings.json supplying auth (apiKeyHelper / env token), which --setting-sources would drop;
+    - codex: skills in /etc/codex/skills (admin scope, cannot be hidden), and no usable auth (CODEX_API_KEY or a
+      file-based $CODEX_HOME/auth.json to link; its content is never read)."""
     home, name, out = home or os.path.expanduser("~"), spec["skill_name"], []
-    ancestors, d = [], os.path.realpath(ws)
-    while True:
-        ancestors.append(d)
-        if os.path.dirname(d) == d: break
-        d = os.path.dirname(d)
+    root = os.path.realpath(run_root or tempfile.gettempdir())
     for e in engines:
+        rel = {"claude": ".claude/skills", "codex": ".agents/skills"}.get(e)
+        if rel is None: continue
+        for a in ancestors(root):
+            hits = skills_under(os.path.join(a, rel), 3)
+            if hits:
+                out.append("%s: %s has skills %s; every sandbox under %s would see them (use --run-root elsewhere)"
+                           % (e, os.path.join(a, rel), sorted(n for n, _ in hits), root))
         if e == "claude":
-            hits = [os.path.join(home, ".claude", "skills", name)] + [os.path.join(a, ".claude", "skills", name) for a in ancestors]
-            pc = os.path.join(home, ".claude", "plugins")
-            for root, dirs, _ in os.walk(pc) if os.path.isdir(pc) else []:
-                if os.path.basename(root) == "skills" and name in dirs: hits.append(os.path.join(root, name))
-                if root.count(os.sep) - pc.count(os.sep) > 6: dirs[:] = []
-        elif e == "codex":
-            # .agents/skills (cwd up to repo root) and ~/.agents/skills: Codex build-skills page. $CODEX_HOME/skills,
-            # ~/.codex/skills and /etc/codex/skills are checked too (추정 locations; checking more only blocks more).
-            codex_home = os.environ.get("CODEX_HOME") or os.path.join(home, ".codex")
-            hits = [os.path.join(home, ".agents", "skills", name), os.path.join(codex_home, "skills", name),
-                    os.path.join(home, ".codex", "skills", name), os.path.join("/etc", "codex", "skills", name)]
-            hits += [os.path.join(a, ".agents", "skills", name) for a in ancestors]
-        else:
-            continue
-        seen = set()
-        for h in hits:
-            if h not in seen and os.path.isfile(os.path.join(h, "SKILL.md")):
-                out.append("%s: skill %r is also discoverable at %s: it can leak into without_skill runs and sit next to "
-                           "the copy under test; remove/rename it or use a --workspace outside that folder" % (e, name, h))
-            seen.add(h)
+            for n_, p in claude_user_skills(home):
+                if n_ == name:
+                    out.append("claude: skill %r is also installed at %s; hiding it via --setting-sources is not "
+                               "verified, so it could sit next to the copy under test (move/rename it)" % (name, p))
+            try:
+                st = rjson(os.path.join(home, ".claude", "settings.json"), {}) or {}
+            except ValueError:
+                st = {}
+            env = st.get("env") if isinstance(st, dict) and isinstance(st.get("env"), dict) else {}
+            if isinstance(st, dict) and ("apiKeyHelper" in st or any(k in env for k in AUTH_ENV_KEYS)):
+                out.append("claude: ~/.claude/settings.json supplies auth (apiKeyHelper/env), but isolated runs use "
+                           "--setting-sources project,local and would not see it; export the credential instead")
+        if e == "codex":
+            hits = skills_under(os.path.join("/etc", "codex", "skills"), 4)
+            if hits:
+                out.append("codex: /etc/codex/skills has %s (admin skills load in every run)" % sorted(n for n, _ in hits))
+            if not os.environ.get("CODEX_API_KEY") and not os.path.isfile(os.path.join(real_codex_home(), "auth.json")):
+                out.append("codex: no CODEX_API_KEY and no file-based %s/auth.json to reference from the isolated "
+                           "CODEX_HOME (keyring auth cannot be isolated without changing it)" % real_codex_home())
     return out
 
 # ---------- running ----------
 def eval_dir_name(case):
-    return "eval-%s-%s" % (case["id"], case["name"]) if case["name"] != str(case["id"]) else "eval-%s" % case["id"]
+    d = "eval-%s-%s" % (case["id"], case["name"]) if case["name"] != str(case["id"]) else "eval-%s" % case["id"]
+    if not re.match(r"^[0-9A-Za-z가-힣._-]+$", d) or ".." in d:  # names come from safe_name() or slug(); defense in depth
+        raise EvalError("eval directory name %r is not a safe path component" % d)
+    return d
 
 def configs_for(baseline):
     return [PRIMARY, BASELINES[baseline]]
@@ -620,16 +826,6 @@ def run_cost(res, engine, prices, fallback=0.0):
         if c is not None: return c
     return fallback or 0.0
 
-def prepare_workdir(run_dir, case, spec, engine, skill_path):
-    wd = os.path.join(run_dir, "workdir")
-    if os.path.isdir(wd): shutil.rmtree(wd)
-    os.makedirs(wd)
-    for f in case.get("files") or []:
-        dst = os.path.join(wd, f); os.makedirs(os.path.dirname(dst), exist_ok=True)
-        shutil.copy2(os.path.join(spec["skill_dir"], f), dst)
-    if skill_path: engine.install_skill(wd, skill_path, spec["skill_name"])
-    return wd
-
 def write_run(run_dir, res, engine, config, prompt, triggered):
     t = {"engine": engine.name, "model": engine.model, "configuration": config, "prompt": prompt, "final": res["final"],
          "tool_calls": res["tool_calls"], "triggered": triggered, "returncode": res.get("returncode"),
@@ -645,63 +841,72 @@ def write_run(run_dir, res, engine, config, prompt, triggered):
         "input_tokens": res["input_tokens"], "output_tokens": res["output_tokens"],
         "cached_input_tokens": res["cached_input_tokens"], "cost_usd": res.get("cost_usd")})
 
+class _Fatal(Exception): pass
+
 def run_iteration(spec, ws, engines, runs=DEFAULT_RUNS, baseline="none", old_skill=None, budget=None, prices=None,
-                  iteration=None, log=print, tokens=None):
-    """Executes every (engine, case, config, run) and every trigger query. Returns the iteration number."""
+                  iteration=None, log=print, tokens=None, run_root=None):
+    """Executes every (engine, case, config, run) and every trigger query, each in its own Sandbox under run_root
+    (default: the system temp folder). Returns the iteration number."""
     configs = configs_for(baseline)
     if baseline == "old" and not (old_skill and os.path.isfile(os.path.join(old_skill, "SKILL.md"))):
         raise EvalError("baseline old needs --old-skill (or `snapshot` first): %s" % old_skill)
+    run_root = os.path.realpath(run_root or tempfile.gettempdir())
     n = iteration or ((iterations(ws) or [0])[-1] + 1)
     it_dir = os.path.join(ws, "iteration-%d" % n)
     wjson(os.path.join(it_dir, "plan.json"), {"skill_name": spec["skill_name"], "skill_path": spec["skill_dir"],
           "old_skill": old_skill, "configurations": configs, "runs_per_configuration": runs,
           "engines": {e.name: e.model for e in engines}, "evals_run": [c["id"] for c in spec["cases"]],
-          "trigger_queries": len(spec["triggers"] or []), "started_at": now_iso()})
+          "trigger_queries": len(spec["triggers"] or []), "started_at": now_iso(),
+          "skill_sha256": skill_tree_hash(spec["skill_dir"]), "eval_set_sha256": gate_hash("eval_set", spec, ws),
+          "old_skill_sha256": skill_tree_hash(old_skill) if baseline == "old" else None,
+          "isolation": {"run_root": run_root, "per_run_sandbox": True}})
     budget, prices, tokens = budget or Budget(float("inf")), prices or {}, tokens or DEFAULT_TOKENS
+    user_names = sorted({nm for nm, _ in claude_user_skills(os.path.expanduser("~"))}) if any(e.name == "claude" for e in engines) else []
     stopped = None
-    for eng in engines:
-        for case in spec["cases"]:
-            ed = os.path.join(it_dir, eng.name, eval_dir_name(case))
-            wjson(os.path.join(ed, "eval_metadata.json"), {"eval_id": case["id"], "eval_name": case["name"],
-                  "prompt": case["prompt"], "assertions": [it["text"] for it in case["items"]],
-                  "layers": {it["id"]: it["layer"] for it in case["items"]}, "pressure": case["pressure"]})
-            for cfg in configs:
-                for k in range(1, runs + 1):
-                    cap, fallback, stop = guard_call(eng, "exec", budget, prices, tokens)
-                    if stop: stopped = stop; break
-                    rd = os.path.join(ed, cfg, "run-%d" % k)
-                    sp = skill_path_for(cfg, spec, old_skill)
-                    wd = prepare_workdir(rd, case, spec, eng, sp)
-                    res = eng.run(full_prompt(case), wd, with_skill=bool(sp), budget_usd=cap)
-                    budget.charge(run_cost(res, eng, prices, fallback))
-                    write_run(rd, res, eng, cfg, full_prompt(case), eng.triggered(res, spec["skill_name"]))
-                    log("[%s] %s %s run-%d: %s, %d tokens, %.1fs" % (eng.name, eval_dir_name(case), cfg, k,
-                        res.get("error") or "ok", res["input_tokens"] + res["output_tokens"], res.get("duration_ms", 0) / 1000.0))
-        for cfg in [c for c in configs if skill_path_for(c, spec, old_skill)]:
-            results = []
-            for qi, q in enumerate(spec["triggers"] or []):
-                hits = []
-                errors = 0
-                for k in range(1, runs + 1):
-                    cap, fallback, stop = guard_call(eng, "trigger", budget, prices, tokens)
-                    if stop: stopped = stop; break
-                    rd = os.path.join(it_dir, eng.name, "trigger", cfg, "q-%02d" % qi, "run-%d" % k)
-                    wd = prepare_workdir(rd, {"files": []}, spec, eng, skill_path_for(cfg, spec, old_skill))
-                    res = eng.run(q["query"], wd, with_skill=True, budget_usd=cap)
-                    budget.charge(run_cost(res, eng, prices, fallback))
-                    trig = eng.triggered(res, spec["skill_name"])
-                    write_run(rd, res, eng, cfg, q["query"], trig)
-                    shutil.rmtree(wd, ignore_errors=True)
-                    hits.append(trig); errors += 1 if res.get("error") else 0
-                rate = (sum(hits) / len(hits)) if hits else None
-                results.append({"query": q["query"], "should_trigger": q["should_trigger"], "trigger_rate": rate,
-                                "triggers": sum(hits), "runs": len(hits), "errors": errors,
-                                "pass": None if rate is None else (rate >= TRIGGER_THRESHOLD if q["should_trigger"] else rate < TRIGGER_THRESHOLD)})
-            if results:
-                passed = sum(1 for r in results if r["pass"])
-                wjson(os.path.join(it_dir, eng.name, "trigger", cfg, "results.json"), {
-                    "skill_name": spec["skill_name"], "description": spec["description"], "results": results,
-                    "summary": {"total": len(results), "passed": passed, "failed": len(results) - passed}})
+
+    def one(eng, kind, prompt, case, cfg, rd, keep):
+        cap, fallback, stop = guard_call(eng, kind, budget, prices, tokens)
+        if stop: return None, stop
+        res, fatal = isolated_run(eng, prompt, spec, case, skill_path_for(cfg, spec, old_skill), ensure_inside(it_dir, rd),
+                                  run_root, cap, user_names, keep)
+        budget.charge(run_cost(res, eng, prices, fallback))
+        write_run(rd, res, eng, cfg, prompt, eng.triggered(res, spec["skill_name"]))
+        if fatal: raise _Fatal("isolation [%s %s]: %s" % (eng.name, cfg, "; ".join(fatal)))
+        return res, None
+
+    try:
+        for eng in engines:
+            for case in spec["cases"]:
+                ed = ensure_inside(it_dir, os.path.join(it_dir, eng.name, eval_dir_name(case)))
+                wjson(os.path.join(ed, "eval_metadata.json"), {"eval_id": case["id"], "eval_name": case["name"],
+                      "prompt": case["prompt"], "assertions": [it["text"] for it in case["items"]],
+                      "layers": {it["id"]: it["layer"] for it in case["items"]}, "pressure": case["pressure"]})
+                for cfg in configs:
+                    for k in range(1, runs + 1):
+                        res, stop = one(eng, "exec", full_prompt(case), case, cfg, os.path.join(ed, cfg, "run-%d" % k), True)
+                        if stop: stopped = stop; break
+                        log("[%s] %s %s run-%d: %s, %d tokens, %.1fs" % (eng.name, eval_dir_name(case), cfg, k,
+                            res.get("error") or "ok", res["input_tokens"] + res["output_tokens"], res.get("duration_ms", 0) / 1000.0))
+            for cfg in [c for c in configs if skill_path_for(c, spec, old_skill)]:
+                results = []
+                for qi, q in enumerate(spec["triggers"] or []):
+                    hits, errors = [], 0
+                    for k in range(1, runs + 1):
+                        rd = os.path.join(it_dir, eng.name, "trigger", cfg, "q-%02d" % qi, "run-%d" % k)
+                        res, stop = one(eng, "trigger", q["query"], {"files": []}, cfg, rd, False)
+                        if stop: stopped = stop; break
+                        hits.append(eng.triggered(res, spec["skill_name"])); errors += 1 if res.get("error") else 0
+                    rate = (sum(hits) / len(hits)) if hits else None
+                    results.append({"query": q["query"], "should_trigger": q["should_trigger"], "trigger_rate": rate,
+                                    "triggers": sum(hits), "runs": len(hits), "errors": errors,
+                                    "pass": None if rate is None else (rate >= TRIGGER_THRESHOLD if q["should_trigger"] else rate < TRIGGER_THRESHOLD)})
+                if results:
+                    passed = sum(1 for r in results if r["pass"])
+                    wjson(os.path.join(it_dir, eng.name, "trigger", cfg, "results.json"), {
+                        "skill_name": spec["skill_name"], "description": spec["description"], "results": results,
+                        "summary": {"total": len(results), "passed": passed, "failed": len(results) - passed}})
+    except (_Fatal, EvalError) as ex:  # isolation could not be guaranteed: stop everything (fail closed)
+        stopped = str(ex)
     meta = rjson(os.path.join(it_dir, "plan.json"))
     meta.update(finished_at=now_iso(), spent_usd=round(budget.spent, 4) if budget.limit != float("inf") else None,
                 stopped=stopped)
@@ -981,7 +1186,8 @@ def build_benchmark(spec, ws, n):
         for ed in os.listdir(os.path.join(it_dir, eng)):
             if ed.startswith("eval-"):
                 for f in os.listdir(os.path.join(it_dir, eng, ed)):
-                    if re.match(r"comparison-\d+\.json$", f): comps.append(rjson(os.path.join(it_dir, eng, ed, f)))
+                    c = rjson(os.path.join(it_dir, eng, ed, f)) if re.match(r"comparison-\d+\.json$", f) else None
+                    if isinstance(c, dict) and c.get("winner") in ("A", "B", "TIE"): comps.append(c)
         if comps:
             pw[eng] = {"with_skill_wins": sum(c["winner_configuration"] == PRIMARY for c in comps),
                        "baseline_wins": sum(c["winner_configuration"] not in (PRIMARY, "tie") for c in comps),
@@ -1001,7 +1207,10 @@ def build_benchmark(spec, ws, n):
                                  "graded_runs": sum(1 for r in runs if r["engine"] == eng),
                                  "expected_trigger_runs": (plan.get("trigger_queries") or 0) * rpc * len(skill_cfgs),
                                  "trigger_runs": sum(x.get("runs", 0) for x in tres),
-                                 "trigger_errors": sum(x.get("errors", 0) for x in tres)}
+                                 "trigger_errors": sum(x.get("errors", 0) for x in tres),
+                                 # one blind comparison per (case, run k) when two configurations are compared
+                                 "expected_comparisons": len(plan.get("evals_run") or []) * rpc if len(cfgs) == 2 else 0,
+                                 "comparisons": (pw.get(eng) or {}).get("total", 0)}
     exec_errors = [{"engine": r["engine"], "eval_id": r["eval_id"], "configuration": r["configuration"],
                     "run_number": r["run_number"]} for r in runs if r["result"]["errors"]]
     pressure = {}
@@ -1011,13 +1220,19 @@ def build_benchmark(spec, ws, n):
     bench = {"metadata": {"skill_name": spec["skill_name"], "skill_path": spec["skill_dir"], "timestamp": now_iso(),
                           "engines": plan.get("engines"), "configurations": plan.get("configurations"),
                           "evals_run": plan.get("evals_run"), "runs_per_configuration": plan.get("runs_per_configuration"),
-                          "spent_usd": plan.get("spent_usd"), "stopped": plan.get("stopped")},
+                          "spent_usd": plan.get("spent_usd"), "stopped": plan.get("stopped"),
+                          # what was tested (recorded at run start) vs what is on disk now; register compares them
+                          "skill_sha256": plan.get("skill_sha256"), "eval_set_sha256": plan.get("eval_set_sha256"),
+                          "current_skill_sha256": skill_tree_hash(spec["skill_dir"]),
+                          "current_eval_set_sha256": gate_hash("eval_set", spec, ws)},
              "runs": runs, "run_summary": summarize(runs), "per_engine": per_engine, "trigger": trig, "pairwise": pw,
              "static_failures": static_fail, "pressure": pressure, "completeness": completeness,
              "execution_errors": exec_errors,
-             "human_pending": sum(1 for x in (rjson(os.path.join(it_dir, "human_review.json"), {}) or {}).get("items", [])
-                                  if not isinstance(x.get("passed"), bool)),
-             "llm_not_graded": sum(1 for r in runs for e in r["expectations"] if e.get("status") == "not-graded"),
+             # counted from grading.json (not the human_review.json queue): an item is graded only once grade wrote it
+             "human_pending": sum(1 for r in runs for e in r["expectations"]
+                                  if e.get("layer") == "human" and not isinstance(e.get("passed"), bool)),
+             "llm_not_graded": sum(1 for r in runs for e in r["expectations"]
+                                   if e.get("layer") != "human" and not isinstance(e.get("passed"), bool)),
              "calibration": rjson(os.path.join(it_dir, "calibration.json")),
              "notes": analyzer_notes(runs)}
     return bench
@@ -1054,6 +1269,18 @@ def compute_gate(bench, prev=None):
             problems.append("incomplete [%s]: %d of %d trigger runs" % (eng, c["trigger_runs"], c["expected_trigger_runs"]))
         if c.get("trigger_errors"):
             problems.append("execution failed [%s]: %d trigger run(s) with errors" % (eng, c["trigger_errors"]))
+        if c.get("comparisons", 0) < c.get("expected_comparisons", 0):
+            problems.append("incomplete [%s]: %d of %d blind pairwise comparisons (run `grade --live`)"
+                            % (eng, c.get("comparisons", 0), c["expected_comparisons"]))
+    m = bench.get("metadata") or {}
+    if comp is not None:
+        if not m.get("skill_sha256") or not m.get("eval_set_sha256"):
+            problems.append("unbound: plan.json records no skill/eval-set hash; re-run the iteration")
+        else:
+            if m.get("current_skill_sha256") != m["skill_sha256"]:
+                problems.append("stale: the skill changed after this iteration ran (re-run before trusting this report)")
+            if m.get("current_eval_set_sha256") != m["eval_set_sha256"]:
+                problems.append("stale: the eval set changed after this iteration ran")
     if bench.get("execution_errors"):
         problems.append("execution failed in %d eval run(s)" % len(bench["execution_errors"]))
     for eng, cf in sorted((bench.get("trigger") or {}).items()):
@@ -1138,24 +1365,81 @@ def register(spec, ws, by=None):
     if not its: raise EvalError("no iteration to register in %s" % ws)
     n = its[-1]
     gate = rjson(os.path.join(ws, "iteration-%d" % n, "gate.json"))
-    if gate is None: raise EvalError("iteration-%d has no report; run `report` first" % n)
+    bench = rjson(os.path.join(ws, "iteration-%d" % n, "benchmark.json"))
+    if gate is None or bench is None: raise EvalError("iteration-%d has no report; run `report` first" % n)
+    if bench.get("gate") != gate: raise EvalError("iteration-%d gate.json does not match benchmark.json; re-run `report`" % n)
+    m = bench.get("metadata") or {}
+    now_skill, now_evals = skill_tree_hash(spec["skill_dir"]), gate_hash("eval_set", spec, ws)
+    if not m.get("skill_sha256") or m["skill_sha256"] != now_skill:
+        raise EvalError("iteration-%d tested skill %s but the skill folder now hashes to %s; re-run the eval before "
+                        "registering" % (n, (m.get("skill_sha256") or "<unrecorded>")[:12], now_skill[:12]))
+    if not m.get("eval_set_sha256") or m["eval_set_sha256"] != now_evals:
+        raise EvalError("iteration-%d used a different eval set than the one on disk; re-run the eval" % n)
     if gate["needs_approval"] and not approval_ok("registration", spec, ws):
         raise EvalError("iteration-%d has problems %s; registration needs `approve --gate registration`" % (n, gate["problems"]))
     rec = {"skill_name": spec["skill_name"], "skill_path": spec["skill_dir"], "iteration": n,
-           "benchmark_sha256": gate_hash("iteration-%d" % n, spec, ws),
+           "benchmark_sha256": gate_hash("iteration-%d" % n, spec, ws), "skill_sha256": now_skill,
+           "eval_set_sha256": now_evals,
            "skill_md_sha256": sha256_files(os.path.join(spec["skill_dir"], "SKILL.md")), "registered_at": now_iso(),
            "approval": (rjson(os.path.join(ws, "approvals.json"), {}) or {}).get("registration") if gate["needs_approval"] else "auto"}
     wjson(os.path.join(ws, "registration.json"), rec)
     return rec
 
+class ClaudeBuilder:
+    """The only builder `loop --live` accepts: one metered `claude -p` call per iteration through live_exec, run in the
+    skill folder with file tools only (no Bash, so it cannot start other paid CLIs), a --max-budget-usd cap from the
+    shared Budget, and its cost charged to that Budget. The iteration's comparison.md is inlined into the prompt."""
+    TOOLS = "Read,Edit,Write,Glob,Grep"
+    def __init__(self, instructions, model, budget, prices=None, exec_fn=None, timeout=900):
+        self.instructions, self.model, self.budget, self.prices = instructions, model, budget, prices or {}
+        self.exec_fn, self.timeout, self.calls = exec_fn or live_exec, timeout, 0
+    def command(self, prompt, cap):
+        cmd = ["claude", "-p", prompt, "--model", self.model, "--output-format", "json", "--no-session-persistence",
+               "--permission-mode", "acceptEdits", "--tools", self.TOOLS, "--disable-slash-commands"]
+        return cmd + (["--max-budget-usd", "%.2f" % cap] if cap is not None else [])
+    def __call__(self, it_dir, skill_dir):
+        cap = None
+        if self.budget is not None and self.budget.finite():
+            cap = self.budget.claude_cap()
+            if cap < 0.01:
+                raise EvalError("budget exhausted ($%.2f of $%.2f) before builder call" % (self.budget.spent, self.budget.limit))
+        report = ""
+        rp = os.path.join(it_dir, "comparison.md")
+        if os.path.isfile(rp):
+            with open(rp, encoding="utf-8") as f: report = f.read()[:TRANSCRIPT_CHARS]
+        prompt = ("%s\n\nYou are improving the agent skill in the current directory (SKILL.md and its files). "
+                  "Do not edit evals/ (the eval set is approved separately; editing it stops the loop).\n\n"
+                  "Eval report of the last iteration:\n%s\n" % (self.instructions.strip(), report))
+        rc, out, err = self.exec_fn(self.command(prompt, cap), skill_dir, self.timeout)
+        self.calls += 1
+        try: data = json.loads(out or "")
+        except ValueError: data = {}
+        data = data if isinstance(data, dict) else {}
+        u = data.get("usage") or {}
+        tin = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+        cost = float(data["total_cost_usd"]) if isinstance(data.get("total_cost_usd"), (int, float)) else None
+        if cost is None and (tin or u.get("output_tokens")):
+            cost = call_cost((tin, int(u.get("output_tokens") or 0)), price_for("builder", self.model, self.prices))
+        if cost is None: cost = cap or 0.0  # usage unknown: charge the cap
+        if self.budget is not None: self.budget.charge(cost)
+        return rc
+
 def loop(spec, ws, engines, grader, builder, max_iterations=MAX_AUTO_ITERATIONS, runs=DEFAULT_RUNS, baseline="none",
-         old_skill=None, budget=None, prices=None, golden=None, seed=None, log=print, tokens=None):
-    """run -> grade -> (calibrate) -> report; stop when the gate is clean; otherwise call builder(iteration_dir) and
-    reload the skill. At most MAX_AUTO_ITERATIONS automatic iterations; leftover problems need human approval."""
+         old_skill=None, budget=None, prices=None, golden=None, seed=None, log=print, tokens=None, precheck=None,
+         run_root=None):
+    """run -> grade -> (calibrate) -> report; stop when the gate is clean; otherwise call builder(iteration_dir,
+    skill_dir) and reload the skill. precheck(spec, iterations_left) -> [problems] runs before EVERY iteration (the
+    CLI passes the full --live gate set: validation, approvals incl. fixture hashes, preflight, cost vs remaining
+    budget); any problem stops the loop. At most MAX_AUTO_ITERATIONS automatic iterations."""
     if max_iterations > MAX_AUTO_ITERATIONS:
         raise EvalError("max %d automatic iterations, got %d" % (MAX_AUTO_ITERATIONS, max_iterations))
+    n = None
     for i in range(max_iterations):
-        n = run_iteration(spec, ws, engines, runs, baseline, old_skill, budget, prices, log=log, tokens=tokens)
+        if precheck is not None:
+            probs = precheck(spec, max_iterations - i)
+            if probs: return {"status": "gates-failed", "iteration": n, "problems": probs}
+        n = run_iteration(spec, ws, engines, runs, baseline, old_skill, budget, prices, log=log, tokens=tokens,
+                          run_root=run_root)
         grade_iteration(spec, ws, n, grader, seed, log=log)
         if golden: wjson(os.path.join(ws, "iteration-%d" % n, "calibration.json"), calibrate(golden, grader))
         _, gate = report_iteration(spec, ws, n)
@@ -1164,7 +1448,10 @@ def loop(spec, ws, engines, grader, builder, max_iterations=MAX_AUTO_ITERATIONS,
         if gate.get("human_pending_only"): return {"status": "needs-human-review", "iteration": n}
         if budget is not None and budget.remaining() <= 0: return {"status": "budget-exhausted", "iteration": n}
         if i == max_iterations - 1 or builder is None: break
-        rc = builder(os.path.join(ws, "iteration-%d" % n))
+        try:
+            rc = builder(os.path.join(ws, "iteration-%d" % n), spec["skill_dir"])
+        except EvalError as ex:
+            return {"status": "builder-failed", "iteration": n, "error": str(ex)}
         if rc != 0: return {"status": "builder-failed", "iteration": n, "returncode": rc}
         spec, problems = load_eval_set(spec["skill_dir"])
         if problems: return {"status": "eval-set-invalid", "iteration": n, "problems": problems}
@@ -1197,7 +1484,7 @@ def plan_text(spec, problems, a, engines, ws, est):
     L += ["approval gates: requirements=%s, eval_set=%s" % (
         "approved" if approval_ok("requirements", spec, ws) else "NOT APPROVED",
         "approved" if approval_ok("eval_set", spec, ws) else "NOT APPROVED")]
-    L += ["preflight problems (block --live):"] + ["  - " + w for w in preflight(spec, [e.name for e in engines], ws)]
+    L += ["preflight problems (block --live):"] + ["  - " + w for w in preflight(spec, [e.name for e in engines], a.run_root)]
     if spec["cases"]:
         c = spec["cases"][0]
         L.append("sample commands (eval %s, run in <workspace>/iteration-N/<engine>/%s/<config>/run-k/workdir):" % (c["id"], eval_dir_name(c)))
@@ -1208,8 +1495,9 @@ def plan_text(spec, problems, a, engines, ws, est):
     L += ["cost estimate:", format_estimate(est)]
     return "\n".join(L)
 
-def live_estimate(a, spec, ws, n, engines, tokens, prices):
-    """Cost of what a live command will really execute; never uses --cases/--llm-cases/--trigger-queries."""
+def live_estimate(a, spec, ws, n, engines, tokens, prices, iterations_left=None):
+    """Cost of what a live command will really execute; never uses --cases/--llm-cases/--trigger-queries.
+    loop: iterations_left x (one iteration + calibration) + (iterations_left - 1) builder calls."""
     if a.cmd == "grade":
         check_grader_model(os.path.join(ws, "iteration-%d" % n), a.grader_model)
         ng, npw = grade_counts(spec, os.path.join(ws, "iteration-%d" % n))
@@ -1219,10 +1507,44 @@ def live_estimate(a, spec, ws, n, engines, tokens, prices):
     n_cases, n_llm, n_trig = spec_counts(spec, None)
     est = estimate(n_cases, n_llm, n_trig, a.runs, [(e.name, e.model) for e in engines], a.baseline, a.grader_model,
                    tokens, prices)
-    if a.cmd == "loop":  # every automatic iteration may run, each with its calibration
+    if a.cmd == "loop":  # every automatic iteration may run, each with its calibration, plus a builder call between
+        k = a.max_iterations if iterations_left is None else iterations_left
         cal = grader_estimate(len(load_golden(a.golden)), 0, a.grader_model, tokens, prices)["rows"][:1] if a.golden else []
-        est = scale_estimate(est, a.max_iterations, cal)
+        est = scale_estimate(est, k, cal)
+        if getattr(a, "builder_prompt", None) and k > 1:
+            per = call_cost(tokens["builder"], price_for("builder", a.builder_model, prices))
+            est = est_result(est["rows"] + [est_row("builder", "builder", a.builder_model, k - 1, tokens, per)], tokens)
     return est
+
+def read_builder_prompt(a):
+    try:
+        with open(a.builder_prompt, encoding="utf-8") as f: text = f.read()
+    except (OSError, UnicodeDecodeError) as ex:
+        raise EvalError("--builder-prompt: %s" % ex)
+    if not text.strip(): raise EvalError("--builder-prompt %s is empty" % a.builder_prompt)
+    return text
+
+def check_live_gates(a, spec, problems, ws, n, engines, tokens, prices, budget_left, iterations_left=None):
+    """Every --live gate; raises EvalError on the first failure. `loop` calls it again before each iteration with the
+    reloaded eval set, the remaining iterations and the remaining budget."""
+    if problems: raise EvalError("eval set has %d validation problem(s); run `validate`" % len(problems))
+    for g in ("requirements", "eval_set"):
+        if not approval_ok(g, spec, ws): raise EvalError("gate %s not approved (write %s/requirements.md, then `approve --gate %s`)" % (g, ws, g))
+    live_est = live_estimate(a, spec, ws, n, engines, tokens, prices, iterations_left)
+    if live_est["unpriced_models"]: raise EvalError("no price for %s; pass --price" % live_est["unpriced_models"])
+    if a.cmd in ("run", "loop"):
+        pf = preflight(spec, [e.name for e in engines], a.run_root)
+        if pf: raise EvalError("preflight: " + " | ".join(pf))
+        for e in engines:
+            if e.has_call_cap: continue
+            for kind in ("exec", "trigger"):
+                b = call_bound(e.name, e.model, kind, prices, tokens)
+                if b > budget_left:
+                    raise EvalError("%s worst-case %s call bound $%.2f exceeds budget $%.2f (%s has no per-call cap)"
+                                    % (e.name, kind, b, budget_left, e.name))
+    if live_est["total_usd"] > budget_left:
+        raise EvalError("estimate $%.2f exceeds budget $%.2f\n%s" % (live_est["total_usd"], budget_left, format_estimate(live_est)))
+    return live_est
 
 def spec_counts(spec, a):
     """Counts from the eval set; a (argparse namespace) may override them for estimate/plan only (a=None: no overrides)."""
@@ -1253,12 +1575,16 @@ def main(argv=None):
             s.add_argument("--cases", type=int); s.add_argument("--llm-cases", type=int); s.add_argument("--trigger-queries", type=int)
             s.add_argument("--live", action="store_true"); s.add_argument("--budget-usd", type=float)
             s.add_argument("--seed", type=int)
+            s.add_argument("--run-root", help="folder for the per-run sandboxes (default: system temp folder)")
     for n in ("validate", "estimate", "plan", "run", "grade", "calibrate", "report", "loop"):
         s = sp.add_parser(n); common(s, n not in ("validate", "report"))
         if n in ("grade", "report", "calibrate"): s.add_argument("--iteration", type=int)
         if n == "calibrate": s.add_argument("--golden", required=True)
         if n == "loop":
-            s.add_argument("--builder"); s.add_argument("--max-iterations", type=int, default=MAX_AUTO_ITERATIONS)
+            s.add_argument("--builder", help=argparse.SUPPRESS)  # removed: an arbitrary shell command is not metered
+            s.add_argument("--builder-prompt", help="file with instructions for the metered Claude builder (see README)")
+            s.add_argument("--builder-model", default=DEFAULT_BUILDER_MODEL)
+            s.add_argument("--max-iterations", type=int, default=MAX_AUTO_ITERATIONS)
             s.add_argument("--golden")
     s = sp.add_parser("approve"); common(s, False)
     s.add_argument("--gate", required=True); s.add_argument("--by", required=True)
@@ -1302,6 +1628,10 @@ def _dispatch(a):
     if a.runs < 1: raise EvalError("--runs must be >= 1")
     if a.cmd == "loop" and not 1 <= a.max_iterations <= MAX_AUTO_ITERATIONS:
         raise EvalError("--max-iterations must be 1..%d" % MAX_AUTO_ITERATIONS)
+    if a.cmd == "loop" and a.builder:
+        raise EvalError("--builder (shell command) is not supported: it would run outside the metered budget. Use "
+                        "--builder-prompt FILE (one capped `claude -p` call per iteration, charged to --budget-usd)")
+    if a.cmd == "loop" and a.builder_prompt: read_builder_prompt(a)
     engines = make_engines(a)
     if a.baseline == "old" and not a.old_skill and os.path.isdir(os.path.join(ws, "skill-snapshot")):
         a.old_skill = os.path.join(ws, "skill-snapshot")
@@ -1324,32 +1654,17 @@ def _dispatch(a):
     # --- live: the same gates for run, loop, grade and calibrate ---
     if a.budget_usd is None or not math.isfinite(a.budget_usd) or a.budget_usd <= 0:
         raise EvalError("--live needs a finite --budget-usd > 0")
-    if problems: raise EvalError("eval set has %d validation problem(s); run `validate`" % len(problems))
-    for g in ("requirements", "eval_set"):
-        if not approval_ok(g, spec, ws): raise EvalError("gate %s not approved (write %s/requirements.md, then `approve --gate %s`)" % (g, ws, g))
     n = None
     if a.cmd in ("grade", "calibrate"):
         n = a.iteration or (iterations(ws) or [None])[-1]
         if n is None or not os.path.isdir(os.path.join(ws, "iteration-%d" % n)): raise EvalError("no iterations in %s" % ws)
-    live_est = live_estimate(a, spec, ws, n, engines, tokens, prices)
-    if live_est["unpriced_models"]: raise EvalError("no price for %s; pass --price" % live_est["unpriced_models"])
-    if a.cmd in ("run", "loop"):
-        pf = preflight(spec, [e.name for e in engines], ws)
-        if pf: raise EvalError("preflight: " + " | ".join(pf))
-        for e in engines:
-            if e.has_call_cap: continue
-            for kind in ("exec", "trigger"):
-                b = call_bound(e.name, e.model, kind, prices, tokens)
-                if b > a.budget_usd:
-                    raise EvalError("%s worst-case %s call bound $%.2f exceeds budget $%.2f (%s has no per-call cap)"
-                                    % (e.name, kind, b, a.budget_usd, e.name))
-    if live_est["total_usd"] > a.budget_usd:
-        raise EvalError("estimate $%.2f exceeds budget $%.2f\n%s" % (live_est["total_usd"], a.budget_usd, format_estimate(live_est)))
+    check_live_gates(a, spec, problems, ws, n, engines, tokens, prices, a.budget_usd)
     budget = Budget(a.budget_usd)
     grader = LLMGrader(a.grader_model, budget=budget, prices=prices)
     _LIVE["on"] = True
     if a.cmd == "run":
-        n = run_iteration(spec, ws, engines, a.runs, a.baseline, a.old_skill, budget, prices, tokens=tokens)
+        n = run_iteration(spec, ws, engines, a.runs, a.baseline, a.old_skill, budget, prices, tokens=tokens,
+                          run_root=a.run_root)
         print("iteration-%d done, spent ~$%.2f" % (n, budget.spent)); return 0
     if a.cmd == "grade":
         grade_iteration(spec, ws, n, grader, a.seed)
@@ -1359,12 +1674,16 @@ def _dispatch(a):
         wjson(os.path.join(ws, "iteration-%d" % n, "calibration.json"), cal)
         print("agreement %.2f kappa %.2f (n=%d)" % (cal["agreement"], cal["kappa"], cal["n"])); return 0
     if a.cmd == "loop":
-        def builder(it_dir):
-            if not a.builder: return 1
-            env = dict(os.environ, EVA_EVAL_ITERATION=it_dir, EVA_EVAL_REPORT=os.path.join(it_dir, "comparison.md"))
-            return subprocess.run(a.builder, shell=True, env=env).returncode
-        r = loop(spec, ws, engines, grader, builder if a.builder else None, a.max_iterations, a.runs, a.baseline,
-                 a.old_skill, budget, prices, a.golden, a.seed, tokens=tokens)
+        builder = ClaudeBuilder(read_builder_prompt(a), a.builder_model, budget, prices) if a.builder_prompt else None
+        def precheck(spec_now, left):
+            _, probs = load_eval_set(spec_now["skill_dir"])
+            try:
+                check_live_gates(a, spec_now, probs, ws, None, engines, tokens, prices, budget.remaining(), left)
+            except EvalError as ex:
+                return [str(ex)]
+            return []
+        r = loop(spec, ws, engines, grader, builder, a.max_iterations, a.runs, a.baseline,
+                 a.old_skill, budget, prices, a.golden, a.seed, tokens=tokens, precheck=precheck, run_root=a.run_root)
         print(json.dumps(r, ensure_ascii=False)); return 0 if r["status"] == "clean" else 3
     return 2
 
