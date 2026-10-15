@@ -263,6 +263,9 @@ python3 -m unittest discover -s tests -v                # 테스트 (pytest도 p
 - **끝 이벤트가 없는 Codex 스트림도 실패 호출**(P2): 읽을 수 있는 이벤트가 있어도 `turn.completed`나 `turn.failed`가 한 줄도 없으면(예: `thread.started`만 있고 끊긴 스트림, `error` 이벤트만 있음) 파싱 오류로 처리합니다. 종료코드가 0이어도 그 run은 "output could not be parsed after the call (ValueError)"로 기록되고, max(reported, 호출당 최악 비용 상한)을 차감한 뒤 iteration을 멈춥니다.
 - **result가 아닌 builder JSON 객체도 차감 후 중단**(P2): builder 출력이 JSON 객체여도 `type`이 `"result"`가 아니면(예: `{}`) 정상 반환하지 않고 **max(reported, cap)** 를 차감·`cost.json`에 기록한 뒤 "builder output is not a result object … charged $X and stopped"로 멈춥니다.
 
+#### Round 9 (Codex r8 리뷰)
+- **`is_error: true`인 builder result도 차감 후 중단**(P2): builder 출력이 `type: "result"`여도 `is_error`가 참이면(종료코드 0 포함) 성공으로 취급하지 않고 **max(reported, cap)** 를 차감·`cost.json`에 기록한 뒤 "builder result is an error (subtype …) … charged $X and stopped"로 멈춥니다. loop는 `builder-failed`로 끝납니다.
+
 **참고한 표준 방식**: skill-creator `scripts/run_eval.py`는 격리를 거의 하지 않습니다 — `.claude`가 있는 프로젝트 루트를 cwd로 쓰고 `.claude/commands/<name>.md`를 잠깐 만들었다 지우며, 환경에서 `CLAUDECODE`만 뺍니다(https://github.com/anthropics/skills/blob/main/skills/skill-creator/scripts/run_eval.py, 조사 에이전트 확인). agentskills.io는 "Each eval run should start with a clean context — no leftover state from previous runs or from the skill development process."라고만 합니다(https://agentskills.io/skill-creation/evaluating-skills). 이 하네스의 sandbox·사용자 스킬 차단·init 검사는 그보다 엄격한 자체 규칙(H)입니다.
 
 **채점**

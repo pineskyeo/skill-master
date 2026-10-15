@@ -2091,6 +2091,11 @@ class ClaudeBuilder:
             self._record(it_dir, 0, 0, charged)
             raise EvalError("builder output is not a result object (type %r, exit %s); charged $%.2f and stopped"
                             % (data.get("type"), rc, charged))
+        if data.get("is_error"):  # the CLI reported a failed call (even with exit 0): same charge and stop
+            charged = max(fallback, reported_cost(out) or 0.0)
+            self._record(it_dir, 0, 0, charged)
+            raise EvalError("builder result is an error (subtype %r, exit %s); charged $%.2f and stopped"
+                            % (data.get("subtype"), rc, charged))
         try:
             tin, tout = claude_usage(data)
         except Exception as ex:  # paid call, unreadable usage: charge max(reported, cap) and stop
