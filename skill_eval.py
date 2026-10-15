@@ -43,6 +43,20 @@ DEFAULT_GRADER_MODEL = "claude-sonnet-5-5"
 DEFAULT_TOKENS = {"exec": (60000, 4000), "trigger": (25000, 500), "grader": (12000, 800), "pairwise": (16000, 800),
                   "builder": (80000, 8000)}
 DEFAULT_BUILDER_MODEL = "claude-opus-5-5"
+# Effort levels. Claude: `--effort` CLI flag; low/medium/high, xhigh and max are named in the Claude Code changelog
+# (~/.claude/cache/changelog.md: "Available via `/effort`, `--effort`"). Codex: values accepted by the Codex plugin
+# runtime (~/.claude/plugins/cache/openai-codex/codex/1.0.4/skills/codex-cli-runtime/SKILL.md: none, minimal, low,
+# medium, high, xhigh). The `codex exec` spelling `-c model_reasoning_effort=<level>` is NOT verified from a primary
+# source in this repo (추정): check `codex exec --help` / the Codex config docs before a live run.
+CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+CODEX_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
+CODEX_EFFORT_CONFIG = "model_reasoning_effort=%s"  # (추정) config key, see above
+GRADER_ENGINES = ("claude", "codex")
+# Codex grader price per million tokens (input, output). OpenAI/Codex prices are not verified from a primary source
+# here, so the most expensive row of PRICES is used as a conservative assumption (추정: not shown to be an upper
+# bound of the real price). Override with --price grader=IN,OUT. Every Codex grader call is charged at least its
+# worst-case bound (assumed tokens x WORST_CASE_FACTOR x this price): Codex has no per-call cap.
+CODEX_GRADER_ASSUMED_PRICE = max(PRICES.values(), key=lambda p: p[0] + p[1])
 # Per-call budget control (H). Claude: --max-budget-usd gets only this share of the remaining budget, because how far
 # the CLI can overshoot its cap is not documented. Codex has no per-call cap, so its budget is a SOFT LIMIT: a call
 # starts only when its estimated worst-case bound (assumed tokens x WORST_CASE_FACTOR x price) fits the remaining
@@ -61,7 +75,7 @@ def budget_enforcement(engine_cls_or_obj):
 # Extra CLI args that would change the priced model or the per-call cap (exact flag or flag=value).
 # Also flags that would add skill/plugin/config sources back into an isolated run (README "Eval isolation").
 FORBIDDEN_EXTRA_ARGS = {"claude": ("--model", "--fallback-model", "--max-budget-usd", "--settings", "--setting-sources",
-                                   "--plugin-dir", "--plugin-url", "--add-dir", "--mcp-config"),
+                                   "--plugin-dir", "--plugin-url", "--add-dir", "--mcp-config", "--effort"),
                         "codex": ("-m", "--model", "-p", "--profile", "--oss", "-C", "--cd", "--add-dir")}
 
 SAFE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")  # an eval `name` must be one safe path component
@@ -523,17 +537,23 @@ def check_extra_args(engine, args):
                 (args[i + 1] if x in ("-c", "--config") and i + 1 < len(args) else None)
             if val is not None and val.strip().startswith("model"): bad.append(x if "=" in x else "%s %s" % (x, val))
     if bad:
-        raise EvalError("%s extra args may not set the model or budget (priced from --%s-model): %s"
-                        % (engine, engine, ", ".join(bad)))
+        raise EvalError("%s extra args may not set the model, effort or budget (priced from --%s-model, effort from "
+                        "--%s-effort): %s" % (engine, engine, engine, ", ".join(bad)))
     return args
 
 class Engine:
     name = "?"
     skills_rel = None  # where a project-scoped skill is installed inside the run workdir
     has_call_cap = False  # True when the CLI takes a per-call USD cap
-    def __init__(self, model=None, exec_fn=None, extra_args=(), timeout=900):
+    EFFORTS = ()
+    def __init__(self, model=None, exec_fn=None, extra_args=(), timeout=900, effort=None):
         self.model, self.exec_fn, self.timeout = model, exec_fn or live_exec, timeout
+        if effort is not None and effort not in self.EFFORTS:
+            raise EvalError("%s effort %r: one of %s" % (self.name, effort, "|".join(self.EFFORTS) or "(none supported)"))
+        self.effort = effort
         self.extra_args = check_extra_args(self.name, extra_args)
+    def label(self):
+        return "%s(%s%s)" % (self.name, self.model or "CLI default", ", effort %s" % self.effort if self.effort else "")
     def install_skill(self, workdir, skill_dir, name):
         """Copy the skill without evals/ (the eval set must not leak into the run). The name (SKILL.md frontmatter)
         must be one safe path component and the destination must stay inside the skills folder of the sandbox."""
@@ -608,10 +628,12 @@ class ClaudeCodeEngine(Engine):
     show up in init `skills` unless `user-invocable: false`, and those are refused before launch."""
     name, skills_rel, has_call_cap = "claude", ".claude/skills", True
     SETTINGS, ENV = CLAUDE_SETTINGS_JSON, CLAUDE_CHILD_ENV
+    EFFORTS = CLAUDE_EFFORTS
     def command(self, prompt, with_skill, budget_usd=None):
         cmd = ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose", "--no-session-persistence"]
         cmd += claude_isolation_args()
         if self.model: cmd += ["--model", self.model]
+        if self.effort: cmd += ["--effort", self.effort]
         if budget_usd is not None: cmd += ["--max-budget-usd", "%.2f" % budget_usd]
         if not with_skill: cmd += ["--disable-slash-commands"]
         return cmd + self.extra_args
@@ -701,6 +723,7 @@ class CodexEngine(Engine):
     Trigger detection is (추정): Codex documents no skill-invocation event, so a run counts as triggered when an
     item mentions .../skills/<name>/SKILL.md."""
     name, skills_rel = "codex", ".agents/skills"
+    EFFORTS = CODEX_EFFORTS
     def __init__(self, *a, **k):
         Engine.__init__(self, *a, **k)
         self._auth_digest = {}  # sandbox root -> sha256 of the copied auth.json (in memory only, never written)
@@ -784,6 +807,7 @@ class CodexEngine(Engine):
     def command(self, prompt, with_skill, budget_usd=None):
         cmd = ["codex", "exec", "--json", "--skip-git-repo-check", "--ephemeral", "--sandbox", "workspace-write"]
         if self.model: cmd += ["-m", self.model]
+        if self.effort: cmd += ["-c", CODEX_EFFORT_CONFIG % self.effort]
         return cmd + self.extra_args + [prompt]
     def parse(self, stdout):
         """Raises ValueError when no line is a JSON event with a "type" (empty or unreadable stream) or when the stream
@@ -1052,13 +1076,21 @@ def transcript_text(t):
 class LLMGrader:
     """Grades with `claude -p --json-schema` and no tools (`--tools ""`). Must use a model different from the executor.
     With a finite budget every call gets --max-budget-usd (CLAUDE_CAP_HEADROOM of what is left)."""
-    def __init__(self, model=DEFAULT_GRADER_MODEL, exec_fn=None, timeout=300, budget=None, prices=None):
+    engine = "claude"
+    EFFORTS = CLAUDE_EFFORTS
+    def __init__(self, model=DEFAULT_GRADER_MODEL, exec_fn=None, timeout=300, budget=None, prices=None, effort=None):
         self.model, self.exec_fn, self.timeout, self.budget = model, exec_fn or live_exec, timeout, budget
         self.prices = prices or {}
+        if effort is not None and effort not in self.EFFORTS:
+            raise EvalError("%s grader effort %r: one of %s" % (self.engine, effort, "|".join(self.EFFORTS)))
+        self.effort = effort
         self.usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0, "api_equivalent_usd": 0.0}
+    def label(self):
+        return grader_label(self.engine, self.model, self.effort)
     def command(self, prompt, schema, cap):
         cmd = ["claude", "-p", prompt, "--model", self.model, "--output-format", "json", "--json-schema",
                json.dumps(schema), "--tools", "", "--no-session-persistence", "--disable-slash-commands"]
+        if self.effort: cmd += ["--effort", self.effort]
         cmd += claude_isolation_args()
         return cmd + (["--max-budget-usd", "%.2f" % cap] if cap is not None else [])
     def _charge_unknown(self, fallback):
@@ -1126,6 +1158,132 @@ class LLMGrader:
         so = self._call(prompt, COMPARE_SCHEMA)
         w = so.get("winner")
         return (w if w in ("A", "B", "TIE") else "TIE"), str(so.get("reasoning") or "")
+    @property
+    def record_name(self):
+        """What grading.json / comparison-k.json / calibration.json record as the grader."""
+        return self.model
+
+def grader_label(engine, model, effort=None):
+    return "%s(%s%s)" % (engine, model or "CLI default model", ", effort %s" % effort if effort else "")
+
+CODEX_GRADER_SANDBOX = "read-only"
+CODEX_GRADER_NOTE = ("the Codex grader runs `codex exec --sandbox read-only` in a fresh temp folder with an isolated "
+                     "CODEX_HOME holding a read-only copy of auth.json; that copy is READABLE by the grader agent (the "
+                     "read-only sandbox permits reads), and the grader prompt contains the untrusted transcript of the "
+                     "run under test, so a prompt injection could make it quote the token into grading.json / "
+                     "comparison-k.json evidence")
+
+def codex_grader_command_problems(cmd):
+    """The Codex grader launch shape: codex exec --json with exactly one --sandbox read-only, no flag that widens it."""
+    out = []
+    if cmd[:3] != ["codex", "exec", "--json"]: out.append("not a `codex exec --json` call")
+    modes = [cmd[i + 1] for i, x in enumerate(cmd[:-1]) if x in ("--sandbox", "-s")]
+    if modes != [CODEX_GRADER_SANDBOX]: out.append("sandbox must be exactly one `--sandbox read-only`, got %s" % modes)
+    wide = [x for x in cmd if x in ("--full-auto", "--dangerously-bypass-approvals-and-sandbox", "--yolo", "--add-dir")
+            or x.startswith(("--sandbox=", "--add-dir="))]
+    if wide: out.append("flags that change the sandbox: %s" % wide)
+    return out
+
+def extract_json_object(text):
+    """The JSON object a Codex grader was told to reply with: the whole message, or one ```json fenced block."""
+    t = (text or "").strip()
+    m = re.match(r"^```(?:json)?\s*(.*?)\s*```$", t, re.S)
+    if m: t = m.group(1)
+    data = json.loads(t)
+    if not isinstance(data, dict): raise ValueError("not a JSON object")
+    return data
+
+class CodexGrader(LLMGrader):
+    """Grader and blind pairwise judge through `codex exec --json --sandbox read-only` (Codex is never an eval target
+    here). Model: the Codex CLI default unless --grader-model is given; reasoning effort via `-c
+    model_reasoning_effort=<level>` (spelling 추정, see CODEX_EFFORT_CONFIG). Runs in a fresh temp folder with the
+    same isolated HOME / CODEX_HOME as a Codex run (CodexEngine.sandbox_env: read-only auth.json copy, removed and
+    verified gone after the call; see CODEX_GRADER_NOTE for the readability risk). The answer is the final agent
+    message, which must be one JSON object (the schema is in the prompt; `--output-schema` is not used: unverified).
+    Budget: Codex has no per-call cap, so a call starts only when its worst-case bound (assumed tokens x
+    WORST_CASE_FACTOR x price, CODEX_GRADER_ASSUMED_PRICE unless --price grader=...) fits the remaining budget, and
+    every call is charged max(usage x price, bound): a conservative charge, still a soft limit."""
+    engine = "codex"
+    EFFORTS = CODEX_EFFORTS
+    def __init__(self, model=None, exec_fn=None, timeout=600, budget=None, prices=None, effort=None, tokens=None):
+        LLMGrader.__init__(self, model, exec_fn, timeout, budget, prices, effort)
+        self.tokens = tokens or DEFAULT_TOKENS
+        self._env_engine = CodexEngine(exec_fn=self.exec_fn)
+    @property
+    def record_name(self):
+        return self.label()
+    def price(self):
+        return grader_price("codex", self.model, self.prices)
+    def bound(self, kind):
+        return grader_call_usd(kind, "codex", self.model, self.tokens, self.prices)
+    def command(self, prompt, schema, cap=None):
+        cmd = ["codex", "exec", "--json", "--skip-git-repo-check", "--ephemeral", "--sandbox", CODEX_GRADER_SANDBOX]
+        if self.model: cmd += ["-m", self.model]
+        if self.effort: cmd += ["-c", CODEX_EFFORT_CONFIG % self.effort]
+        return cmd + [codex_grader_prompt(prompt, schema)]
+    def _call(self, prompt, schema):
+        kind = "pairwise" if "winner" in schema.get("properties", {}) else "grader"
+        bound = self.bound(kind)
+        if self.budget is not None and self.budget.finite() and bound > self.budget.remaining():
+            raise EvalError("codex grader worst-case %s call $%.2f > remaining budget $%.2f (no per-call cap); stopped "
+                            "before the call" % (kind, bound, self.budget.remaining()))
+        cmd = self.command(prompt, schema)
+        probs = codex_grader_command_problems(cmd)
+        if probs: raise EvalError("codex grader launch refused: " + "; ".join(probs))
+        run_root = tempfile.gettempdir()
+        root = tempfile.mkdtemp(prefix="skill-eval-grader-codex-", dir=run_root)
+        eng, out, err, rc, failed, left = self._env_engine, "", "", None, None, []
+        try:
+            work = os.path.join(root, "work"); os.makedirs(work)
+            env = eng.sandbox_env(root)  # raises before launch when there is no ChatGPT auth.json: nothing spent
+            try:
+                rc, out, err = self.exec_fn(cmd, work, self.timeout, env=env)
+            except LiveDisabled:
+                raise
+            except Exception as ex:
+                failed = "call failed after launch (%s)" % type(ex).__name__
+            left = list(eng.after_run(root))
+        finally:
+            gone = remove_sandbox(eng, os.path.realpath(run_root), root)
+            left += gone
+            if gone and sys.exc_info()[0] is not None: print("WARNING: " + "; ".join(gone), file=sys.stderr)
+        res = None
+        if failed is None:
+            try:
+                res = eng.parse(out or "")
+            except Exception as ex:
+                failed = "output could not be parsed after the call (%s)" % type(ex).__name__
+        tin, tout = (res["input_tokens"], res["output_tokens"]) if res else (0, 0)
+        cost = max(call_cost((tin, tout), self.price()) or 0.0, bound)  # conservative: never below the bound
+        self.usage["calls"] += 1
+        self.usage["input_tokens"] += tin; self.usage["output_tokens"] += tout; self.usage["api_equivalent_usd"] += cost
+        if self.budget is not None: self.budget.charge(cost)
+        if left: raise EvalError("codex grader sandbox: %s; charged $%.2f and stopped" % ("; ".join(left), cost))
+        if failed: raise EvalError("codex grader %s; charged $%.2f and stopped" % (failed, cost))
+        if res["error"] or rc != 0:
+            raise EvalError("codex grader call failed (exit %s, %s); charged $%.2f and stopped"
+                            % (rc, (res["error"] or "")[:200], cost))
+        try:
+            return extract_json_object(res["final"])
+        except ValueError as ex:
+            raise EvalError("codex grader answer is not one JSON object (%s); charged $%.2f and stopped" % (ex, cost))
+
+def codex_grader_prompt(prompt, schema):
+    return ("%s\n\nDo not run commands, read files or use tools: everything you need is above. Reply with exactly one "
+            "JSON object and nothing else, matching this JSON Schema:\n%s\n" % (prompt, json.dumps(schema)))
+
+def grader_price(engine, model, prices):
+    """(in, out) USD/MTok for the grader: --price grader=... / model overrides first; a Codex grader without one uses
+    CODEX_GRADER_ASSUMED_PRICE (assumption)."""
+    p = price_for("grader", model, prices)
+    if p is None and engine == "codex": p = prices.get("codex") or CODEX_GRADER_ASSUMED_PRICE
+    return p
+
+def make_grader(engine, model=None, effort=None, **kw):
+    if engine not in GRADER_ENGINES: raise EvalError("unknown grader engine %r (%s)" % (engine, "|".join(GRADER_ENGINES)))
+    if engine == "codex": return CodexGrader(model, effort=effort, **kw)
+    kw.pop("tokens", None)
+    return LLMGrader(model or DEFAULT_GRADER_MODEL, effort=effort, **kw)
 
 # ---------- cost estimate ----------
 def parse_price_overrides(items):
@@ -1164,8 +1322,17 @@ def price_for(engine, model, prices):
 def call_cost(tokens, price):
     return None if price is None else (tokens[0] * price[0] + tokens[1] * price[1]) / 1e6
 
+def grader_call_usd(kind, engine, model, tokens, prices):
+    """Estimated USD of one grader/pairwise call. A Codex grader is charged at least its worst-case bound per call
+    (CodexGrader), so the bound is what is estimated."""
+    per = call_cost(tokens[kind], grader_price(engine, model, prices))
+    return per * WORST_CASE_FACTOR if (per is not None and engine == "codex") else per
+
+def grader_row_model(engine, model):
+    return model if engine == "claude" else "codex:%s" % (model or "CLI default")
+
 def estimate(n_cases, n_llm_cases, n_triggers, runs, engines, baseline, grader_model, tokens=None, prices=None,
-             pairwise=True):
+             pairwise=True, grader_engine="claude"):
     """engines: [(engine_name, executor_model)]. One grader call per run that has llm items; one pairwise call per
     (case, run) when two configurations are compared; trigger queries run only in configurations that have a skill
     (with_skill, plus old_skill when baseline is old)."""
@@ -1173,15 +1340,16 @@ def estimate(n_cases, n_llm_cases, n_triggers, runs, engines, baseline, grader_m
     n_configs = len(configs_for(baseline))
     skill_configs = 2 if baseline == "old" else 1
     rows = []
-    gprice = price_for("grader", grader_model, prices)
     for eng, model in engines:
         eprice = price_for(eng, model, prices)
         counts = {"exec": n_cases * n_configs * runs, "trigger": n_triggers * runs * skill_configs,
                   "grader": n_llm_cases * n_configs * runs, "pairwise": (n_cases * runs) if (pairwise and n_configs == 2) else 0}
         for kind, n in counts.items():
-            price = eprice if kind in ("exec", "trigger") else gprice
-            who = (model or "%s CLI default" % eng) if kind in ("exec", "trigger") else grader_model
-            per = call_cost(tokens[kind], price)
+            if kind in ("exec", "trigger"):
+                who, per = model or "%s CLI default" % eng, call_cost(tokens[kind], eprice)
+            else:
+                who = grader_row_model(grader_engine, grader_model)
+                per = grader_call_usd(kind, grader_engine, grader_model, tokens, prices)
             rows.append(est_row(eng, kind, who, n, tokens, per))
     return est_result(rows, tokens)
 
@@ -1195,10 +1363,10 @@ def est_result(rows, tokens):
     return {"rows": rows, "total_usd": round(sum(known), 4), "unpriced_models": unknown,
             "calls": sum(r["calls"] for r in rows), "tokens": tokens}
 
-def grader_estimate(n_grader, n_pairwise, grader_model, tokens, prices):
+def grader_estimate(n_grader, n_pairwise, grader_model, tokens, prices, grader_engine="claude"):
     """Grader-only cost: `grade --live` (counts from the iteration on disk) and `calibrate --live` (golden size)."""
-    per = {k: call_cost(tokens[k], price_for("grader", grader_model, prices)) for k in ("grader", "pairwise")}
-    return est_result([est_row("grader", k, grader_model, n, tokens, per[k])
+    per = {k: grader_call_usd(k, grader_engine, grader_model, tokens, prices) for k in ("grader", "pairwise")}
+    return est_result([est_row("grader", k, grader_row_model(grader_engine, grader_model), n, tokens, per[k])
                        for k, n in (("grader", n_grader), ("pairwise", n_pairwise))], tokens)
 
 def scale_estimate(est, k, extra_rows=()):
@@ -1463,6 +1631,7 @@ def run_iteration(spec, ws, engines, runs=DEFAULT_RUNS, baseline="none", old_ski
     wjson(os.path.join(it_dir, "plan.json"), {"skill_name": spec["skill_name"], "skill_path": spec["skill_dir"],
           "old_skill": old_skill, "configurations": configs, "runs_per_configuration": runs,
           "engines": {e.name: e.model for e in engines}, "evals_run": [c["id"] for c in spec["cases"]],
+          "efforts": {e.name: getattr(e, "effort", None) for e in engines},
           "trigger_queries": len(spec["triggers"] or []), "started_at": now_iso(),
           "skill_sha256": skill_tree_hash(spec["skill_dir"]), "eval_set_sha256": gate_hash("eval_set", spec, ws),
           "old_skill_sha256": skill_tree_hash(old_skill) if baseline == "old" else None,
@@ -1570,12 +1739,16 @@ def walk_runs(it_dir):
                 for rd in sorted(os.listdir(cp)):
                     if re.match(r"run-\d+$", rd): yield eng, os.path.join(ep, ed), cfg, os.path.join(cp, rd)
 
-def check_grader_model(it_dir, grader_model):
-    """The grader must differ from the executor models recorded in the iteration's plan.json (not from CLI flags)."""
+def check_grader_model(it_dir, grader_model, grader_engine="claude"):
+    """The grader must differ from the executor models recorded in the iteration's plan.json (not from CLI flags).
+    A Codex grader may only grade iterations without Codex runs (Codex is a grader here, never an eval target)."""
     plan = rjson(os.path.join(it_dir, "plan.json"))
     if not isinstance(plan, dict) or not isinstance(plan.get("engines"), dict):
         raise EvalError("%s has no plan.json with executor models; cannot check the grader differs" % it_dir)
     models = plan["engines"]
+    if grader_engine == "codex":
+        if "codex" in models: raise EvalError("a codex grader cannot grade codex runs; codex is a grader only")
+        return
     same = [e for e, m in models.items() if m and m == grader_model]
     if same: raise EvalError("grader model %s equals the executor model of %s; use a different model" % (grader_model, same))
     if any(e == "claude" and not m for e, m in models.items()):
@@ -1587,7 +1760,7 @@ def grade_iteration(spec, ws, n, grader=None, seed=None, log=print):
     cost is appended to cost.json even when grading stops early."""
     it_dir = os.path.join(ws, "iteration-%d" % n)
     if not os.path.isdir(it_dir): raise EvalError("no %s" % it_dir)
-    if grader is not None: check_grader_model(it_dir, grader.model)
+    if grader is not None: check_grader_model(it_dir, grader.model, getattr(grader, "engine", "claude"))
     before = dict(grader.usage) if grader is not None else None
     try:
         _grade(spec, ws, it_dir, grader, seed, log)
@@ -1631,7 +1804,7 @@ def _grade(spec, ws, it_dir, grader, seed, log):
                 for it in llm_items:
                     ok, ev = g[it["id"]]
                     res[it["id"]] = {"passed": ok, "evidence": ev, "status": "graded" if ok is not None else "not-graded",
-                                     "grader": grader.model}
+                                     "grader": grader.record_name}
         exps = [dict({"text": it["text"], "id": it["id"], "layer": it["layer"]}, **res[it["id"]]) for it in case["items"]]
         graded = [e for e in exps if isinstance(e["passed"], bool)]
         p = sum(e["passed"] for e in graded)
@@ -1692,7 +1865,7 @@ def pairwise(spec, it_dir, grader, seed=None):
         winner_cfg = {"A": a_cfg, "B": b_cfg}.get(w, "tie")
         wjson(os.path.join(ed, "comparison-%d.json" % k), {
             "winner": w, "reasoning": why, "mapping": {"A": a_cfg, "B": b_cfg}, "winner_configuration": winner_cfg,
-            "seed": seed, "grader_model": grader.model})
+            "seed": seed, "grader_model": grader.record_name})
 
 def load_golden(golden_path):
     try: data = rjson(golden_path)
@@ -1720,7 +1893,7 @@ def calibrate(golden_path, grader):
     pe = ph * pg + (1 - ph) * (1 - pg)
     kappa = 1.0 if pe == 1 else (agree - pe) / (1 - pe)
     return {"n": n, "agreement": round(agree, 4), "kappa": round(kappa, 4), "threshold": AGREEMENT_MIN,
-            "grader_model": grader.model, "golden": os.path.abspath(golden_path),
+            "grader_model": grader.record_name, "golden": os.path.abspath(golden_path),
             "disagreements": [r for r in rows if r["grader"] is not r["human"]]}
 
 def calibrate_metered(golden_path, grader, it_dir):
@@ -2151,8 +2324,17 @@ def make_engines(a):
         if name not in ENGINES: raise EvalError("unknown engine %r (claude|codex)" % name)
         model = a.claude_model if name == "claude" else a.codex_model
         extra = a.claude_arg if name == "claude" else a.codex_arg
-        out.append(ENGINES[name](model=model, extra_args=extra or ()))
+        effort = _str_opt(a, "claude_effort" if name == "claude" else "codex_effort")
+        out.append(ENGINES[name](model=model, extra_args=extra or (), effort=effort))
     return out
+
+def _str_opt(a, k):
+    v = getattr(a, k, None)
+    return v if isinstance(v, str) else None
+
+def grader_engine_of(a):
+    v = getattr(a, "grader_engine", None)
+    return v if v in GRADER_ENGINES else "claude"
 
 def plan_text(spec, problems, a, engines, ws, est):
     configs = configs_for(a.baseline)
@@ -2160,8 +2342,9 @@ def plan_text(spec, problems, a, engines, ws, est):
     trig = spec["triggers"] or []
     L = ["skill: %s (%s)" % (spec["skill_name"], spec["skill_dir"]), "workspace: %s" % ws,
          "configurations: %s | runs: %d | engines: %s" % (", ".join(configs), a.runs,
-             ", ".join("%s(%s)" % (e.name, e.model or "CLI default") for e in engines)),
-         "grader: %s (yes/no rubric) + blind pairwise" % a.grader_model,
+             ", ".join(e.label() for e in engines)),
+         "grader: %s (yes/no rubric) + blind pairwise judge" % grader_label(
+             grader_engine_of(a), a.grader_model, _str_opt(a, "grader_effort")),
          "eval set: %d case(s), items static=%d llm=%d human=%d, pressure cases=%d; trigger queries: %d (+%d / -%d)" % (
              len(spec["cases"]), layers["static"], layers["llm"], layers["human"],
              sum(1 for c in spec["cases"] if c["pressure"]), len(trig), sum(q["should_trigger"] for q in trig),
@@ -2176,6 +2359,13 @@ def plan_text(spec, problems, a, engines, ws, est):
     if notes: L += ["isolation notes (not blocking):"] + ["  - " + x for x in notes]
     L += ["auth: subscription only (Claude: existing claude.ai Keychain login; Codex: ChatGPT login); `claude auth "
           "status --json` is checked only by a real --live (not by --dry-run)"]
+    if grader_engine_of(a) == "codex":
+        L += ["grader budget: SOFT LIMIT (codex has no per-call cap): each grader/pairwise call starts only if its "
+              "worst-case bound fits the remaining budget and is charged max(usage x price, bound); price %s" % (
+                  "from --price" if price_for("grader", a.grader_model, parse_price_overrides(getattr(a, "price", None)))
+                  else "ASSUMED $%.2f/$%.2f per MTok (not verified, override with --price grader=IN,OUT)"
+                  % CODEX_GRADER_ASSUMED_PRICE),
+              "grader isolation: " + CODEX_GRADER_NOTE]
     soft = [e.name for e in engines if budget_enforcement(e) == "soft_limit"]
     if soft:
         L += ["budget enforcement: %s" % ("STRICT (default): --live refuses %s (no per-call cap)" % ", ".join(soft)
@@ -2193,18 +2383,19 @@ def plan_text(spec, problems, a, engines, ws, est):
 def live_estimate(a, spec, ws, n, engines, tokens, prices, iterations_left=None):
     """Cost of what a live command will really execute; never uses --cases/--llm-cases/--trigger-queries.
     loop: iterations_left x (one iteration + calibration) + (iterations_left - 1) builder calls."""
+    ge = grader_engine_of(a)
     if a.cmd == "grade":
-        check_grader_model(os.path.join(ws, "iteration-%d" % n), a.grader_model)
+        check_grader_model(os.path.join(ws, "iteration-%d" % n), a.grader_model, ge)
         ng, npw = grade_counts(spec, os.path.join(ws, "iteration-%d" % n))
-        return grader_estimate(ng, npw, a.grader_model, tokens, prices)
+        return grader_estimate(ng, npw, a.grader_model, tokens, prices, ge)
     if a.cmd == "calibrate":
-        return grader_estimate(len(load_golden(a.golden)), 0, a.grader_model, tokens, prices)
+        return grader_estimate(len(load_golden(a.golden)), 0, a.grader_model, tokens, prices, ge)
     n_cases, n_llm, n_trig = spec_counts(spec, None)
     est = estimate(n_cases, n_llm, n_trig, a.runs, [(e.name, e.model) for e in engines], a.baseline, a.grader_model,
-                   tokens, prices)
+                   tokens, prices, grader_engine=ge)
     if a.cmd == "loop":  # every automatic iteration may run, each with its calibration, plus a builder call between
         k = a.max_iterations if iterations_left is None else iterations_left
-        cal = grader_estimate(len(load_golden(a.golden)), 0, a.grader_model, tokens, prices)["rows"][:1] if a.golden else []
+        cal = grader_estimate(len(load_golden(a.golden)), 0, a.grader_model, tokens, prices, ge)["rows"][:1] if a.golden else []
         est = scale_estimate(est, k, cal)
         if getattr(a, "builder_prompt", None) and k > 1:
             per = call_cost(tokens["builder"], price_for("builder", a.builder_model, prices))
@@ -2223,11 +2414,26 @@ def subscription_problems(a, engines):
     """Live gate: no API-key variable anywhere (run/loop also get it from preflight), and `claude auth status` shows a
     claude.ai login whenever the command calls claude (Claude engine, grader for grade/calibrate/loop, builder)."""
     out = [] if a.cmd in ("run", "loop") else api_key_env_problems()  # run/loop: reported by preflight
-    if a.cmd in ("grade", "calibrate", "loop") or any(e.name == "claude" for e in engines):
+    if needs_claude_auth(a, engines):
         out += claude_auth_problems()
+    if grades_now(a) and grader_engine_of(a) == "codex":
+        out += codex_auth_problems()  # reads only the auth_mode field of auth.json
     return out
 
+def grades_now(a):
+    return a.cmd in ("grade", "calibrate", "loop")
+
+def needs_claude_auth(a, engines):
+    """Claude is called by a Claude engine (run/loop only: grade/calibrate execute no engine), a Claude grader
+    (grade/calibrate/loop) or the builder (loop)."""
+    runs_engines = a.cmd not in ("grade", "calibrate")
+    return (runs_engines and any(e.name == "claude" for e in engines)) \
+        or (grades_now(a) and grader_engine_of(a) == "claude") \
+        or (a.cmd == "loop" and bool(_str_opt(a, "builder_prompt")))
+
 AUTH_STATUS_SKIPPED = "skipped in dry run: `claude auth status --json` (runs a CLI; only the real --live checks it)"
+CODEX_AUTH_SKIPPED = ("skipped in dry run: the Codex grader's ChatGPT login (auth_mode of auth.json; only the real "
+                      "--live reads it)")
 
 def check_live_gates(a, spec, problems, ws, n, engines, tokens, prices, budget_left, iterations_left=None, report=None):
     """Every --live gate; raises EvalError on the first failure. `loop` calls it again before each iteration with the
@@ -2247,8 +2453,15 @@ def check_live_gates(a, spec, problems, ws, n, engines, tokens, prices, budget_l
     else:
         env = [] if a.cmd in ("run", "loop") else api_key_env_problems()  # run/loop: reported by preflight
         if env: fail("subscription auth: " + " | ".join(env))
-        if a.cmd in ("grade", "calibrate", "loop") or any(e.name == "claude" for e in engines):
+        if needs_claude_auth(a, engines):
             report.append(AUTH_STATUS_SKIPPED)
+        if grades_now(a) and grader_engine_of(a) == "codex":
+            report.append(CODEX_AUTH_SKIPPED)
+    if grader_engine_of(a) == "claude":  # the grader must differ from the model under test
+        same = [e.label() for e in engines if e.name == "claude" and e.model and e.model == a.grader_model]
+        if same and a.cmd in ("run", "loop"):
+            fail("grader %s is the model under test %s; pick another --grader-model or --grader-engine codex"
+                 % (a.grader_model, ", ".join(same)))
     for g in ("requirements", "eval_set"):
         if not approval_ok(g, spec, ws): fail("gate %s not approved (write %s/requirements.md, then `approve --gate %s`)" % (g, ws, g))
     live_est = live_estimate(a, spec, ws, n, engines, tokens, prices, iterations_left)
@@ -2273,14 +2486,16 @@ def live_dry_run(a, spec, problems, ws, n, engines, tokens, prices):
     no workspace file is written. Returns 0 when only the skipped auth status check is left, else 3."""
     report = []
     live_est = check_live_gates(a, spec, problems, ws, n, engines, tokens, prices, a.budget_usd, report=report)
-    fails = [r for r in report if r != AUTH_STATUS_SKIPPED]
+    skipped = (AUTH_STATUS_SKIPPED, CODEX_AUTH_SKIPPED)
+    fails = [r for r in report if r not in skipped]
     print(plan_text(spec, problems, a, engines, ws, live_est))
     print("\nLIVE DRY RUN: nothing was executed (no model call, no `claude auth status`, no files written).")
     print("budget: API-equivalent estimate $%.2f vs --budget-usd $%.2f (%s)" % (
         live_est["total_usd"], a.budget_usd, "fits" if live_est["total_usd"] <= a.budget_usd else "EXCEEDS"))
     print("live gates that would refuse this command (%d):" % len(fails))
     for r in fails: print("  - " + r.replace("\n", "\n    "))
-    if AUTH_STATUS_SKIPPED in report: print("  (%s)" % AUTH_STATUS_SKIPPED)
+    for r in skipped:
+        if r in report: print("  (%s)" % r)
     print("live command: " + shlex.join(["python3", "skill_eval.py"] + [x for x in a.argv if x != "--dry-run"]))
     return 3 if fails else 0
 
@@ -2307,7 +2522,18 @@ def main(argv=None):
             s.add_argument("--codex-model", default=DEFAULT_EXECUTOR_MODELS["codex"])
             s.add_argument("--claude-arg", action="append", help="extra claude CLI arg (repeat), e.g. --claude-arg=--permission-mode --claude-arg=acceptEdits")
             s.add_argument("--codex-arg", action="append")
-            s.add_argument("--grader-model", default=DEFAULT_GRADER_MODEL)
+            s.add_argument("--claude-effort", choices=CLAUDE_EFFORTS, help="effort of the Claude model under test "
+                           "(claude --effort); default: CLI/account default")
+            s.add_argument("--codex-effort", choices=CODEX_EFFORTS)
+            s.add_argument("--grader-engine", choices=GRADER_ENGINES, default="claude",
+                           help="grader and blind pairwise judge: claude (claude -p, no tools, capped) or codex (codex "
+                                "exec --sandbox read-only, CLI default model, soft budget; its auth.json copy is "
+                                "readable by the grader). Codex is never an eval target through this option")
+            s.add_argument("--grader-model", default=None,
+                           help="default: %s for --grader-engine claude, the CLI default model for codex"
+                                % DEFAULT_GRADER_MODEL)
+            s.add_argument("--grader-effort", help="grader effort: claude %s, codex %s (codex: -c %s, 추정)"
+                           % ("|".join(CLAUDE_EFFORTS), "|".join(CODEX_EFFORTS), CODEX_EFFORT_CONFIG % "<level>"))
             s.add_argument("--price", action="append", help="KEY=IN,OUT USD/MTok; KEY = engine name, model id or 'grader'")
             s.add_argument("--tokens", action="append", help="KIND=IN,OUT assumed tokens per call; KIND exec|trigger|grader|pairwise")
             s.add_argument("--cases", type=int); s.add_argument("--llm-cases", type=int); s.add_argument("--trigger-queries", type=int)
@@ -2340,6 +2566,8 @@ def main(argv=None):
     s = sp.add_parser("snapshot"); common(s, False)
     a = p.parse_args(argv)
     a.argv = list(sys.argv[1:] if argv is None else argv)
+    if hasattr(a, "grader_engine") and a.grader_model is None and a.grader_engine == "claude":
+        a.grader_model = DEFAULT_GRADER_MODEL
     try:
         return _dispatch(a)
     except EvalError as ex:
@@ -2387,7 +2615,9 @@ def _dispatch(a):
     prices = parse_price_overrides(a.price)
     tokens = parse_token_overrides(a.tokens)
     n_cases, n_llm, n_trig = spec_counts(spec, a)
-    est = estimate(n_cases, n_llm, n_trig, a.runs, [(e.name, e.model) for e in engines], a.baseline, a.grader_model, tokens, prices)
+    make_grader(a.grader_engine, a.grader_model, a.grader_effort)  # validates --grader-effort before anything runs
+    est = estimate(n_cases, n_llm, n_trig, a.runs, [(e.name, e.model) for e in engines], a.baseline, a.grader_model,
+                   tokens, prices, grader_engine=a.grader_engine)
     if a.cmd == "estimate":
         print(format_estimate(est)); return 0
     live_cmds = ("run", "grade", "calibrate", "loop")
@@ -2419,7 +2649,7 @@ def _dispatch(a):
                 print("WARNING: budget " + SOFT_LIMIT_NOTE % e.name, file=sys.stderr)
                 print("WARNING: " + NO_STRICT_WARNING % e.name, file=sys.stderr)
     budget = Budget(a.budget_usd)
-    grader = LLMGrader(a.grader_model, budget=budget, prices=prices)
+    grader = make_grader(a.grader_engine, a.grader_model, a.grader_effort, budget=budget, prices=prices, tokens=tokens)
     _LIVE["on"] = True
     if a.cmd == "run":
         n = run_iteration(spec, ws, engines, a.runs, a.baseline, a.old_skill, budget, prices, tokens=tokens,
