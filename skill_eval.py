@@ -51,6 +51,7 @@ DEFAULT_BUILDER_MODEL = "claude-opus-5-5"
 CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 CODEX_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
 CODEX_EFFORT_CONFIG = "model_reasoning_effort=%s"  # (추정) config key, see above
+CODEX_ADMIN_SKILLS = os.path.join("/etc", "codex", "skills")  # admin-scope skills: load in every Codex call
 GRADER_ENGINES = ("claude", "codex")
 # Codex grader price per million tokens (input, output). OpenAI/Codex prices are not verified from a primary source
 # here, so the most expensive row of PRICES is used as a conservative assumption (추정: not shown to be an upper
@@ -83,6 +84,10 @@ SKILL_IGNORE = ("evals", "__pycache__", "*-workspace")      # not installed into
 
 class EvalError(Exception): pass
 class LiveDisabled(RuntimeError): pass
+class JudgeAnswerError(EvalError):
+    """A paid pairwise call whose winner is not A, B or TIE."""
+    def __init__(self, msg, winner):
+        EvalError.__init__(self, msg); self.winner = winner
 
 def safe_name(name):
     return isinstance(name, str) and bool(SAFE_NAME_RE.match(name)) and ".." not in name
@@ -754,7 +759,7 @@ class CodexEngine(Engine):
         out = Engine.sandbox_problems(self, root, work, skill_name, with_skill)
         for label, d in (("sandbox HOME", os.path.join(root, "home", ".agents", "skills")),
                          ("sandbox CODEX_HOME", os.path.join(root, "codex_home", "skills")),
-                         ("admin", os.path.join("/etc", "codex", "skills"))):
+                         ("admin", CODEX_ADMIN_SKILLS)):
             hits = [n for n, p in skills_under(d, 4) if os.sep + ".system" + os.sep not in p + os.sep]
             if hits: out.append("%s skills folder %s has %s" % (label, d, sorted(hits)))
         return out
@@ -1155,9 +1160,12 @@ class LLMGrader:
                   "Judge which run better accomplishes the task (correctness, completeness, following the request). "
                   "Answer A, B or TIE.\n\nTask prompt:\n%s\n\nExpected outcome:\n%s\n\n=== Run A ===\n%s\n\n=== Run B ===\n%s\n"
                   % (case["prompt"], case["expected_output"], transcript_text(out_a), transcript_text(out_b)))
-        so = self._call(prompt, COMPARE_SCHEMA)
+        so = self._call(prompt, COMPARE_SCHEMA)  # charged by _call
         w = so.get("winner")
-        return (w if w in ("A", "B", "TIE") else "TIE"), str(so.get("reasoning") or "")
+        if w not in ("A", "B", "TIE"):  # never read as a TIE: the comparison failed
+            raise JudgeAnswerError("pairwise judge winner %r is not A, B or TIE; the call was charged and grading "
+                                   "stopped" % (str(w)[:40],), w)
+        return w, str(so.get("reasoning") or "")
     @property
     def record_name(self):
         """What grading.json / comparison-k.json / calibration.json record as the grader."""
@@ -1236,6 +1244,10 @@ class CodexGrader(LLMGrader):
         try:
             work = os.path.join(root, "work"); os.makedirs(work)
             env = eng.sandbox_env(root)  # raises before launch when there is no ChatGPT auth.json: nothing spent
+            # the executor's static checks: no project skill in work, none in an ancestor of the sandbox, the
+            # sandbox HOME / CODEX_HOME or /etc/codex/skills (refused before launch: nothing spent)
+            skills = eng.sandbox_problems(root, work, None, False)
+            if skills: raise EvalError("codex grader launch refused: " + "; ".join(skills))
             try:
                 rc, out, err = self.exec_fn(cmd, work, self.timeout, env=env)
             except LiveDisabled:
@@ -1486,9 +1498,9 @@ def preflight(spec, engines, run_root=None, home=None):
                 user_settings + [p for p in claude_project_settings(ancestors(root)) if p not in user_settings]
                 + files + [os.path.join(cfg, CLAUDE_REMOTE_SETTINGS)])
         if e == "codex":
-            hits = skills_under(os.path.join("/etc", "codex", "skills"), 4)
+            hits = skills_under(CODEX_ADMIN_SKILLS, 4)
             if hits:
-                out.append("codex: /etc/codex/skills has %s (admin skills load in every run)" % sorted(n for n, _ in hits))
+                out.append("codex: %s has %s (admin skills load in every run)" % (CODEX_ADMIN_SKILLS, sorted(n for n, _ in hits)))
             out += codex_auth_problems()
     return out
 
@@ -1861,7 +1873,14 @@ def pairwise(spec, it_dir, grader, seed=None):
         swap = rng.random() < 0.5
         a_cfg, b_cfg = (base, PRIMARY) if swap else (PRIMARY, base)
         ta, tb = rjson(pa if not swap else pb), rjson(pb if not swap else pa)
-        w, why = grader.compare(case, ta, tb)
+        try:
+            w, why = grader.compare(case, ta, tb)
+        except JudgeAnswerError as ex:  # paid call, unusable answer: recorded as failed (benchmark skips it), stop
+            wjson(os.path.join(ed, "comparison-%d.json" % k), {
+                "winner": None, "status": "failed", "error": str(ex), "invalid_winner": str(ex.winner)[:40],
+                "mapping": {"A": a_cfg, "B": b_cfg}, "winner_configuration": None, "seed": seed,
+                "grader_model": grader.record_name})
+            raise
         winner_cfg = {"A": a_cfg, "B": b_cfg}.get(w, "tie")
         wjson(os.path.join(ed, "comparison-%d.json" % k), {
             "winner": w, "reasoning": why, "mapping": {"A": a_cfg, "B": b_cfg}, "winner_configuration": winner_cfg,
@@ -2447,6 +2466,10 @@ def check_live_gates(a, spec, problems, ws, n, engines, tokens, prices, budget_l
     if getattr(a, "strict_budget", True) and soft:
         fail("--strict-budget (default): %s has no enforceable per-call budget cap (its budget is only a soft limit); "
              "refusing the live run (drop it from --engines; --no-strict-budget overrides this, risky)" % ", ".join(soft))
+    if a.cmd in ("run", "loop") and grader_engine_of(a) == "codex" and any(e.name == "codex" for e in engines):
+        fail("--grader-engine codex with codex under test: a codex grader cannot grade codex runs (`grade` refuses "
+             "them), so the codex runs would be paid for and never graded; drop codex from --engines or use "
+             "--grader-engine claude")
     if report is None:
         auth = subscription_problems(a, engines)
         if auth: fail("subscription auth: " + " | ".join(auth))
