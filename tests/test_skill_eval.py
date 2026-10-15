@@ -60,8 +60,10 @@ def make_skill(root, evals=None, triggers=TRIGGERS, extra_files=None):
         with open(fp, "w", encoding="utf-8") as f: f.write(text)
     return d
 
-def claude_stream(final, tools=(), usage=(1000, 200, 300), cost=0.05, skills=(), plugins=()):
-    lines = [{"type": "system", "subtype": "init", "skills": list(skills), "plugins": list(plugins)}]
+def claude_stream(final, tools=(), usage=(1000, 200, 300), cost=0.05, skills=(), plugins=(), api_key_source="none"):
+    init = {"type": "system", "subtype": "init", "skills": list(skills), "plugins": list(plugins)}
+    if api_key_source is not None: init["apiKeySource"] = api_key_source  # SDKSystemMessage field (docs: "none" = no API key)
+    lines = [init]
     for name, inp in tools:
         lines.append({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": name, "input": inp}]}})
     lines.append({"type": "assistant", "message": {"content": [{"type": "text", "text": final}]}})
@@ -141,7 +143,8 @@ class Base(unittest.TestCase):
         self.home = os.path.join(self.tmp, "home"); os.makedirs(self.home)
         env = mock.patch.dict(os.environ, {"HOME": self.home, "CODEX_HOME": os.path.join(self.home, ".codex")})
         env.start(); self.addCleanup(env.stop)  # preflight looks only at a fake home
-        for k in se.API_KEY_ENV + ("CLAUDE_CODE_OAUTH_TOKEN",): os.environ.pop(k, None)  # restored by patch.dict
+        for k in se.NON_SUBSCRIPTION_ENV + ("CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR"):
+            os.environ.pop(k, None)  # restored by patch.dict
         self.auth = os.path.join(self.home, ".codex", "auth.json")  # fake file-based ChatGPT login (never real)
         wjson(self.auth, FAKE_CODEX_AUTH)
         self.status_calls = []
@@ -153,6 +156,8 @@ class Base(unittest.TestCase):
         td.start(); self.addCleanup(td.stop)
         self.managed = os.path.join(self.tmp, "managed", "managed-settings.json")  # never the machine's real file
         ms = mock.patch.object(se, "CLAUDE_MANAGED_SETTINGS", (self.managed,)); ms.start(); self.addCleanup(ms.stop)
+        self.mdm = os.path.join(self.tmp, "mdm")  # never the machine's real /Library/Managed Preferences
+        mp = mock.patch.object(se, "CLAUDE_MDM_PLIST_DIR", self.mdm); mp.start(); self.addCleanup(mp.stop)
     def tearDown(self): shutil.rmtree(self.tmp)
     def spec(self, **kw):
         spec, problems = se.load_eval_set(make_skill(self.tmp, **kw))
@@ -753,7 +758,8 @@ class TestCLI(Base):
         synced = os.path.join(self.home, ".claude", "skills", "synced", "abc", "branch-setup")
         os.makedirs(synced); write(os.path.join(synced, "SKILL.md"), SKILL_MD)
         pf = se.preflight(spec, ["claude", "codex"], self.runs)
-        self.assertEqual(len(pf), 1); self.assertTrue(pf[0].startswith("claude: skill 'branch-setup' is also installed"), pf)
+        self.assertEqual(len(pf), 2); self.assertTrue(pf[0].startswith("claude: skill 'branch-setup' is also installed"), pf)
+        self.assertIn("synced/plugin skill(s)", pf[1])  # round 5: any synced skill blocks a shared-config-dir run
         rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "1000", "--price", "codex=1,1",
                               "--run-root", self.runs)
         self.assertEqual(rc, 2); self.assertIn("preflight: claude", err)

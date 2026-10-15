@@ -140,9 +140,9 @@ class TestLoopGates(Base):
         self.assertEqual(cmd[cmd.index("--max-budget-usd") + 1], "5.00")
         self.assertEqual(cmd[cmd.index("--tools") + 1], "Read,Edit,Write,Glob,Grep")
         self.assertNotIn("Bash", " ".join(cmd[3:]))
-        self.assertAlmostEqual(b.spent, 1.25)
+        self.assertAlmostEqual(b.spent, 5.0)  # round 5: no usage, reported $1.25 < cap $5.00: max(reported, cap)
         se.ClaudeBuilder("x", "claude-opus-5-5", b, exec_fn=lambda cmd, cwd, timeout, env=None: (0, "not json", ""))(it, "/s")
-        self.assertAlmostEqual(b.spent, 1.25 + 4.37)  # no usage reported: the cap (half of $8.75, floored) is charged
+        self.assertAlmostEqual(b.spent, 5.0 + 2.5)  # no usage reported: the cap (half of $5.00) is charged
         with self.assertRaises(se.LiveDisabled): se.ClaudeBuilder("x", "claude-opus-5-5", se.Budget(5))(it, "/s")
         with self.assertRaises(se.EvalError): se.ClaudeBuilder("x", "m", se.Budget(0.01), exec_fn=fx)(it, "/s")
         spec, _ = self.spec(evals=evals_doc(human=False))
@@ -300,14 +300,16 @@ class TestIsolation(Base):
                                    "run-1", "outputs", "transcript.json"))
             self.assertIn("isolation:", t["error"])
         e = se.ClaudeCodeEngine()
-        self.assertIn("skills loaded in without_skill run", e.isolation_problems({"init": {"skills": ["x"], "plugins": []}}, False, "b", [])[0])
-        self.assertEqual(e.isolation_problems({"init": {"skills": [], "plugins": []}}, False, "b", []), [])
+        init = lambda skills: {"init": {"skills": skills, "plugins": [], "apiKeySource": "none"}}
+        self.assertIn("skills loaded in without_skill run", e.isolation_problems(init(["x"]), False, "b", [])[0])
+        self.assertEqual(e.isolation_problems(init([]), False, "b", []), [])
 
     def test_sandbox_removed_when_the_cli_raises(self):
         spec, _ = self.spec(evals=evals_doc(human=False))
         def boom(cmd, cwd, timeout, env=None): raise RuntimeError("crash")
-        with self.assertRaises(RuntimeError):
-            se.run_iteration(spec, self.ws, [se.ClaudeCodeEngine("claude-opus-5-5", exec_fn=boom)], runs=1, log=quiet)
+        n = se.run_iteration(spec, self.ws, [se.ClaudeCodeEngine("claude-opus-5-5", exec_fn=boom)], runs=1, log=quiet)
+        self.assertIn("call failed after launch (RuntimeError)",  # round 5: recorded and charged, not re-raised
+                      rjson(os.path.join(self.ws, "iteration-%d" % n, "plan.json"))["stopped"])
         self.assertEqual(os.listdir(self.runs), [])
 
     def test_discovery_survives_dangling_and_symlinked_skills(self):

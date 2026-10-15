@@ -14,7 +14,7 @@ variables are refused and scrubbed from every child, and costs are API-equivalen
 Usage: python3 skill_eval.py <validate|estimate|plan|run|grade|calibrate|report|approve|register|snapshot|loop> <skill> ...
        (also reachable as: python3 eva.py eval <subcommand> ...)
 """
-import argparse, datetime, hashlib, json, math, os, random, re, shutil, subprocess, sys, tempfile, time
+import argparse, datetime, hashlib, json, math, os, platform, random, re, shutil, subprocess, sys, tempfile, time
 
 LAYERS = ("static", "llm", "human")
 BASELINES = {"none": "without_skill", "old": "old_skill"}  # skill-creator configuration names
@@ -254,7 +254,19 @@ def live_exec(cmd, cwd, timeout, env=None):
 # ---------- subscription auth (README "Eval isolation" > "Subscription auth") ----------
 # Variables that switch Claude Code / Codex to API-key (per-token) billing. Their presence blocks --live (preflight)
 # and they are removed from every child environment anyway. Values are never read, printed or logged.
-API_KEY_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY")
+API_KEY_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY",
+               # other credential variables from https://code.claude.com/docs/en/env-vars (read 2026-10-15)
+               "ANTHROPIC_AWS_API_KEY", "ANTHROPIC_FOUNDRY_API_KEY", "ANTHROPIC_FOUNDRY_AUTH_TOKEN",
+               "AWS_BEARER_TOKEN_BEDROCK", "ANTHROPIC_IDENTITY_TOKEN")
+# Variables that route Claude Code away from the claude.ai subscription (third-party provider, gateway/proxy base URL,
+# credential profile/federation selectors). Same page, plus the "withheld" list of
+# https://code.claude.com/docs/en/server-managed-settings (read 2026-10-15). Refused and scrubbed like API keys.
+PROVIDER_ENV = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_MANTLE",
+                "CLAUDE_CODE_USE_ANTHROPIC_AWS", "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST", "ANTHROPIC_BASE_URL",
+                "ANTHROPIC_BEDROCK_BASE_URL", "ANTHROPIC_BEDROCK_MANTLE_BASE_URL", "ANTHROPIC_AWS_BASE_URL",
+                "ANTHROPIC_VERTEX_BASE_URL", "ANTHROPIC_VERTEX_PROJECT_ID", "ANTHROPIC_FOUNDRY_BASE_URL",
+                "ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_PROFILE", "ANTHROPIC_CONFIG_DIR", "ANTHROPIC_FEDERATION_RULE_ID")
+NON_SUBSCRIPTION_ENV = API_KEY_ENV + PROVIDER_ENV
 # `--json` and the method values "claude.ai" / "api_key" are from the Claude Code changelog
 # (~/.claude/cache/changelog.md: "Added `configDirectory` to the output of `claude auth status --json`", "it now
 # reports `api_key`"). The JSON key that holds the method is not documented there (추정), so every string value under
@@ -269,13 +281,14 @@ ACTUAL_SPEND_NOTE = ("not metered: subscription runs (claude.ai plan / ChatGPT p
                      "limits and any extra-usage charges are visible only in your account")
 
 def scrub_env(env):
-    """Copy of env without the API-key variables (API_KEY_ENV)."""
-    return {k: v for k, v in dict(env).items() if k not in API_KEY_ENV}
+    """Copy of env without the API-key and provider-routing variables (NON_SUBSCRIPTION_ENV)."""
+    return {k: v for k, v in dict(env).items() if k not in NON_SUBSCRIPTION_ENV}
 
 def api_key_env_problems(environ=None):
     environ = os.environ if environ is None else environ
-    return ["%s is set (value not shown): API-key auth is not allowed, eval runs use subscription auth only; unset it"
-            % k for k in API_KEY_ENV if k in environ]
+    return ["%s is set (value not shown): %s is not allowed, eval runs use subscription auth only; unset it"
+            % (k, "API-key auth" if k in API_KEY_ENV else "non-subscription provider routing")
+            for k in NON_SUBSCRIPTION_ENV if k in environ]
 
 def run_auth_status(cmd, timeout=30):
     """Runs a local status command (no model call, nothing billed) with the same scrubbed env the runs get. Only
@@ -353,25 +366,80 @@ def codex_auth_problems():
 
 # Claude settings files that can supply auth (apiKeyHelper, env). Isolated runs use --setting-sources project,local:
 # <cwd>/.claude/settings.json and settings.local.json; whether ancestors of the cwd are also read is not verified (추정),
-# so every ancestor is checked too. Managed settings always apply; the paths are from
-# https://code.claude.com/docs/en/settings as remembered, not re-read this session (추정) — checked if present.
+# so every ancestor is checked too. Managed sources always apply. From https://code.claude.com/docs/en/managed-settings
+# (read 2026-10-15): managed-settings.json plus every non-hidden *.json in managed-settings.d/ next to it
+# (/Library/Application Support/ClaudeCode/ on macOS, /etc/claude-code/ on Linux and WSL); the macOS configuration
+# profile domain com.anthropic.claudecode; Windows HKLM/HKCU registry values (cannot be read here: fail closed); and
+# server-managed settings, cached at <config dir>/remote-settings.json (docs/en/server-managed-settings).
 CLAUDE_SETTINGS_FILES = ("settings.json", "settings.local.json")
 CLAUDE_MANAGED_SETTINGS = ("/Library/Application Support/ClaudeCode/managed-settings.json",
                            "/etc/claude-code/managed-settings.json")
+# Where macOS stores a configuration profile's managed preferences for the domain: the standard macOS location, not
+# named on the Claude Code pages (추정). Parsed with plistlib when present; an unreadable file fails closed.
+CLAUDE_MDM_PLIST_DIR = "/Library/Managed Preferences"
+CLAUDE_MDM_DOMAIN = "com.anthropic.claudecode"
+CLAUDE_REMOTE_SETTINGS = "remote-settings.json"
+
+def claude_config_dir(environ=None):
+    """The effective Claude config dir: $CLAUDE_CONFIG_DIR, else ~/.claude (docs/en/env-vars)."""
+    environ = os.environ if environ is None else environ
+    return environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
+
+def claude_managed_sources():
+    """(settings files to check, problems). Every endpoint-managed source we can read, and a problem for each one
+    that exists but cannot be checked (fail closed)."""
+    files, probs = [], []
+    for p in CLAUDE_MANAGED_SETTINGS:
+        files.append(p)
+        d = os.path.join(os.path.dirname(p), "managed-settings.d")
+        if os.path.lexists(d):
+            try:
+                names = sorted(os.listdir(d))
+            except OSError as ex:
+                probs.append("claude: %s exists but cannot be listed (%s); cannot verify managed settings"
+                             % (d, type(ex).__name__)); continue
+            files += [os.path.join(d, n) for n in names if n.endswith(".json") and not n.startswith(".")]
+    plist = CLAUDE_MDM_DOMAIN + ".plist"
+    if os.path.isdir(CLAUDE_MDM_PLIST_DIR):  # <dir>/<plist> (device) and <dir>/<user>/<plist> (per user)
+        try:
+            top = sorted(os.listdir(CLAUDE_MDM_PLIST_DIR))
+        except OSError as ex:
+            top = []
+            probs.append("claude: %s cannot be listed (%s); cannot verify a %s configuration profile"
+                         % (CLAUDE_MDM_PLIST_DIR, type(ex).__name__, CLAUDE_MDM_DOMAIN))
+        for n in top:
+            p = os.path.join(CLAUDE_MDM_PLIST_DIR, n)
+            if n == plist: files.append(p)
+            elif os.path.isdir(p):
+                if not os.access(p, os.R_OK | os.X_OK):
+                    probs.append("claude: %s cannot be read; cannot verify a %s configuration profile" % (p, CLAUDE_MDM_DOMAIN))
+                else:
+                    files.append(os.path.join(p, plist))
+    if sys.platform.startswith(("win", "cygwin")) or "microsoft" in platform.release().lower():
+        probs.append("claude: Windows/WSL registry policies (HKLM/HKCU\\SOFTWARE\\Policies\\ClaudeCode) cannot be "
+                     "checked by this harness; refusing live Claude calls")
+    return files, probs
+
+def _read_settings(p):
+    if p.endswith(".plist"):
+        import plistlib
+        with open(p, "rb") as f: return plistlib.load(f)
+    return rjson(p, {})
 
 def claude_settings_auth_problems(paths):
-    """API-key auth configured in any of these Claude settings files: apiKeyHelper or an API_KEY_ENV entry in "env"
-    (key names only, values never read into messages). A file that exists but cannot be parsed fails closed."""
+    """API-key auth or provider routing configured in any of these Claude settings files: apiKeyHelper or a
+    NON_SUBSCRIPTION_ENV entry in "env" (key names only, values never read into messages). A file that exists but
+    cannot be parsed fails closed."""
     out = []
     for p in paths:
-        if not os.path.isfile(p): continue
+        if not os.path.lexists(p): continue
         try:
-            st = rjson(p, {})
-        except (ValueError, OSError, UnicodeDecodeError):
+            st = _read_settings(p)
+        except Exception:  # unreadable, not JSON/plist, broken symlink: cannot be verified
             out.append("claude: %s exists but is not readable JSON; cannot verify it sets no API-key auth" % p); continue
         if not isinstance(st, dict): continue
         env = st.get("env") if isinstance(st.get("env"), dict) else {}
-        keys = (["apiKeyHelper"] if "apiKeyHelper" in st else []) + sorted(k for k in env if k in API_KEY_ENV)
+        keys = (["apiKeyHelper"] if "apiKeyHelper" in st else []) + sorted(k for k in env if k in NON_SUBSCRIPTION_ENV)
         if keys:
             out.append("claude: %s configures API-key auth (%s; values not read); eval runs use subscription auth only"
                        % (p, ", ".join(keys)))
@@ -379,6 +447,39 @@ def claude_settings_auth_problems(paths):
 
 def claude_project_settings(dirs):
     return [os.path.join(d, ".claude", f) for d in dirs for f in CLAUDE_SETTINGS_FILES]
+
+def claude_launch_problems(cwd, config_dir=None):
+    """Everything a `claude -p` started in cwd could load auth from and that env scrubbing does not cover: project /
+    local settings of cwd and every ancestor, every managed source, and the server-managed cache of the config dir
+    the call uses. Checked before every Claude launch (executor, grader, builder); nothing is spent on a refusal."""
+    files, probs = claude_managed_sources()
+    cfg = config_dir or claude_config_dir()
+    return api_key_env_problems() + probs + claude_settings_auth_problems(
+        claude_project_settings(ancestors(cwd)) + files + [os.path.join(cfg, CLAUDE_REMOTE_SETTINGS)])
+
+# One sanitized launch shape for every claude -p call (executor, grader, builder): project/local setting sources only,
+# no MCP servers, bundled skills off, auto memory and claude.ai MCP servers off, API-key/provider variables scrubbed.
+CLAUDE_SETTINGS_JSON = json.dumps({"disableBundledSkills": True})
+CLAUDE_CHILD_ENV = {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "ENABLE_CLAUDEAI_MCP_SERVERS": "false"}
+
+def claude_isolation_args():
+    return ["--setting-sources", "project,local", "--strict-mcp-config", "--settings", CLAUDE_SETTINGS_JSON]
+
+def claude_child_env(config_dir=None):
+    env = dict(os.environ, **CLAUDE_CHILD_ENV)
+    if config_dir: env["CLAUDE_CONFIG_DIR"] = config_dir
+    return scrub_env(env)
+
+def launch_claude(exec_fn, cmd, cwd, timeout, env=None):
+    """Grader and builder launch path: refuses (EvalError, before the call) unless cmd carries the isolation args and
+    cwd passes claude_launch_problems; the child gets claude_child_env(). The executor uses the same args, env and
+    checks through its Sandbox."""
+    iso = claude_isolation_args()
+    if cmd[:2] != ["claude", "-p"] or not any(cmd[i:i + len(iso)] == iso for i in range(len(cmd))):
+        raise EvalError("refusing a claude call without the isolation arguments")
+    probs = claude_launch_problems(cwd)
+    if probs: raise EvalError("claude launch refused: " + " | ".join(probs))
+    return exec_fn(cmd, cwd, timeout, env=claude_child_env() if env is None else env)
 
 def new_result():
     return {"final": "", "tool_calls": [], "input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0,
@@ -412,6 +513,9 @@ class Engine:
         must be one safe path component and the destination must stay inside the skills folder of the sandbox."""
         if not safe_name(name):
             raise EvalError("skill name %r is not a safe path component; refusing to install it" % (name,))
+        bad = escaping_links(skill_dir)
+        if bad: raise EvalError("skill folder %s has symlinks that leave it (or dangle): %s; refusing to copy them "
+                                "into the run" % (skill_dir, ", ".join(bad[:5])))
         dst = ensure_inside(os.path.join(workdir, self.skills_rel), os.path.join(workdir, self.skills_rel, name))
         shutil.copytree(skill_dir, dst, ignore=shutil.ignore_patterns(*SKILL_IGNORE))
         return dst
@@ -421,6 +525,9 @@ class Engine:
     def sandbox_env(self, root):
         """Environment for one isolated run whose sandbox folder is root (see README "Eval isolation")."""
         return scrub_env(os.environ)
+    def remove_credentials(self, root):
+        """Deletes and verifies the removal of any credential copy in the sandbox; None or an error string."""
+        return None
     def auth_record(self):
         """How the run authenticates (names only, never values)."""
         return {}
@@ -439,54 +546,89 @@ class Engine:
     def after_run(self, root):
         return []
     def run(self, prompt, workdir, with_skill, budget_usd=None, env=None):
+        """A call that raises after it may have started (timeout, crash, ...) is not re-raised: it comes back as an
+        error result with no usage and launch_failed set, so the caller charges the cap/bound, records it and stops.
+        LiveDisabled is raised before anything starts and passes through."""
         cmd = self.command(prompt, with_skill, budget_usd)
         t0, start = time.monotonic(), now_iso()
-        rc, out, err = self.exec_fn(cmd, workdir, self.timeout, env=env)
+        failed = None
+        try:
+            rc, out, err = self.exec_fn(cmd, workdir, self.timeout, env=env)
+        except LiveDisabled:
+            raise
+        except Exception as ex:
+            rc, out, err, failed = None, "", "", "call failed after launch (%s)" % type(ex).__name__
         res = self.parse(out or "")
         res.update(returncode=rc, stderr_tail=(err or "")[-2000:], duration_ms=int((time.monotonic() - t0) * 1000),
-                   executor_start=start, executor_end=now_iso(), command=cmd)
-        if rc != 0 and not res["error"]: res["error"] = "exit %s" % rc
+                   executor_start=start, executor_end=now_iso(), command=cmd, launch_failed=failed)
+        if failed: res["error"] = failed
+        elif rc != 0 and not res["error"]: res["error"] = "exit %s" % rc
         return res
 
 class ClaudeCodeEngine(Engine):
     """claude -p (https://code.claude.com/docs/en/headless, /cli-reference). Skill on: copied to
     <sandbox>/work/.claude/skills/<name>/ (project skill). Skill off: --disable-slash-commands ("Disable all skills").
     Both: --setting-sources project,local (user skills under ~/.claude/skills are the "user" source), no MCP servers,
-    bundled skills off. HOME and CLAUDE_CONFIG_DIR are left alone: the macOS Keychain login is keyed to the config
-    dir, so changing it would lose the login (code.claude.com/docs/en/authentication)."""
+    bundled skills off. Config dir: with CLAUDE_CODE_OAUTH_TOKEN exported, every run gets its own empty
+    CLAUDE_CONFIG_DIR (<sandbox>/claude_config), so no user skill, synced skill, plugin, user setting or server-managed
+    cache exists for it. Without the token, HOME and CLAUDE_CONFIG_DIR are left alone (the macOS Keychain login is
+    keyed to the config dir) and the run is refused before launch when the config dir holds a skill source that
+    --setting-sources is not documented to hide (claude.ai synced skills, plugin skills)."""
     name, skills_rel, has_call_cap = "claude", ".claude/skills", True
-    SETTINGS = json.dumps({"disableBundledSkills": True})
-    ENV = {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "ENABLE_CLAUDEAI_MCP_SERVERS": "false"}
+    SETTINGS, ENV = CLAUDE_SETTINGS_JSON, CLAUDE_CHILD_ENV
     def command(self, prompt, with_skill, budget_usd=None):
-        cmd = ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose", "--no-session-persistence",
-               "--setting-sources", "project,local", "--strict-mcp-config", "--settings", self.SETTINGS]
+        cmd = ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose", "--no-session-persistence"]
+        cmd += claude_isolation_args()
         if self.model: cmd += ["--model", self.model]
         if budget_usd is not None: cmd += ["--max-budget-usd", "%.2f" % budget_usd]
         if not with_skill: cmd += ["--disable-slash-commands"]
         return cmd + self.extra_args
     def sandbox_env(self, root):
         """Subscription auth from the user's own session: CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token`) is passed
-        through only if already exported, otherwise the CLI reads the Keychain login of the unchanged HOME /
-        CLAUDE_CONFIG_DIR. The harness never writes or logs a token. API-key variables are removed."""
-        return scrub_env(dict(os.environ, **self.ENV))
+        through only if already exported (then with an empty per-run CLAUDE_CONFIG_DIR), otherwise the CLI reads the
+        Keychain login of the unchanged HOME / CLAUDE_CONFIG_DIR. The harness never writes or logs a token. API-key
+        and provider-routing variables are removed."""
+        if "CLAUDE_CODE_OAUTH_TOKEN" not in os.environ: return claude_child_env()
+        cfg = os.path.join(root, "claude_config"); os.makedirs(cfg, mode=0o700)
+        return claude_child_env(cfg)
     def auth_record(self):
-        return {"billing": BILLING, "method": "CLAUDE_CODE_OAUTH_TOKEN (env, value not logged)"
-                if "CLAUDE_CODE_OAUTH_TOKEN" in os.environ else "claude.ai login of the current user session (Keychain)"}
+        return {"billing": BILLING, "method": "CLAUDE_CODE_OAUTH_TOKEN (env, value not logged), empty per-run "
+                "CLAUDE_CONFIG_DIR" if "CLAUDE_CODE_OAUTH_TOKEN" in os.environ
+                else "claude.ai login of the current user session (Keychain)"}
     def sandbox_problems(self, root, work, skill_name, with_skill):
-        """Plus: no project/local settings file the run can load (the cwd's, e.g. from a fixture, or an ancestor's)
-        and no managed settings file may configure API-key auth; API-key env scrubbing would not cover those."""
+        """Before launch: the project skill set (Engine), no auth/provider setting in any source the run can load
+        (claude_launch_problems: cwd + ancestors, managed sources, the server-managed cache of the config dir it
+        uses), no custom command files in the cwd or an ancestor, and no user-level skill source that is not provably
+        hidden (see the class docstring)."""
         out = Engine.sandbox_problems(self, root, work, skill_name, with_skill)
-        return out + claude_settings_auth_problems(claude_project_settings([work] + ancestors(root))
-                                                   + list(CLAUDE_MANAGED_SETTINGS))
+        cfg = os.path.join(root, "claude_config")
+        own = os.path.isdir(cfg)
+        for a in ancestors(work):
+            cd = os.path.join(a, ".claude", "commands")
+            if os.path.isdir(cd) and any(f.endswith(".md") for _, _, fn in os.walk(cd) for f in fn):
+                out.append("custom command files in %s would load like skills" % cd)
+        if own:
+            hits = claude_user_skills(cfg, config_dir=True)
+            if hits: out.append("per-run config dir %s is not empty: %s" % (cfg, sorted(n for n, _ in hits)))
+        else:
+            out += claude_unhidden_skill_problems(claude_config_dir())
+        return out + claude_launch_problems(work, cfg if own else None)
     def isolation_problems(self, res, with_skill, skill_name, user_names):
-        """From the stream-json system/init event: an explicit empty plugin list, and a skill set that is exactly
-        {skill under test} (with_skill) or empty (without_skill); any extra skill, recognized or not, is a leak. The
-        init field names are (추정) from the Agent SDK docs; if absent we fail closed."""
+        """From the stream-json system/init event: apiKeySource "none" (docs/en/agent-sdk/typescript ApiKeySource:
+        "No API key. The session authenticates another way, such as a claude.ai login"), an explicit empty plugin
+        list, and a skill set that is exactly {skill under test} (with_skill) or empty (without_skill); any extra
+        skill, recognized or not, is a leak. This runs after the call, as an extra check: init lists user-invocable
+        skills only, so the sources are enforced before launch (sandbox_problems). Missing fields fail closed."""
         init = res.get("init")
         if not isinstance(init, dict): return ["no system/init event: cannot verify which skills were loaded"]
         if not isinstance(init.get("skills"), list): return ["system/init has no skills list: cannot verify isolation"]
         names = {str(s.get("name") if isinstance(s, dict) else s) for s in init["skills"]}
         out = []
+        src = init.get("apiKeySource")
+        if src != "none":
+            out.append("system/init apiKeySource is %s, expected \"none\" (subscription login): %s" % (
+                repr(_shown(src)) if isinstance(src, str) else "missing",
+                "the run may have used an API key" if isinstance(src, str) else "cannot verify subscription auth"))
         if not isinstance(init.get("plugins"), list):
             out.append("system/init has no plugins list: cannot verify that no plugin was loaded")
         elif init["plugins"]:
@@ -505,7 +647,7 @@ class ClaudeCodeEngine(Engine):
             except ValueError: continue
             if not isinstance(ev, dict): continue
             if ev.get("type") == "system" and ev.get("subtype") == "init":
-                r["init"] = {"skills": ev.get("skills"), "plugins": ev.get("plugins")}
+                r["init"] = {"skills": ev.get("skills"), "plugins": ev.get("plugins"), "apiKeySource": ev.get("apiKeySource")}
             elif ev.get("type") == "assistant":
                 for b in (ev.get("message") or {}).get("content") or []:
                     if not isinstance(b, dict): continue
@@ -581,6 +723,32 @@ class CodexEngine(Engine):
         return ["codex changed or removed the read-only auth.json copy in its isolated CODEX_HOME (token refresh?). "
                 "The copy was deleted with the sandbox; your real auth.json was not touched but may be superseded: "
                 "run `codex login status` (and `codex login` if needed) before the next run"]
+    def remove_credentials(self, root, attempts=3):
+        """Deletes <sandbox>/codex_home/auth.json on its own, before the rest of the sandbox, and verifies it is gone.
+        A failed unlink is retried after making the folder writable; as a last resort the copy is made writable and
+        truncated, so no token stays on disk even when the file itself cannot be removed."""
+        ch = os.path.join(root, "codex_home")
+        p = ensure_inside(root, os.path.join(ch, "auth.json"))
+        err = None
+        for _ in range(attempts):
+            if not os.path.lexists(p): return None
+            try:
+                os.unlink(p)
+            except OSError as ex:
+                err = "%s: %s" % (type(ex).__name__, ex.strerror or ex)
+                try: os.chmod(ch, 0o700)
+                except OSError: pass
+        if not os.path.lexists(p): return None
+        emptied = False
+        try:
+            if not os.path.islink(p):
+                os.chmod(p, 0o600)
+                with open(p, "w"): pass
+                emptied = os.path.getsize(p) == 0
+        except OSError:
+            pass
+        return ("the Codex auth.json copy %s could not be deleted (%s)%s: delete it yourself" % (
+            p, err or "still present", "; its content was erased" if emptied else "; IT MAY STILL HOLD A TOKEN"))
     def command(self, prompt, with_skill, budget_usd=None):
         cmd = ["codex", "exec", "--json", "--skip-git-repo-check", "--ephemeral", "--sandbox", "workspace-write"]
         if self.model: cmd += ["-m", self.model]
@@ -641,16 +809,47 @@ def skills_under(root, max_depth):
 def real_codex_home():
     return os.environ.get("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex")
 
-def claude_user_skills(home):
-    """[(name, path)] of user-level Claude skills: ~/.claude/skills (incl. claude.ai synced/<id>/<name>) and plugins."""
-    out = skills_under(os.path.join(home, ".claude", "skills"), 3)
-    pc = os.path.join(home, ".claude", "plugins")
+def claude_user_skills(base, config_dir=False):
+    """[(name, path)] of user-level Claude skills: <config>/skills (incl. claude.ai synced/<id>/<name>) and plugins.
+    base is a home folder (config = base/.claude) or, with config_dir=True, the config dir itself."""
+    cfg = base if config_dir else os.path.join(base, ".claude")
+    out = skills_under(os.path.join(cfg, "skills"), 3)
+    pc = os.path.join(cfg, "plugins")
     for root, dirs, _ in os.walk(pc, onerror=lambda e: None) if os.path.isdir(pc) else []:
         if os.path.basename(root) == "skills":
             out += [(d, os.path.join(root, d)) for d in dirs if os.path.isfile(os.path.join(root, d, "SKILL.md"))]
             dirs[:] = []
         if root.count(os.sep) - pc.count(os.sep) > 6: dirs[:] = []
     return out
+
+def claude_unhidden_skill_problems(cfg):
+    """Skill sources in the user's config dir that --setting-sources project,local is not documented to hide. The
+    plain <cfg>/skills/<name> folders are the "user" source (docs/en/agent-sdk/skills: include 'user' "to keep your
+    personal skills"), so they are hidden; claude.ai synced skills and plugin skills are not covered by that sentence
+    (추정 either way), so they block a run that shares the user's config dir. Fix: export CLAUDE_CODE_OAUTH_TOKEN
+    (`claude setup-token`), which gives every run an empty config dir."""
+    top = os.path.normpath(os.path.join(cfg, "skills"))  # logical path: a symlinked <cfg>/skills/<name> is still plain
+    hits = sorted({"%s (%s)" % (n, p) for n, p in claude_user_skills(cfg, config_dir=True)
+                   if os.path.dirname(os.path.normpath(p)) != top})
+    if not hits: return []
+    return ["claude: %d synced/plugin skill(s) in %s may load even with --setting-sources project,local (not "
+            "verified): %s; export CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) so each run gets an empty "
+            "config dir" % (len(hits), cfg, ", ".join(hits[:5]) + (" ..." if len(hits) > 5 else ""))]
+
+def escaping_links(root):
+    """Paths (relative to root) of symlinks a copy of root would follow out of root, or that dangle. SKILL_IGNORE
+    entries are not copied, so they are not checked."""
+    r, bad, ign = os.path.realpath(root), [], shutil.ignore_patterns(*SKILL_IGNORE)
+    for dp, dn, fn in os.walk(root):
+        skip = ign(dp, dn + fn)
+        dn[:] = [d for d in dn if d not in skip]
+        for n in [d for d in dn] + [f for f in fn if f not in skip]:
+            p = os.path.join(dp, n)
+            if not os.path.islink(p): continue
+            t = os.path.realpath(p)
+            if not os.path.exists(t) or (t != r and not t.startswith(r.rstrip(os.sep) + os.sep)):
+                bad.append(os.path.relpath(p, root))
+    return sorted(bad)
 
 RMTREE_ATTEMPTS = 3
 
@@ -682,14 +881,20 @@ class Sandbox:
         self.root = tempfile.mkdtemp(prefix="skill-eval-%s-" % engine.name, dir=self.run_root)  # mode 0700
         try:
             self.work = os.path.join(self.root, "work"); os.makedirs(self.work)
-            for f in case.get("files") or []:
-                dst = os.path.join(self.work, f); os.makedirs(os.path.dirname(dst), exist_ok=True)
-                shutil.copy2(os.path.join(spec["skill_dir"], f), dst)
+            for f in case.get("files") or []:  # a fixture must resolve (symlinks included) inside the skill folder
+                src = os.path.join(spec["skill_dir"], f)
+                try:
+                    ensure_inside(spec["skill_dir"], src)
+                except EvalError:
+                    raise EvalError("fixture %r resolves outside the skill folder %s; refusing to copy it"
+                                    % (f, spec["skill_dir"]))
+                dst = ensure_inside(self.work, os.path.join(self.work, f)); os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
             self.name, self.with_skill = spec["skill_name"], bool(skill_path)
             if skill_path: engine.install_skill(self.work, skill_path, self.name)
             self.env = engine.sandbox_env(self.root)
         except BaseException as ex:  # never leave a half-built sandbox (it may hold the auth copy)
-            left = remove_tree(self.run_root, self.root)
+            left = "; ".join(x for x in (engine.remove_credentials(self.root), remove_tree(self.run_root, self.root)) if x)
             if left and isinstance(ex, Exception): raise EvalError("%s; and %s" % (ex, left)) from ex
             if left: print("WARNING: " + left, file=sys.stderr)
             raise
@@ -706,14 +911,15 @@ class Sandbox:
         ign = lambda d, names: [self.name] if os.path.realpath(d) == skills else []
         shutil.copytree(self.work, dst, symlinks=True, ignore=ign)
     def cleanup(self):
-        """Always removes the sandbox (including the Codex auth copy) and verifies it is gone; returns after_run
-        problems plus a removal failure (fatal for the caller: the iteration stops and reports it)."""
+        """Always removes the sandbox and verifies it is gone: first the credential copy on its own (Codex auth.json,
+        after after_run compared it), then the rest. Returns after_run problems plus any removal failure (fatal for
+        the caller: the iteration stops and reports it)."""
         problems = []
         try:
             problems = self.engine.after_run(self.root)
         finally:
-            left = remove_tree(self.run_root, self.root)
-            if left: problems = list(problems) + [left]
+            for left in (self.engine.remove_credentials(self.root), remove_tree(self.run_root, self.root)):
+                if left: problems = list(problems) + [left]
         return problems
 
 def isolated_run(eng, prompt, spec, case, skill_path, run_dir, run_root, cap, user_names, keep_workdir):
@@ -764,27 +970,45 @@ class LLMGrader:
         self.model, self.exec_fn, self.timeout, self.budget = model, exec_fn or live_exec, timeout, budget
         self.prices = prices or {}
         self.usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0, "api_equivalent_usd": 0.0}
+    def command(self, prompt, schema, cap):
+        cmd = ["claude", "-p", prompt, "--model", self.model, "--output-format", "json", "--json-schema",
+               json.dumps(schema), "--tools", "", "--no-session-persistence", "--disable-slash-commands"]
+        cmd += claude_isolation_args()
+        return cmd + (["--max-budget-usd", "%.2f" % cap] if cap is not None else [])
+    def _charge_unknown(self, fallback):
+        self.usage["calls"] += 1; self.usage["api_equivalent_usd"] += fallback
+        if self.budget is not None: self.budget.charge(fallback)
     def _call(self, prompt, schema):
         cap = None
         if self.budget is not None and self.budget.finite():
             cap = self.budget.claude_cap()
             if cap < 0.01:
                 raise EvalError("budget exhausted ($%.2f of $%.2f) before grader call" % (self.budget.spent, self.budget.limit))
-        cmd = ["claude", "-p", prompt, "--model", self.model, "--output-format", "json", "--json-schema",
-               json.dumps(schema), "--tools", "", "--no-session-persistence"]
-        if cap is not None: cmd += ["--max-budget-usd", "%.2f" % cap]
-        rc, out, err = self.exec_fn(cmd, os.getcwd(), self.timeout)
+        kind = "pairwise" if "winner" in schema.get("properties", {}) else "grader"
+        bound = call_bound("grader", self.model, kind, self.prices, DEFAULT_TOKENS) or 0.0
+        fallback = cap if cap is not None else bound  # what an unmetered call is charged
+        # A fresh empty cwd (no project settings, CLAUDE.md or skills of the folder grading was started from).
+        cwd = tempfile.mkdtemp(prefix="skill-eval-grader-")
+        try:
+            try:
+                rc, out, err = launch_claude(self.exec_fn, self.command(prompt, schema, cap), cwd, self.timeout)
+            except (EvalError, LiveDisabled):
+                raise  # refused before launch: nothing spent
+            except Exception as ex:
+                self._charge_unknown(fallback)
+                raise EvalError("grader call failed after launch (%s); charged $%.2f and stopped" % (type(ex).__name__, fallback))
+        finally:
+            left = remove_tree(os.path.dirname(cwd), cwd)
+            if left: print("WARNING: " + left, file=sys.stderr)
         try: data = json.loads(out)
         except ValueError:
-            if cap is not None:  # usage unknown: charge the cap
-                self.usage["calls"] += 1; self.usage["api_equivalent_usd"] += cap
-                if self.budget is not None: self.budget.charge(cap)
+            self._charge_unknown(fallback)  # usage unknown: charge the cap
             raise EvalError("grader returned non-JSON (exit %s): %s" % (rc, (err or out or "")[-300:]))
         if not isinstance(data, dict): data = {}
         u = data.get("usage") or {}
         tin = int(u.get("input_tokens") or 0) + int(u.get("cache_read_input_tokens") or 0) + int(u.get("cache_creation_input_tokens") or 0)
         tout = int(u.get("output_tokens") or 0)
-        cost = api_equivalent(tin, tout, data.get("total_cost_usd"), price_for("grader", self.model, self.prices), cap or 0.0)[0]
+        cost = api_equivalent(tin, tout, data.get("total_cost_usd"), price_for("grader", self.model, self.prices), fallback)[0]
         self.usage["calls"] += 1
         self.usage["input_tokens"] += tin; self.usage["output_tokens"] += tout; self.usage["api_equivalent_usd"] += cost
         if self.budget is not None: self.budget.charge(cost)
@@ -964,14 +1188,19 @@ def preflight(spec, engines, run_root=None, home=None):
       should hide user skills (docs: the "user" source loads ~/.claude/skills), but whether the CLI flag hides already
       downloaded claude.ai synced skills and plugin skills is not verified (추정), so a same-named copy still blocks;
     - any API-key variable (API_KEY_ENV) in the environment: subscription auth only;
-    - claude: API-key auth (apiKeyHelper / API-key env entry) in ANY settings source a run could load: user
-      settings(.local).json, .claude/settings(.local).json of run_root and every ancestor, managed settings; the
-      sandbox's own work/.claude settings (fixtures) are checked again per run. Also an OAuth token in user env,
-      which --setting-sources would drop;
+    - claude, without CLAUDE_CODE_OAUTH_TOKEN (shared config dir): any claude.ai synced or plugin skill in the config
+      dir (claude_unhidden_skill_problems); with the token every run gets an empty config dir instead;
+    - any provider-routing variable (PROVIDER_ENV);
+    - claude: API-key auth or provider routing (apiKeyHelper / NON_SUBSCRIPTION_ENV env entry) in ANY settings source
+      a run could load: user settings(.local).json of the effective config dir, .claude/settings(.local).json of
+      run_root and every ancestor, every managed source (managed-settings.json + managed-settings.d, MDM profile,
+      registry: fail closed) and the server-managed cache; the sandbox's own work/.claude settings (fixtures) are
+      checked again per run. Also an OAuth token in user env, which --setting-sources would drop;
     - codex: skills in /etc/codex/skills (admin scope, cannot be hidden), and no file-based $CODEX_HOME/auth.json
       whose auth_mode is ChatGPT (only that field is read).
     `claude auth status` is checked in check_live_gates (it runs a CLI, so never in a dry run)."""
-    home, name = home or os.path.expanduser("~"), spec["skill_name"]
+    name = spec["skill_name"]
+    cfg = os.path.join(home, ".claude") if home else claude_config_dir()
     out = api_key_env_problems()
     root = os.path.realpath(run_root or tempfile.gettempdir())
     for e in engines:
@@ -983,15 +1212,21 @@ def preflight(spec, engines, run_root=None, home=None):
                 out.append("%s: %s has skills %s; every sandbox under %s would see them (use --run-root elsewhere)"
                            % (e, os.path.join(a, rel), sorted(n for n, _ in hits), root))
         if e == "claude":
-            for n_, p in claude_user_skills(home):
-                if n_ == name:
-                    out.append("claude: skill %r is also installed at %s; hiding it via --setting-sources is not "
-                               "verified, so it could sit next to the copy under test (move/rename it)" % (name, p))
-            user_settings = [os.path.join(home, ".claude", f) for f in CLAUDE_SETTINGS_FILES]
+            token = "CLAUDE_CODE_OAUTH_TOKEN" in os.environ  # then every run gets an empty config dir
+            if not token:
+                for n_, p in claude_user_skills(cfg, config_dir=True):
+                    if n_ == name:
+                        out.append("claude: skill %r is also installed at %s; hiding it via --setting-sources is not "
+                                   "verified, so it could sit next to the copy under test (move/rename it)" % (name, p))
+                out += claude_unhidden_skill_problems(cfg)
+            user_settings = [os.path.join(cfg, f) for f in CLAUDE_SETTINGS_FILES]
             # every settings source a run could load: user (dropped by --setting-sources, still refused), the
-            # project/local files of run_root and its ancestors, and managed settings (always loaded)
-            out += claude_settings_auth_problems(user_settings + [p for p in claude_project_settings(ancestors(root))
-                                                                  if p not in user_settings] + list(CLAUDE_MANAGED_SETTINGS))
+            # project/local files of run_root and its ancestors, every managed source (always loaded) and the
+            # server-managed cache of the effective config dir
+            files, mprobs = claude_managed_sources()
+            out += mprobs + claude_settings_auth_problems(
+                user_settings + [p for p in claude_project_settings(ancestors(root)) if p not in user_settings]
+                + files + [os.path.join(cfg, CLAUDE_REMOTE_SETTINGS)])
             try:
                 st = rjson(user_settings[0], {}) or {}
             except (ValueError, OSError, UnicodeDecodeError):
@@ -1055,13 +1290,14 @@ def guard_call(engine, kind, budget, prices, tokens):
 
 def api_equivalent(tin, tout, reported, price, fallback=0.0):
     """(USD, source) for one call. Usage tokens x API price come first; a CLI-reported cost only counts when it is
-    larger (a reported 0 never hides nonzero usage). With no usage and no positive reported cost, the call's
-    cap/bound (fallback) is charged as an upper bound. Shared by runs, the grader and the builder."""
+    larger (a reported 0 never hides nonzero usage). With no usage, the call's cap/bound (fallback) is the upper
+    bound: max(reported, fallback) is charged, so a small reported cost never undercuts it. Shared by runs, the
+    grader and the builder."""
     tok = call_cost((tin, tout), price) if (tin or tout) else None
     rep = float(reported) if isinstance(reported, (int, float)) and not isinstance(reported, bool) \
         and math.isfinite(reported) and reported > 0 else None
     if tok is not None and (rep is None or tok >= rep): return tok, "tokens_x_price"
-    if rep is not None: return rep, "cli_reported"
+    if rep is not None and (tok is not None or rep >= fallback): return rep, "cli_reported"
     return (fallback, "cap_charged") if fallback else (0.0, "unknown")
 
 def run_cost(res, engine, prices, fallback=0.0):
@@ -1146,7 +1382,8 @@ def run_iteration(spec, ws, engines, runs=DEFAULT_RUNS, baseline="none", old_ski
           "budget_enforcement": {e.name: budget_enforcement(e) for e in engines}})
     budget, prices, tokens = budget or Budget(float("inf")), prices or {}, tokens or DEFAULT_TOKENS
     spent0 = budget.spent
-    user_names = sorted({nm for nm, _ in claude_user_skills(os.path.expanduser("~"))}) if any(e.name == "claude" for e in engines) else []
+    user_names = sorted({nm for nm, _ in claude_user_skills(claude_config_dir(), config_dir=True)}) \
+        if any(e.name == "claude" for e in engines) else []
     stopped = None
 
     def one(eng, kind, prompt, case, cfg, rd, keep):
@@ -1157,6 +1394,10 @@ def run_iteration(spec, ws, engines, runs=DEFAULT_RUNS, baseline="none", old_ski
         api_eq = run_cost(res, eng, prices, fallback)
         budget.charge(api_eq[0])  # the budget limits API-equivalent cost
         write_run(rd, res, eng, cfg, prompt, eng.triggered(res, spec["skill_name"]), api_eq)
+        if res.get("launch_failed"):  # cleanup problems (e.g. a leftover sandbox) are reported with it
+            raise _Fatal("[%s %s] %s; charged $%.2f (%s) and stopped%s" % (
+                eng.name, cfg, res["launch_failed"], api_eq[0], api_eq[1],
+                "".join("; and " + x for x in fatal)))
         if fatal: raise _Fatal("isolation [%s %s]: %s" % (eng.name, cfg, "; ".join(fatal)))
         return res, None
 
@@ -1715,7 +1956,13 @@ class ClaudeBuilder:
     def command(self, prompt, cap):
         cmd = ["claude", "-p", prompt, "--model", self.model, "--output-format", "json", "--no-session-persistence",
                "--permission-mode", "acceptEdits", "--tools", self.TOOLS, "--disable-slash-commands"]
+        cmd += claude_isolation_args()
         return cmd + (["--max-budget-usd", "%.2f" % cap] if cap is not None else [])
+    def _record(self, it_dir, tin, tout, cost):
+        if self.budget is not None: self.budget.charge(cost)
+        self.usage["calls"] += 1; self.usage["input_tokens"] += tin
+        self.usage["output_tokens"] += tout; self.usage["api_equivalent_usd"] += cost
+        append_cost(it_dir, "builder", {"calls": 1, "input_tokens": tin, "output_tokens": tout, "api_equivalent_usd": cost})
     def __call__(self, it_dir, skill_dir):
         cap = None
         if self.budget is not None and self.budget.finite():
@@ -1729,7 +1976,15 @@ class ClaudeBuilder:
         prompt = ("%s\n\nYou are improving the agent skill in the current directory (SKILL.md and its files). "
                   "Do not edit evals/ (the eval set is approved separately; editing it stops the loop).\n\n"
                   "Eval report of the last iteration:\n%s\n" % (self.instructions.strip(), report))
-        rc, out, err = self.exec_fn(self.command(prompt, cap), skill_dir, self.timeout)
+        bound = call_bound("builder", self.model, "builder", self.prices, DEFAULT_TOKENS) or 0.0
+        fallback = cap if cap is not None else bound  # no usage: the cap
+        try:
+            rc, out, err = launch_claude(self.exec_fn, self.command(prompt, cap), skill_dir, self.timeout)
+        except (EvalError, LiveDisabled):
+            raise  # refused before launch: nothing spent
+        except Exception as ex:
+            self.calls += 1; self._record(it_dir, 0, 0, fallback)
+            raise EvalError("builder call failed after launch (%s); charged $%.2f and stopped" % (type(ex).__name__, fallback))
         self.calls += 1
         try: data = json.loads(out or "")
         except ValueError: data = {}
@@ -1737,12 +1992,8 @@ class ClaudeBuilder:
         u = data.get("usage") or {}
         tin = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
         cost = api_equivalent(tin, int(u.get("output_tokens") or 0), data.get("total_cost_usd"),
-                              price_for("builder", self.model, self.prices), cap or 0.0)[0]  # no usage: the cap
-        if self.budget is not None: self.budget.charge(cost)
-        self.usage["calls"] += 1; self.usage["input_tokens"] += tin
-        self.usage["output_tokens"] += int(u.get("output_tokens") or 0); self.usage["api_equivalent_usd"] += cost
-        append_cost(it_dir, "builder", {"calls": 1, "input_tokens": tin, "output_tokens": int(u.get("output_tokens") or 0),
-                                        "api_equivalent_usd": cost})
+                              price_for("builder", self.model, self.prices), fallback)[0]
+        self._record(it_dir, tin, int(u.get("output_tokens") or 0), cost)
         return rc
 
 def loop(spec, ws, engines, grader, builder, max_iterations=MAX_AUTO_ITERATIONS, runs=DEFAULT_RUNS, baseline="none",
@@ -1761,6 +2012,8 @@ def loop(spec, ws, engines, grader, builder, max_iterations=MAX_AUTO_ITERATIONS,
             if probs: return {"status": "gates-failed", "iteration": n, "problems": probs}
         n = run_iteration(spec, ws, engines, runs, baseline, old_skill, budget, prices, log=log, tokens=tokens,
                           run_root=run_root)
+        stopped = (rjson(os.path.join(ws, "iteration-%d" % n, "plan.json"), {}) or {}).get("stopped")
+        if stopped: return {"status": "run-stopped", "iteration": n, "error": stopped}  # no grading, no builder
         grade_iteration(spec, ws, n, grader, seed, log=log)
         if golden: wjson(os.path.join(ws, "iteration-%d" % n, "calibration.json"),
                          calibrate_metered(golden, grader, os.path.join(ws, "iteration-%d" % n)))

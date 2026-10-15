@@ -229,7 +229,8 @@ class TestApiEquivalentCost(Base):
         wjson(gp, {"examples": [{"prompt": "p", "output": "feat/x", "item": "names a branch", "label": True}]})
         se.calibrate_metered(gp, self.grader(cost=0.02), it)
         se.ClaudeBuilder("fix", "claude-opus-5-5", se.Budget(10.0),
-                         exec_fn=lambda cmd, cwd, timeout, env=None: (0, json.dumps({"total_cost_usd": 0.3}), ""))(it, spec["skill_dir"])
+                         exec_fn=lambda cmd, cwd, timeout, env=None: (0, json.dumps({"total_cost_usd": 0.3, "usage": {
+                             "input_tokens": 50000, "output_tokens": 5000}}), ""))(it, spec["skill_dir"])  # = $0.30
         other = se.cost_summary(it)["api_equivalent_usd"]["other"]
         self.assertEqual(other, {"calibrate": 0.02, "builder": 0.3})
 

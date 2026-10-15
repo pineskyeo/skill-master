@@ -105,7 +105,7 @@ class TestExactSkillSet(Base):
     """P1: extra unrecognized skills or a missing plugins field passed the init check."""
     def test_skill_set_must_be_exact_and_plugins_explicit(self):
         e = se.ClaudeCodeEngine()
-        ok = lambda skills, plugins=(): {"init": {"skills": list(skills), "plugins": list(plugins)}}
+        ok = lambda skills, plugins=(): {"init": {"skills": list(skills), "plugins": list(plugins), "apiKeySource": "none"}}
         self.assertEqual(e.isolation_problems(ok(["b"]), True, "b", []), [])
         self.assertEqual(e.isolation_problems(ok([{"name": "b"}]), True, "b", []), [])
         self.assertEqual(e.isolation_problems(ok([]), False, "b", []), [])
@@ -113,7 +113,8 @@ class TestExactSkillSet(Base):
         self.assertEqual(len(p), 1); self.assertIn("expected exactly ['b']", p[0]); self.assertIn("mystery", p[0])
         self.assertIn("user-level skills visible: ['u']", e.isolation_problems(ok(["b", "u"]), True, "b", ["u"])[0])
         self.assertTrue(e.isolation_problems(ok(["plugin:b"]), True, "b", []))  # a namespaced copy is not the test copy
-        for init in ({"skills": ["b"]}, {"skills": ["b"], "plugins": None}, {"skills": ["b"], "plugins": {}}):
+        for init in ({"skills": ["b"], "apiKeySource": "none"}, {"skills": ["b"], "plugins": None, "apiKeySource": "none"},
+                     {"skills": ["b"], "plugins": {}, "apiKeySource": "none"}):
             p = e.isolation_problems({"init": init}, True, "b", [])
             self.assertEqual(len(p), 1, init); self.assertIn("no plugins list", p[0])
 
@@ -160,8 +161,9 @@ class TestSandboxRemoval(Base):
         with mock.patch.object(se.shutil, "rmtree", lambda path, *a, **k: None), \
                 mock.patch.object(se.time, "sleep", lambda s: None):  # deletion silently does nothing
             n = se.run_iteration(spec, self.ws, [se.CodexEngine(exec_fn=fx)], runs=1, log=quiet)
-        left = os.listdir(self.runs)  # the condition being reported is real: the auth copy is still there
-        self.assertEqual(len(left), 1); self.assertTrue(os.path.isfile(os.path.join(self.runs, left[0], "codex_home", "auth.json")))
+        left = os.listdir(self.runs)  # the sandbox folder is really left over ...
+        self.assertEqual(len(left), 1)  # ... but round 5 removed the credential copy first, on its own
+        self.assertFalse(os.path.lexists(os.path.join(self.runs, left[0], "codex_home", "auth.json")))
         stopped = plan_of(self.ws, n)["stopped"]
         self.assertIn("could not be removed after 3 attempts", stopped); self.assertIn("auth.json", stopped)
         self.assertEqual(len(fx.calls), 1)  # the iteration stopped after the first run
@@ -177,7 +179,7 @@ class TestSandboxRemoval(Base):
             with self.assertRaises(se.EvalError) as cm2:
                 se.Sandbox(se.CodexEngine(), spec, {"files": []}, None, self.runs)
         stopped = plan_of(self.ws, n)["stopped"]  # the crash and the leftover sandbox are both reported
-        self.assertIn("crash", stopped); self.assertIn("could not be removed", stopped)
+        self.assertIn("RuntimeError", stopped); self.assertIn("could not be removed", stopped)
         self.assertIn("not ChatGPT", str(cm2.exception)); self.assertIn("could not be removed", str(cm2.exception))
 
     def test_remove_tree_refuses_paths_outside_root(self):
