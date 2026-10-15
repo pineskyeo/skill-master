@@ -46,6 +46,7 @@ class TestCsvCleanerRound16(unittest.TestCase):
         self.assertIn("claude --permission-mode (with_skill and without_skill): default", out.getvalue())
         self.assertIn("claude --allowedTools (with_skill and without_skill): Write,Edit," +
                       e.script_allow_rule("csv-cleaner"), out.getvalue())
+        self.assertIn("claude --disallowedTools (with_skill and without_skill): Monitor PowerShell", out.getvalue())
 
     def test_file_checks_reject_missing_modified_and_partial_outputs(self):
         src = "evals/files/events_large.csv"

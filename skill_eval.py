@@ -79,6 +79,7 @@ def budget_enforcement(engine_cls_or_obj):
 FORBIDDEN_EXTRA_ARGS = {"claude": ("--model", "--fallback-model", "--max-budget-usd", "--settings", "--setting-sources",
                                    "--plugin-dir", "--plugin-url", "--add-dir", "--mcp-config", "--effort",
                                    "--allowedTools", "--allowed-tools", "--dangerously-skip-permissions",
+                                   "--disallowedTools", "--disallowed-tools",
                                    "--allow-dangerously-skip-permissions", "--bare", "--safe-mode"),
                         "codex": ("-m", "--model", "-p", "--profile", "--oss", "-C", "--cd", "--add-dir")}
 
@@ -682,7 +683,7 @@ def claude_settings(skill_name=None, bash_gate=None):
             "skillOverrides": {n: "off" for n in claude_bundled_skills()["names"] if n != skill_name}}
     if bash_gate:
         settings["disableAllHooks"] = False
-        settings["hooks"] = {"PreToolUse": [{"matcher": "Bash|PowerShell", "hooks": [{
+        settings["hooks"] = {"PreToolUse": [{"matcher": "*", "hooks": [{
             "type": "command", "command": sys.executable,
             "args": [os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude_bash_gate.py"),
                      skill_name, bash_gate["script"], bash_gate["sha256"], bash_gate["python3"]],
@@ -905,7 +906,8 @@ class ClaudeCodeEngine(Engine):
         if self.effort: cmd += ["--effort", self.effort]
         if budget_usd is not None: cmd += ["--max-budget-usd", "%.2f" % budget_usd]
         rule = self.script_allow_rule(skill_name)
-        if rule: cmd += ["--permission-mode", "default", "--allowedTools", "Write,Edit," + rule]
+        if rule: cmd += ["--permission-mode", "default", "--allowedTools", "Write,Edit," + rule,
+                         "--disallowedTools", "Monitor", "PowerShell"]
         if not with_skill: cmd += ["--disable-slash-commands"]
         return cmd + self.extra_args
     def sandbox_env(self, root):
@@ -2849,6 +2851,7 @@ def live_dry_run(a, spec, problems, ws, n, engines, tokens, prices):
                 print("claude --permission-mode (with_skill and without_skill): default")
                 print("claude --allowedTools (with_skill and without_skill): Write,Edit,%s"
                       % e.script_allow_rule(spec["skill_name"]))
+                print("claude --disallowedTools (with_skill and without_skill): Monitor PowerShell")
     print("live command: " + shlex.join(["python3", "skill_eval.py"] + [x for x in a.argv if x != "--dry-run"]))
     return 3 if fails else 0
 

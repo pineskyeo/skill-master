@@ -16,6 +16,15 @@ def decision(kind, reason):
                                    "permissionDecisionReason": reason}}
 
 
+def carries_command(value):
+    """Detect a command field even if a future tool nests it in its input."""
+    if isinstance(value, dict):
+        return "command" in value or any(carries_command(v) for v in value.values())
+    if isinstance(value, list):
+        return any(carries_command(v) for v in value)
+    return False
+
+
 def regular_path(root, relative, existing, allow_hidden=False):
     if (not relative or relative.startswith("/") or "\\" in relative or
             any(part in ("", ".", "..") or (part.startswith(".") and not allow_hidden)
@@ -72,7 +81,12 @@ def main():
         skill_name, script_relative, script_hash, python3 = sys.argv[1:]
         if len(sys.argv) != 5: raise ValueError("gate configuration")
         root = os.environ.get("SKILL_EVAL_WORKDIR")
-        problem = check(json.load(sys.stdin), root, skill_name, script_relative, script_hash, python3)
+        payload = json.load(sys.stdin)
+        if (isinstance(payload, dict) and payload.get("hook_event_name") == "PreToolUse" and
+                payload.get("tool_name") not in ("Bash", "Monitor", "PowerShell") and
+                not carries_command(payload.get("tool_input"))):
+            return  # no decision: ordinary tools follow their normal permission flow
+        problem = check(payload, root, skill_name, script_relative, script_hash, python3)
     except (OSError, ValueError, TypeError, AttributeError, KeyError) as ex:
         problem = "gate validation failed: %s" % type(ex).__name__
     print(json.dumps(decision("deny" if problem else "allow", problem or "validated CSV cleaner invocation")))

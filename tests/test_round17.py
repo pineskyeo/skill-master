@@ -43,6 +43,16 @@ class TestRound17(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)["hookSpecificOutput"]
 
+    def gate_without_command(self, tool_name, tool_input):
+        payload = {"hook_event_name": "PreToolUse", "tool_name": tool_name,
+                   "tool_input": tool_input, "cwd": self.work}
+        env = dict(os.environ, SKILL_EVAL_WORKDIR=self.work)
+        result = subprocess.run([sys.executable, GATE, "csv-cleaner", "scripts/clean.py", self.digest,
+                                 os.path.realpath(shutil.which("python3"))],
+                                input=json.dumps(payload), text=True, capture_output=True, cwd=self.work, env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
     def test_hook_is_in_settings_in_both_arms(self):
         engine = se.ClaudeCodeEngine("claude-sonnet-5-5", python_script="scripts/clean.py", skill_dir=SKILL)
         for with_skill in (True, False):
@@ -50,11 +60,13 @@ class TestRound17(unittest.TestCase):
             self.assertEqual(cmd[cmd.index("--permission-mode") + 1], "default")
             self.assertEqual(cmd[cmd.index("--allowedTools") + 1],
                              "Write,Edit,Bash(python3 -I .claude/skills/csv-cleaner/scripts/clean.py *)")
+            self.assertEqual(cmd[cmd.index("--disallowedTools") + 1:cmd.index("--disallowedTools") + 3],
+                             ["Monitor", "PowerShell"])
             self.assertEqual(cmd[cmd.index("--setting-sources") + 1], "project,local")
             self.assertEqual("--disable-slash-commands" in cmd, not with_skill)
             settings = json.loads(cmd[cmd.index("--settings") + 1])
             hook = settings["hooks"]["PreToolUse"][0]
-            self.assertEqual(hook["matcher"], "Bash|PowerShell")
+            self.assertEqual(hook["matcher"], "*")
             self.assertEqual(hook["hooks"][0]["onFailure"], "block")
             self.assertEqual(hook["hooks"][0]["args"][0], GATE)
             self.assertFalse(settings["disableAllHooks"])
@@ -68,6 +80,9 @@ class TestRound17(unittest.TestCase):
         with self.assertRaises(se.EvalError):
             se.ClaudeCodeEngine(python_script="scripts/clean.py", skill_dir=SKILL,
                                 extra_args=["--permission-mode=plan"]).command("p", False, skill_name="csv-cleaner")
+        for flag in ("--disallowedTools", "--disallowed-tools=Monitor"):
+            with self.assertRaises(se.EvalError):
+                se.ClaudeCodeEngine(extra_args=[flag])
 
     def test_server_managed_cache_hook_restrictions_refuse_gated_launch(self):
         cfg = os.path.join(self.tmp.name, "config")
@@ -130,6 +145,11 @@ class TestRound17(unittest.TestCase):
     def test_gate_allows_only_the_exact_invocation(self):
         self.assertEqual(self.gate(INVOCATION)["permissionDecision"], "allow")
         self.assertEqual(self.gate(INVOCATION, tool_name="PowerShell")["permissionDecision"], "deny")
+        self.assertEqual(self.gate(INVOCATION, tool_name="Monitor")["permissionDecision"], "deny")
+        self.assertEqual(self.gate(INVOCATION, tool_name="FutureShell")["permissionDecision"], "deny")
+        self.assertEqual(self.gate("cat input.csv", tool_name="FutureShell")["permissionDecision"], "deny")
+        self.assertEqual(json.loads(self.gate_without_command("FutureShell", {"options": {"command": "cat x"}}))
+                         ["hookSpecificOutput"]["permissionDecision"], "deny")
         bad = [
             INVOCATION + "; mv a b", INVOCATION + " && mv a b", INVOCATION + " || true",
             INVOCATION + " | cat", INVOCATION + " > log", INVOCATION + " 2> log",
@@ -148,6 +168,25 @@ class TestRound17(unittest.TestCase):
                 self.assertEqual(self.gate(command)["permissionDecision"], "deny")
         self.assertEqual(self.gate("cat input.csv")["permissionDecision"], "deny")
         self.assertEqual(self.gate(INVOCATION, cwd=self.tmp.name)["permissionDecision"], "deny")
+
+    def test_non_command_tools_get_no_hook_decision(self):
+        for tool_name, tool_input in (("Read", {"file_path": "input.csv"}),
+                                      ("Write", {"file_path": "out.csv", "content": "x"}),
+                                      ("Edit", {"file_path": "out.csv", "old_string": "x", "new_string": "y"}),
+                                      ("Glob", {"pattern": "*.csv"}), ("Grep", {"pattern": "x"}),
+                                      ("Skill", {"skill": "csv-cleaner"}),
+                                      ("TodoWrite", {"todos": []})):
+            with self.subTest(tool_name=tool_name):
+                self.assertEqual(self.gate_without_command(tool_name, tool_input), "")
+        self.assertEqual(json.loads(self.gate_without_command("Monitor", {"source": "websocket"}))
+                         ["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_readme_describes_command_tool_policy(self):
+        with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as f:
+            readme = f.read()
+        self.assertIn('PreToolUse`/`*` 훅', readme)
+        self.assertIn('--disallowedTools Monitor PowerShell', readme)
+        self.assertIn('명령 필드가 없는 Read, Write, Edit, Glob, Grep, Skill, TodoWrite', readme)
 
     def test_gate_rejects_symlinks_existing_output_and_changed_script(self):
         src = os.path.join(self.work, "evals", "files", "empty_header_spaces.csv")

@@ -142,3 +142,26 @@ python3 skill_eval.py grade golden/skills/csv-cleaner --workspace golden/skills/
 ```
 
 결과: 종료 코드 **2**. 작업공간에 iteration 결과가 없어 grade dry-run이 시작되지 않았다. 모델 호출과 파일 쓰기는 없었다.
+
+## Round 21 — Monitor 경로와 명령 도구 전체 게이트
+
+- P1: Claude 실행 두 arm 모두 `--disallowedTools Monitor PowerShell`을 전달한다. `PreToolUse` matcher는 `*`로 변경했다. 게이트는 도구 입력의 `command` 필드(중첩된 필드 포함)가 있으면 도구 이름과 관계없이 검사하며, 검증된 Bash 스크립트 단일 호출 외에는 거부한다. 명령 필드가 없는 일반 Read/Write/Edit/Glob/Grep/Skill/TodoWrite 호출은 훅 결정 없이 기존 권한 흐름을 따른다. 별도 `--disallowedTools`를 extra args로 덮어쓰는 것도 거부한다.
+- P3: README의 Bash 전용 훅 설명을 전체 명령 도구 정책, 두 arm의 금지 플래그, 일반 파일 도구 처리와 일치시켰다. Monitor, PowerShell, 미래 도구, 중첩 명령 필드, 일반 도구, README 문구 및 두 arm의 생성 인자에 대한 회귀 테스트를 추가했다.
+- 공식 문서 확인: [tools reference](https://code.claude.com/docs/en/tools-reference)는 `Monitor`가 Bash permission rules를 공유하며 `PowerShell`은 별도 명령 실행 도구라고 명시한다. [hooks](https://code.claude.com/docs/en/hooks)는 `PreToolUse` matcher `*`가 모든 도구 이름에 일치하고, 훅 입력의 `tool_name`/`tool_input` 및 `onFailure: block` 동작을 설명한다. [CLI reference](https://code.claude.com/docs/en/cli-reference)는 `--disallowedTools`의 bare tool name이 도구를 제거하고 `--settings`가 inline JSON을 받는다고 명시한다. 생성 명령과 게이트 스크립트 동작은 로컬 테스트에서 확인했다. 실제 Claude 모델 호출에서 훅이 발화하는지는 모델 호출 금지로 확인하지 않았다.
+- `python3 -m pytest -q`: **521 passed**.
+
+최종 run live 명령(기록만 함, 실행하지 않음):
+
+```sh
+python3 skill_eval.py run golden/skills/csv-cleaner --workspace golden/skills/csv-cleaner-workspace --engines claude --runs 1 --claude-model claude-sonnet-5-5 --claude-effort high --grader-engine codex --grader-effort high --tokens exec=135000,2000 --tokens trigger=190000,1500 --budget-usd 12.5 --live
+```
+
+위 명령에 `--dry-run`을 붙여 재검사한 결과 종료 코드 **3**: validation **0**, preflight **0**, 예상 비용 **$11.38 / $12.50**, 두 arm 모두 `--disallowedTools Monitor PowerShell` 및 `PreToolUse` matcher `*` 출력. live gate는 **eval_set 미승인** 하나다. dry run은 모델·인증 CLI 호출 및 파일 쓰기를 하지 않았다.
+
+최종 grade live 명령(기록만 함, 실행하지 않음):
+
+```sh
+python3 skill_eval.py grade golden/skills/csv-cleaner --workspace golden/skills/csv-cleaner-workspace --iteration 3 --engines claude --runs 1 --claude-model claude-sonnet-5-5 --claude-effort high --grader-engine codex --grader-effort high --budget-usd 9.5 --live
+```
+
+위 명령에 `--dry-run`을 붙인 결과 종료 코드 **2**: 작업공간에 iteration 결과가 없어 grade dry run이 시작되지 않았다. 남은 순서는 변경된 eval-set 승인, 승인 후 run, 결과 생성 후 grade이다. 이 라운드에서는 규칙에 따라 실제 `--live`를 실행하지 않았다.
