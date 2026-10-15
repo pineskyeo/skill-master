@@ -860,14 +860,15 @@ def ancestors(path):
         d = os.path.dirname(d)
 
 def skills_under(root, max_depth):
-    """[(name, path)] of folders below root (depth <= max_depth) that hold a SKILL.md. Follows symlinked folders once;
-    dangling links and unreadable folders are skipped, never raised."""
+    """[(name, path)] of folders below root (depth <= max_depth) that hold a SKILL.md. Depth is counted on the visible
+    path under root (a direct link to a deep folder is depth 1), not on the link target. Follows symlinked folders
+    once; dangling links and unreadable folders are skipped, never raised."""
     out, seen = [], set()
     if not os.path.isdir(root): return out
-    base = os.path.realpath(root).count(os.sep)
     for dp, dn, fn in os.walk(root, followlinks=True, onerror=lambda e: None):
-        real = os.path.realpath(dp)
-        if real in seen or real.count(os.sep) - base > max_depth: dn[:] = []; continue
+        real, rel = os.path.realpath(dp), os.path.relpath(dp, root)
+        depth = 0 if rel == os.curdir else rel.count(os.sep) + 1
+        if real in seen or depth > max_depth: dn[:] = []; continue
         seen.add(real)
         if dp != root and os.path.isfile(os.path.join(dp, "SKILL.md")):
             out.append((os.path.basename(dp), dp)); dn[:] = []

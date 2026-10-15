@@ -85,6 +85,38 @@ class TestCodexGraderSkillChecks(Base):
         self.assertEqual((fx.calls, b.spent), ([], 0.0))
         self.assertEqual(os.listdir(self.runs), [])
 
+    def test_direct_link_to_deep_skill_refuses_before_launch(self):
+        # round 12: depth is measured on the visible path under the scanned root, not on the resolved link target
+        deep = os.path.join(self.tmp, "deep", "a", "b", "c", "d", "e", "f"); skill(deep, "linked-deep")
+        ag = os.path.join(self.tmp, ".agents", "skills"); os.makedirs(ag)
+        os.symlink(os.path.join(deep, "linked-deep"), os.path.join(ag, "linked-deep"))
+        fx, b = FakeCodexGrader(), se.Budget(10.0)
+        with self.assertRaises(se.EvalError) as cm: se.CodexGrader(exec_fn=fx, budget=b).grade(CASE, {}, ITEMS)
+        self.assertIn("linked-deep", str(cm.exception))
+        self.assertEqual((fx.calls, b.spent), ([], 0.0))
+        self.assertEqual(os.listdir(self.runs), [])
+
+    def test_admin_direct_link_to_deep_skill_refuses_before_launch(self):
+        deep = os.path.join(self.tmp, "deep", "a", "b", "c", "d", "e", "f"); skill(deep, "admin-deep")
+        admin = os.path.join(self.tmp, "etc-codex-skills"); os.makedirs(admin)
+        os.symlink(os.path.join(deep, "admin-deep"), os.path.join(admin, "admin-deep"))
+        fx, b = FakeCodexGrader(), se.Budget(10.0)
+        with mock.patch.object(se, "CODEX_ADMIN_SKILLS", admin):
+            with self.assertRaises(se.EvalError) as cm: se.CodexGrader(exec_fn=fx, budget=b).grade(CASE, {}, ITEMS)
+            self.assertIn("admin-deep", str(cm.exception))
+        self.assertEqual((fx.calls, b.spent), ([], 0.0))
+
+    def test_skills_under_depth_is_visible_path_depth(self):
+        deep = os.path.join(self.tmp, "deep", "a", "b", "c", "d", "e", "f"); skill(deep, "far")
+        root = os.path.join(self.tmp, "scan"); os.makedirs(os.path.join(root, "x", "y"))
+        os.symlink(os.path.join(deep, "far"), os.path.join(root, "far"))
+        self.assertEqual([n for n, _ in se.skills_under(root, 1)], ["far"])
+        # a link to a shallow folder does not let a visibly deep skill through
+        skill(os.path.join(self.tmp, "shallow", "p", "q"), "too-deep")
+        os.symlink(os.path.join(self.tmp, "shallow"), os.path.join(root, "x", "y", "s"))
+        self.assertNotIn("too-deep", [n for n, _ in se.skills_under(root, 3)])
+        self.assertIn("too-deep", [n for n, _ in se.skills_under(root, 6)])  # scan/x/y/s/p/q/too-deep
+
     def test_clean_tree_still_launches(self):
         fx = FakeCodexGrader()
         se.CodexGrader(exec_fn=fx, budget=se.Budget(10.0)).grade(CASE, {}, ITEMS)
