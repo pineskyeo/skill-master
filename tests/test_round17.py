@@ -86,6 +86,25 @@ class TestRound17(unittest.TestCase):
             self.assertFalse(any("managed hook policy" in p for p in
                                  se.claude_launch_problems(self.work, cfg, require_hooks=True)))
 
+    def test_managed_permission_rules_only_refuses_gated_launch(self):
+        cfg = os.path.join(self.tmp.name, "config")
+        os.makedirs(cfg)
+        remote = os.path.join(cfg, se.CLAUDE_REMOTE_SETTINGS)
+        managed = os.path.join(self.tmp.name, "managed-settings.json")
+        with mock.patch.object(se, "claude_managed_sources", return_value=([managed], [])), \
+                mock.patch.object(se, "api_key_env_problems", return_value=[]):
+            for source in (managed, remote):
+                with self.subTest(source=source):
+                    with open(source, "w") as f: json.dump({"allowManagedPermissionRulesOnly": True}, f)
+                    problems = se.claude_launch_problems(self.work, cfg, require_hooks=True)
+                    self.assertTrue(any("managed permission policy" in p and source in p for p in problems), problems)
+                    self.assertFalse(any("managed permission policy" in p for p in
+                                         se.claude_launch_problems(self.work, cfg, require_hooks=False)))
+            for source in (managed, remote):
+                with open(source, "w") as f: json.dump({"allowManagedPermissionRulesOnly": False}, f)
+            self.assertFalse(any("managed permission policy" in p for p in
+                                 se.claude_launch_problems(self.work, cfg, require_hooks=True)))
+
     def test_gate_allows_only_the_exact_invocation(self):
         self.assertEqual(self.gate(INVOCATION)["permissionDecision"], "allow")
         bad = [

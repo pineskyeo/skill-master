@@ -515,8 +515,11 @@ def claude_launch_problems(cwd, config_dir=None, require_hooks=False):
             if not os.path.lexists(p): continue
             try: st = _read_settings(p)
             except Exception: continue  # the existing auth/settings validation reports unreadable sources
-            if isinstance(st, dict) and (st.get("allowManagedHooksOnly") is True or st.get("disableAllHooks") is True):
-                probs.append("claude: managed hook policy in %s may disable the Bash gate" % p)
+            if isinstance(st, dict):
+                if st.get("allowManagedHooksOnly") is True or st.get("disableAllHooks") is True:
+                    probs.append("claude: managed hook policy in %s may disable the Bash gate" % p)
+                if st.get("allowManagedPermissionRulesOnly") is True:
+                    probs.append("claude: managed permission policy in %s may discard --allowedTools approvals" % p)
     return api_key_env_problems() + probs + claude_settings_auth_problems(
         claude_project_settings(ancestors(cwd)) + files + [remote])
 

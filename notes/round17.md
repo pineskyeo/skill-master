@@ -106,3 +106,17 @@ python3 skill_eval.py run golden/skills/csv-cleaner --workspace golden/skills/cs
 종료 코드 **3**. 검증 문제 **0**, preflight 문제 **0**, 예산 추정 **$11.38 / $12.50**. `with_skill`과 `without_skill` 샘플 명령 모두 `--permission-mode default --allowedTools "Write,Edit,Bash(python3 -I .claude/skills/csv-cleaner/scripts/clean.py *)"`를 출력했다. 실평가를 막는 유일한 게이트는 **eval_set 미승인**이다. `--dry-run`이므로 모델 호출과 파일 쓰기는 없었다.
 
 남은 작업: 변경된 평가셋을 검토하고 `eval_set` 승인을 갱신한 뒤, 모델 호출이 허용되는 시점에 실평가를 실행한다.
+
+## Round 19 — codex-r18 수정 및 검증
+
+- P2: 게이트가 필요한 Claude 실행의 preflight는 훅 제한과 같은 관리 설정 출처들 및 유효 설정 디렉터리의 `remote-settings.json`에서 `allowManagedPermissionRulesOnly: true`를 확인한다. 발견하면 `--allowedTools` 승인 규칙이 버려질 수 있어 실행을 거부한다. 관리 출처와 서버 캐시 각각의 `true` 거부, `false` 허용, 게이트 없는 호출은 검사하지 않음을 `tests/test_round17.py`에 추가했다.
+- P3: README 실행 규칙을 두 arm의 생성 인자와 일치시켰다: `--permission-mode default --allowedTools "Write,Edit,Bash(python3 -I .claude/skills/<name>/<script> *)"`.
+- `python3 -m pytest -q`: **518 passed**.
+
+준비된 run dry-run 명령:
+
+```sh
+python3 skill_eval.py run golden/skills/csv-cleaner --workspace golden/skills/csv-cleaner-workspace --engines claude --runs 1 --claude-model claude-sonnet-5-5 --claude-effort high --grader-engine codex --grader-effort high --tokens exec=135000,2000 --tokens trigger=190000,1500 --budget-usd 12.5 --live --dry-run
+```
+
+결과: 종료 코드 **3**. validation **0**, preflight **0**, 예상 API 환산 비용 **$11.38 / $12.50**. 두 arm 모두 위의 동일한 `--permission-mode default` 및 `--allowedTools`를 출력했다. 유일한 live gate는 기존과 같이 `eval_set` 미승인이다. `--dry-run`으로 모델 호출·파일 쓰기는 없었다.
