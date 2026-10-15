@@ -250,7 +250,10 @@ class TestIsolation(Base):
         for cmd, cwd in self.fc.calls:
             self.assertEqual(cmd[cmd.index("--setting-sources") + 1], "project,local")
             self.assertIn("--strict-mcp-config", cmd)
-            self.assertEqual(json.loads(cmd[cmd.index("--settings") + 1]), {"disableBundledSkills": True})
+            st = json.loads(cmd[cmd.index("--settings") + 1])
+            self.assertIs(st["disableBundledSkills"], True)
+            self.assertEqual(set(st), {"disableBundledSkills", "enabledPlugins"})  # round 14: built-in plugins off
+            self.assertFalse(any(st["enabledPlugins"].values()))
             self.assertTrue(cwd.startswith(os.path.realpath(self.runs)))
         t = rjson(os.path.join(self.ws, "iteration-1", "claude", "eval-1-start-the-login-fix-task", "with_skill", "run-1",
                                "outputs", "transcript.json"))

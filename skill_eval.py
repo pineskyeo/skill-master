@@ -490,13 +490,110 @@ def claude_launch_problems(cwd, config_dir=None):
     return api_key_env_problems() + probs + claude_settings_auth_problems(
         claude_project_settings(ancestors(cwd)) + files + [os.path.join(cfg, CLAUDE_REMOTE_SETTINGS)])
 
+# Built-in plugins ship inside the CLI as "<name>@builtin" and load unless settings.enabledPlugins["<name>@builtin"]
+# is false (https://code.claude.com/docs/en/plugins/mods/admin: enabledPlugins / pluginConfigs with @builtin ids;
+# builtinPlugins.ts getBuiltinPlugins reads settings.enabledPlugins[pluginId], user value over defaultEnabled).
+# disableBundledSkills does not cover them and --safe-mode keeps them. Static list = the cc-plugin-* names in the
+# 2.1.300 binary; at launch the installed binary is scanned again and the union is turned off. Whether
+# cc-plugin-sec-default honors false is not verified: if it (or anything else) still loads, the init check
+# (plugins == [], skills exactly as expected) refuses the run; it is never relaxed.
+CLAUDE_BUILTIN_PLUGIN_NAMES = ("cc-plugin-agents-md", "cc-plugin-claude-test", "cc-plugin-diff", "cc-plugin-mermaid",
+                               "cc-plugin-mods-guide", "cc-plugin-plugin-authoring", "cc-plugin-responsive-mode",
+                               "cc-plugin-sec-default", "cc-plugin-telemetry", "cc-plugin-tips",
+                               "cc-plugin-you-should-know")
+BUILTIN_PLUGIN_RE = re.compile(rb"cc-plugin-[a-z0-9]+(?:-[a-z0-9]+)*")
+_BUILTIN_SCAN = {}  # cache: one binary scan per process, so every launch of a run gets the same --settings
+
+def claude_binary_path(which=None):
+    p = (which or shutil.which)("claude")
+    return os.path.realpath(p) if p else None
+
+def scan_builtin_plugin_names(path, chunk=1 << 24):
+    """cc-plugin-* names found in the file at path (read in overlapping chunks; nothing is executed)."""
+    found, tail = set(), b""
+    with open(path, "rb") as f:
+        while True:
+            buf = f.read(chunk)
+            data = tail + buf
+            for m in BUILTIN_PLUGIN_RE.finditer(data):
+                # a match touching the end of the buffer (or followed only by a trailing "-") may be cut off: it is
+                # seen again whole in the next tail
+                if len(m.group()) <= 64 and (m.end() < len(data) - 1 or not buf):
+                    found.add(m.group().decode("ascii"))
+            if not buf: break
+            tail = data[-80:]
+    return found
+
+def claude_builtin_plugins(path=None, refresh=False):
+    """{"ids": sorted "<name>@builtin" ids to turn off, "binary": scanned path or None, "scanned": names found in it,
+    "error": why the scan failed or None}. The static list is always included, so a failed scan still turns off every
+    known built-in plugin."""
+    if refresh or not _BUILTIN_SCAN:
+        path = path or claude_binary_path()
+        found, err = set(), None
+        if not path: err = "claude not found on PATH"
+        else:
+            try: found = scan_builtin_plugin_names(path)
+            except OSError as ex: err = "%s: %s" % (type(ex).__name__, ex)
+        _BUILTIN_SCAN.clear()
+        _BUILTIN_SCAN.update(ids=sorted("%s@builtin" % n for n in set(CLAUDE_BUILTIN_PLUGIN_NAMES) | found),
+                             binary=path, scanned=sorted(found), error=err)
+    return dict(_BUILTIN_SCAN)
+
+def claude_settings():
+    """The --settings object of every Claude launch: bundled skills off and every known built-in plugin disabled."""
+    return {"disableBundledSkills": True,
+            "enabledPlugins": {i: False for i in claude_builtin_plugins()["ids"]}}
+
+def claude_settings_json():
+    return json.dumps(claude_settings(), sort_keys=True)
+
 # One sanitized launch shape for every claude -p call (executor, grader, builder): project/local setting sources only,
-# no MCP servers, bundled skills off, auto memory and claude.ai MCP servers off, API-key/provider variables scrubbed.
-CLAUDE_SETTINGS_JSON = json.dumps({"disableBundledSkills": True})
+# no MCP servers, bundled skills and built-in plugins off, auto memory and claude.ai MCP servers off, API-key/provider
+# variables scrubbed.
 CLAUDE_CHILD_ENV = {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "ENABLE_CLAUDEAI_MCP_SERVERS": "false"}
 
 def claude_isolation_args():
-    return ["--setting-sources", "project,local", "--strict-mcp-config", "--settings", CLAUDE_SETTINGS_JSON]
+    return ["--setting-sources", "project,local", "--strict-mcp-config", "--settings", claude_settings_json()]
+
+def builtin_plugin_check_command():
+    """Free check (plugin management only, no model call) of what the launch settings do to the built-in plugins."""
+    return ["claude", "--setting-sources", "project,local", "--settings", claude_settings_json(), "plugin", "list",
+            "--json"]
+
+def builtin_plugin_check(run_fn=None):
+    """Runs builtin_plugin_check_command and reports, per expected @builtin id, the enabled state it lists. Returns
+    (exit code, lines): 0 only when every listed @builtin entry says enabled false and every id we disable is listed;
+    otherwise 1 with what could not be confirmed. Loaded skills are not part of this output: confirming them needs
+    the system/init event of a real `claude -p` (a model call), which this check never makes."""
+    cmd = builtin_plugin_check_command()
+    run_fn = run_fn or (lambda c: subprocess.run(c, capture_output=True, text=True, timeout=120,
+                                                 env=claude_child_env()))
+    info = claude_builtin_plugins()
+    lines = ["binary scanned: %s (%s)" % (info["binary"], info["error"] or "%d names found" % len(info["scanned"])),
+             "command: " + shlex.join(cmd)]
+    try:
+        p = run_fn(cmd)
+        data = json.loads(p.stdout)
+    except Exception as ex:
+        return 1, lines + ["cannot confirm: %s" % type(ex).__name__]
+    items = data if isinstance(data, list) else (data.get("plugins") or data.get("installed") or []) \
+        if isinstance(data, dict) else []
+    listed = {}
+    for it in items:
+        if isinstance(it, dict):
+            pid = it.get("id") or it.get("source") or it.get("name")
+            if isinstance(pid, str) and pid.endswith("@builtin"): listed[pid] = it.get("enabled")
+    bad = sorted(i for i, v in listed.items() if v is not False)
+    missing = sorted(set(info["ids"]) - set(listed))
+    lines += ["%s enabled=%s" % (i, json.dumps(listed[i])) for i in sorted(listed)]
+    if bad: lines.append("NOT disabled: %s" % ", ".join(bad))
+    if missing: lines.append("not listed (state unconfirmed): %s" % ", ".join(missing))
+    if not listed:
+        lines.append("cannot confirm: the listing has no @builtin entry (2.1.300 `plugin list --json` lists installed "
+                     "plugins only and `plugin details` shows no enabled state); only the system/init event of a real "
+                     "`claude -p` call (a model call) shows what loaded")
+    return (0 if listed and not bad and not missing else 1), lines
 
 def claude_child_env(config_dir=None):
     env = dict(os.environ, **CLAUDE_CHILD_ENV)
@@ -632,7 +729,7 @@ class ClaudeCodeEngine(Engine):
     only through an enabled plugin, which the post-run init check sees (plugins must be []); claude.ai synced skills
     show up in init `skills` unless `user-invocable: false`, and those are refused before launch."""
     name, skills_rel, has_call_cap = "claude", ".claude/skills", True
-    SETTINGS, ENV = CLAUDE_SETTINGS_JSON, CLAUDE_CHILD_ENV
+    ENV = CLAUDE_CHILD_ENV
     EFFORTS = CLAUDE_EFFORTS
     def command(self, prompt, with_skill, budget_usd=None):
         cmd = ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose", "--no-session-persistence"]
@@ -680,7 +777,8 @@ class ClaudeCodeEngine(Engine):
         if not isinstance(init.get("plugins"), list):
             out.append("system/init has no plugins list: cannot verify that no plugin was loaded")
         elif init["plugins"]:
-            out.append("plugins loaded: %s" % json.dumps(init["plugins"], ensure_ascii=False)[:200])
+            ids = [str((p.get("source") or p.get("name")) if isinstance(p, dict) else p) for p in init["plugins"]]
+            out.append("plugins loaded: %s" % ", ".join(ids))
         want = {skill_name} if with_skill else set()
         if names != want:
             user = sorted({n.split(":")[-1] for n in names - want} & set(user_names))
@@ -2525,6 +2623,11 @@ def live_dry_run(a, spec, problems, ws, n, engines, tokens, prices):
     for r in fails: print("  - " + r.replace("\n", "\n    "))
     for r in skipped:
         if r in report: print("  (%s)" % r)
+    if any(e.name == "claude" for e in engines) or getattr(a, "grader_engine", None) == "claude":
+        info = claude_builtin_plugins()
+        print("claude --settings (every launch): %s" % claude_settings_json())
+        print("  built-in plugins disabled: %d (binary %s: %s)" % (len(info["ids"]), info["binary"],
+              info["error"] or "%d cc-plugin-* names found" % len(info["scanned"])))
     print("live command: " + shlex.join(["python3", "skill_eval.py"] + [x for x in a.argv if x != "--dry-run"]))
     return 3 if fails else 0
 
@@ -2593,7 +2696,12 @@ def main(argv=None):
     s.add_argument("--gate", required=True); s.add_argument("--by", required=True)
     s = sp.add_parser("register"); common(s, False)
     s = sp.add_parser("snapshot"); common(s, False)
+    sp.add_parser("check-builtin-plugins", help="free: `claude --settings <launch settings> plugin list --json` and "
+                  "the enabled state of every @builtin plugin (no model call; loaded skills are not shown)")
     a = p.parse_args(argv)
+    if a.cmd == "check-builtin-plugins":
+        rc, lines = builtin_plugin_check()
+        print("\n".join(lines)); return rc
     a.argv = list(sys.argv[1:] if argv is None else argv)
     if hasattr(a, "grader_engine") and a.grader_model is None and a.grader_engine == "claude":
         a.grader_model = DEFAULT_GRADER_MODEL
