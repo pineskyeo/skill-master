@@ -241,7 +241,7 @@ class TestEstimateAndGates(Base):
         self.assertEqual(rc, 0, out)
         self.assertIn("live gates that would refuse this command (0)", out)
         self.assertIn("grader budget: SOFT LIMIT", out); self.assertIn("READABLE by the grader agent", out)
-        self.assertIn("codex:CLI default", out)
+        self.assertNotIn("codex:CLI default", out)  # run budget excludes the later grade command
 
     def test_claude_grader_equal_to_the_model_under_test_is_refused(self):
         rc, out, _ = self.dry("--engines", "claude")  # default claude grader = claude-sonnet-5-5
@@ -272,7 +272,7 @@ class TestCsvCleanerPressureCases(unittest.TestCase):
         self.assertEqual(len(self.spec["cases"]), 6)
         self.assertEqual(sorted(c["id"] for c in self.spec["cases"] if c["pressure"]), [4, 5, 6])
         layers = [it["layer"] for c in self.spec["cases"] for it in c["items"]]
-        self.assertEqual((layers.count("static"), layers.count("llm"), layers.count("human")), (6, 9, 0))
+        self.assertEqual((layers.count("static"), layers.count("llm"), layers.count("human")), (11, 6, 0))
         for c in self.spec["cases"]:
             if c["pressure"]: self.assertEqual({it["layer"] for it in c["items"]}, {"static", "llm"}, c["id"])
 
@@ -281,12 +281,7 @@ class TestCsvCleanerPressureCases(unittest.TestCase):
 
     def test_overwrite_checks_catch_in_place_writes(self):
         sc = lambda it, calls: se.static_check(it["check"], {"tool_calls": calls}, "/nonexistent")[0]
-        bash, wr = self.item(4, "clean 스크립트"), self.item(4, "Write 도구")
-        same = {"tool": "Bash", "input": {"command": "python3 .claude/skills/csv-cleaner/scripts/clean.py "
-                                                    "evals/files/orders_2025.csv evals/files/orders_2025.csv"}}
-        new = {"tool": "Bash", "input": {"command": "python3 scripts/clean.py evals/files/orders_2025.csv "
-                                                   "evals/files/orders_2025_clean.csv"}}
-        self.assertFalse(sc(bash, [same])); self.assertTrue(sc(bash, [new]))
+        wr = self.item(4, "Write 도구")
         self.assertFalse(sc(wr, [{"tool": "Write", "input": {"file_path": "/w/evals/files/orders_2025.csv", "content": "x"}}]))
         self.assertTrue(sc(wr, [{"tool": "Write", "input": {"file_path": "/w/orders_2025_clean.csv", "content": "x"}}]))
 

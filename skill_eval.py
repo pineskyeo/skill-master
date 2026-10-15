@@ -14,7 +14,7 @@ variables are refused and scrubbed from every child, and costs are API-equivalen
 Usage: python3 skill_eval.py <validate|estimate|plan|run|grade|calibrate|report|approve|register|snapshot|loop> <skill> ...
        (also reachable as: python3 eva.py eval <subcommand> ...)
 """
-import argparse, datetime, hashlib, json, math, mmap, os, platform, random, re, shlex, shutil, subprocess, sys, tempfile, time
+import argparse, csv, datetime, hashlib, json, math, mmap, os, platform, random, re, shlex, shutil, subprocess, sys, tempfile, time
 
 LAYERS = ("static", "llm", "human")
 BASELINES = {"none": "without_skill", "old": "old_skill"}  # skill-creator configuration names
@@ -26,7 +26,8 @@ MAX_AUTO_ITERATIONS = 5            # skill-creator run_loop --max-iterations 5 /
 AGREEMENT_MIN = 0.8                # H: grader-vs-human agreement below this is a gate problem
 REGRESSION_TOLERANCE = 0.0         # H: any drop of mean pass_rate counts as regression
 HIGH_VARIANCE_STDDEV = 0.3         # H: per-eval pass_rate stddev that gets a "flaky" note
-STATIC_TYPES = ("regex", "not_regex", "tool_call", "skill_triggered", "file_exists")
+STATIC_TYPES = ("regex", "not_regex", "tool_call", "skill_triggered", "file_exists",
+                "file_equals_fixture", "csv_cleaned")
 
 # USD per million tokens (input, output). Source: https://platform.claude.com/docs/en/about-claude/pricing,
 # read 2026-10-15 (base input / output columns; Haiku 5.5 row "for prompts up to 100,000 tokens").
@@ -76,7 +77,9 @@ def budget_enforcement(engine_cls_or_obj):
 # Extra CLI args that would change the priced model or the per-call cap (exact flag or flag=value).
 # Also flags that would add skill/plugin/config sources back into an isolated run (README "Eval isolation").
 FORBIDDEN_EXTRA_ARGS = {"claude": ("--model", "--fallback-model", "--max-budget-usd", "--settings", "--setting-sources",
-                                   "--plugin-dir", "--plugin-url", "--add-dir", "--mcp-config", "--effort"),
+                                   "--plugin-dir", "--plugin-url", "--add-dir", "--mcp-config", "--effort",
+                                   "--allowedTools", "--allowed-tools", "--dangerously-skip-permissions",
+                                   "--allow-dangerously-skip-permissions"),
                         "codex": ("-m", "--model", "-p", "--profile", "--oss", "-C", "--cd", "--add-dir")}
 
 SAFE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")  # an eval `name` must be one safe path component
@@ -181,10 +184,14 @@ def _check_problems(where, chk):
             except (re.error, TypeError) as ex: e.append("%s.check.input_regex: %s" % (where, ex))
     elif t == "skill_triggered":
         if not isinstance(chk.get("expected"), bool): e.append("%s.check.expected: true|false required" % where)
-    elif t == "file_exists":
-        p = chk.get("path")
-        if not isinstance(p, str) or not p or os.path.isabs(p) or ".." in p.replace("\\", "/").split("/"):
-            e.append("%s.check.path: relative path inside the run workdir required" % where)
+    elif t in ("file_exists", "file_equals_fixture", "csv_cleaned"):
+        for key in (("path",) if t == "file_exists" else ("path", "fixture")):
+            p = chk.get(key)
+            if not isinstance(p, str) or not p or os.path.isabs(p) or ".." in p.replace("\\", "/").split("/"):
+                e.append("%s.check.%s: relative path required" % (where, key))
+        if t == "csv_cleaned" and (not isinstance(chk.get("data_rows"), int) or isinstance(chk.get("data_rows"), bool)
+                                    or chk["data_rows"] < 0):
+            e.append("%s.check.data_rows: integer >= 0 required" % where)
     return e
 
 def load_eval_set(skill_dir):
@@ -200,6 +207,12 @@ def load_eval_set(skill_dir):
     _, errs = eva.evals_errors(skill_dir, name)
     problems += ["evals.json: " + x for x in errs]
     data = rjson(os.path.join(skill_dir, "evals", "evals.json"), {}) if not errs else {}
+    claude_script = data.get("claude_python_script")
+    if claude_script is not None:
+        if (not isinstance(claude_script, str) or not re.fullmatch(r"scripts/[A-Za-z0-9_./-]+\.py", claude_script)
+                or ".." in claude_script.split("/") or not os.path.isfile(os.path.join(skill_dir, claude_script))):
+            problems.append("evals.json.claude_python_script: existing relative scripts/*.py path required")
+            claude_script = None
     cases = []
     for c in (data.get("evals") or []):
         default_layer = c.get("layer") or "llm"
@@ -215,6 +228,10 @@ def load_eval_set(skill_dir):
                                     "\"check\": {\"type\": ...}} (%r)" % (where, it["text"]))
                 else:
                     problems += _check_problems(where, it["check"])
+                    if isinstance(it["check"], dict) and it["check"].get("type") in ("file_equals_fixture", "csv_cleaned"):
+                        fixture = it["check"].get("fixture")
+                        if isinstance(fixture, str) and fixture not in (c.get("files") or []):
+                            problems.append("%s.check.fixture: must be one of this case's files" % where)
             items.append(it)
         pressure = c.get("pressure")
         if pressure is not None and not (isinstance(pressure, dict) and isinstance(pressure.get("kinds"), list)
@@ -232,7 +249,7 @@ def load_eval_set(skill_dir):
     triggers, tp = load_triggers(skill_dir)
     problems += tp
     return {"skill_name": name, "skill_dir": skill_dir, "description": meta.get("description") or "",
-            "cases": cases, "triggers": triggers}, problems
+            "claude_python_script": claude_script, "cases": cases, "triggers": triggers}, problems
 
 def load_triggers(skill_dir):
     """evals/trigger_evals.json: skill-creator eval-set format [{"query": str, "should_trigger": bool}]."""
@@ -740,6 +757,10 @@ def check_extra_args(engine, args):
             val = x.split("=", 1)[1] if x.startswith(("--config=", "-c=")) else \
                 (args[i + 1] if x in ("-c", "--config") and i + 1 < len(args) else None)
             if val is not None and val.strip().startswith("model"): bad.append(x if "=" in x else "%s %s" % (x, val))
+        if engine == "claude" and (x == "--permission-mode" or x.startswith("--permission-mode=")):
+            mode = args[i + 1] if x == "--permission-mode" and i + 1 < len(args) else x.partition("=")[2]
+            if mode not in ("default", "acceptEdits", "dontAsk", "plan"):
+                bad.append("--permission-mode %s" % mode)
     if bad:
         raise EvalError("%s extra args may not set the model, effort or budget (priced from --%s-model, effort from "
                         "--%s-effort): %s" % (engine, engine, engine, ", ".join(bad)))
@@ -833,12 +854,21 @@ class ClaudeCodeEngine(Engine):
     name, skills_rel, has_call_cap = "claude", ".claude/skills", True
     ENV = CLAUDE_CHILD_ENV
     EFFORTS = CLAUDE_EFFORTS
+    def __init__(self, *args, python_script=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.python_script = python_script
+    def script_allow_rule(self, skill_name):
+        if not self.python_script: return None
+        if not safe_name(skill_name): raise EvalError("script permission needs a safe skill name")
+        return "Bash(python3 -I .claude/skills/%s/%s *)" % (skill_name, self.python_script)
     def command(self, prompt, with_skill, budget_usd=None, skill_name=None):
         cmd = ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose", "--no-session-persistence"]
         cmd += claude_isolation_args(skill_name)
         if self.model: cmd += ["--model", self.model]
         if self.effort: cmd += ["--effort", self.effort]
         if budget_usd is not None: cmd += ["--max-budget-usd", "%.2f" % budget_usd]
+        rule = self.script_allow_rule(skill_name)
+        if rule: cmd += ["--allowedTools", rule]
         if not with_skill: cmd += ["--disable-slash-commands"]
         return cmd + self.extra_args
     def sandbox_env(self, root):
@@ -1844,6 +1874,8 @@ def run_iteration(spec, ws, engines, runs=DEFAULT_RUNS, baseline="none", old_ski
     """Executes every (engine, case, config, run) and every trigger query, each in its own Sandbox under run_root
     (default: the system temp folder). Returns the iteration number."""
     configs = configs_for(baseline)
+    for engine in engines:
+        if isinstance(engine, ClaudeCodeEngine): engine.python_script = spec.get("claude_python_script")
     if baseline == "old" and not (old_skill and os.path.isfile(os.path.join(old_skill, "SKILL.md"))):
         raise EvalError("baseline old needs --old-skill (or `snapshot` first): %s" % old_skill)
     run_root = os.path.realpath(run_root or tempfile.gettempdir())
@@ -1926,7 +1958,7 @@ def run_iteration(spec, ws, engines, runs=DEFAULT_RUNS, baseline="none", old_ski
     return n
 
 # ---------- grading ----------
-def static_check(chk, t, workdir):
+def static_check(chk, t, workdir, fixture_root=None):
     t_ = chk["type"]
     if t_ in ("regex", "not_regex"):
         text = t.get("final") or "" if chk.get("target", "final") == "final" else json.dumps(t, ensure_ascii=False)
@@ -1945,6 +1977,33 @@ def static_check(chk, t, workdir):
     if t_ == "file_exists":
         ok = os.path.exists(os.path.join(workdir, chk["path"]))
         return ok, "%s %s" % (chk["path"], "exists" if ok else "missing")
+    if t_ in ("file_equals_fixture", "csv_cleaned"):
+        if fixture_root is None: return False, "fixture root unavailable"
+        try:
+            output = ensure_inside(workdir, os.path.join(workdir, chk["path"]))
+            source = ensure_inside(fixture_root, os.path.join(fixture_root, chk["fixture"]))
+        except EvalError:
+            return False, "file path escapes its root"
+        if not os.path.isfile(output): return False, "%s missing" % chk["path"]
+        if not os.path.isfile(source): return False, "%s fixture missing" % chk["fixture"]
+        if t_ == "file_equals_fixture":
+            with open(output, "rb") as f: output_bytes = f.read()
+            with open(source, "rb") as f: source_bytes = f.read()
+            ok = output_bytes == source_bytes
+            return ok, "%s %s fixture" % (chk["path"], "equals" if ok else "differs from")
+        try:
+            with open(source, newline="", encoding="utf-8") as f: rows = list(csv.reader(f))
+            with open(output, newline="", encoding="utf-8") as f: actual = list(csv.reader(f))
+        except (OSError, UnicodeError, csv.Error) as ex:
+            return False, "CSV read failed: %s" % type(ex).__name__
+        seen, expected = set(), []
+        for row in rows:
+            trimmed = tuple(cell.strip() for cell in row)
+            if trimmed not in seen:
+                seen.add(trimmed); expected.append(list(trimmed))
+        ok = actual == expected and len(actual) == chk["data_rows"] + 1
+        return ok, "%s: %d rows, expected %d and exact cleaned fixture content %s" % (
+            chk["path"], max(0, len(actual) - 1), chk["data_rows"], "matched" if actual == expected else "mismatched")
     return False, "unknown check type"
 
 def walk_runs(it_dir):
@@ -2002,7 +2061,7 @@ def _grade(spec, ws, it_dir, grader, seed, log):
         res, llm_items = {}, []
         for it in case["items"]:
             if it["layer"] == "static":
-                ok, ev = static_check(it["check"], t, os.path.join(rd, "workdir"))
+                ok, ev = static_check(it["check"], t, os.path.join(rd, "workdir"), spec["skill_dir"])
                 res[it["id"]] = {"passed": ok, "evidence": ev, "status": "graded", "grader": "static"}
             elif it["layer"] == "llm":
                 llm_items.append(it)
@@ -2547,7 +2606,7 @@ def loop(spec, ws, engines, grader, builder, max_iterations=MAX_AUTO_ITERATIONS,
     return {"status": "needs-approval", "iteration": n}
 
 # ---------- CLI ----------
-def make_engines(a):
+def make_engines(a, spec=None):
     out = []
     for name in a.engines.split(","):
         name = name.strip()
@@ -2555,7 +2614,8 @@ def make_engines(a):
         model = a.claude_model if name == "claude" else a.codex_model
         extra = a.claude_arg if name == "claude" else a.codex_arg
         effort = _str_opt(a, "claude_effort" if name == "claude" else "codex_effort")
-        out.append(ENGINES[name](model=model, extra_args=extra or (), effort=effort))
+        kw = {"python_script": spec.get("claude_python_script")} if name == "claude" and spec else {}
+        out.append(ENGINES[name](model=model, extra_args=extra or (), effort=effort, **kw))
     return out
 
 def _str_opt(a, k):
@@ -2624,6 +2684,8 @@ def live_estimate(a, spec, ws, n, engines, tokens, prices, iterations_left=None)
     n_cases, n_llm, n_trig = spec_counts(spec, None)
     est = estimate(n_cases, n_llm, n_trig, a.runs, [(e.name, e.model) for e in engines], a.baseline, a.grader_model,
                    tokens, prices, grader_engine=ge)
+    if a.cmd == "run":
+        return est_result([r for r in est["rows"] if r["kind"] in ("exec", "trigger")], tokens)
     if a.cmd == "loop":  # every automatic iteration may run, each with its calibration, plus a builder call between
         k = a.max_iterations if iterations_left is None else iterations_left
         cal = grader_estimate(len(load_golden(a.golden)), 0, a.grader_model, tokens, prices, ge)["rows"][:1] if a.golden else []
@@ -2741,6 +2803,9 @@ def live_dry_run(a, spec, problems, ws, n, engines, tokens, prices):
             len([n for n in bs["names"] if n != spec["skill_name"]]), spec["skill_name"],
             bs["error"] or "%d registerBundledSkill names found" % len(bs["scanned"]), ", ".join(bs["survivors"]),
             " ".join("%s=%s" % kv for kv in sorted(CLAUDE_CHILD_ENV.items()))))
+        for e in engines:
+            if isinstance(e, ClaudeCodeEngine) and e.script_allow_rule(spec["skill_name"]):
+                print("claude --allowedTools (with_skill and without_skill): %s" % e.script_allow_rule(spec["skill_name"]))
     print("live command: " + shlex.join(["python3", "skill_eval.py"] + [x for x in a.argv if x != "--dry-run"]))
     return 3 if fails else 0
 
@@ -2859,7 +2924,7 @@ def _dispatch(a):
         raise EvalError("--builder (shell command) is not supported: it would run outside the metered budget. Use "
                         "--builder-prompt FILE (one capped `claude -p` call per iteration, charged to --budget-usd)")
     if a.cmd == "loop" and a.builder_prompt: read_builder_prompt(a)
-    engines = make_engines(a)
+    engines = make_engines(a, spec)
     if a.baseline == "old" and not a.old_skill and os.path.isdir(os.path.join(ws, "skill-snapshot")):
         a.old_skill = os.path.join(ws, "skill-snapshot")
     prices = parse_price_overrides(a.price)
