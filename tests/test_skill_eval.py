@@ -125,6 +125,10 @@ class FakeGraderExec:
 
 def quiet(*a, **k): pass
 
+# Fake subscription logins. The status JSON key names are (추정); only the values are from the Claude Code changelog.
+FAKE_CODEX_AUTH = {"auth_mode": "chatgpt", "OPENAI_API_KEY": None, "tokens": {"id_token": "FAKE-SECRET-TOKEN"}}
+FAKE_CLAUDE_STATUS = {"loggedIn": True, "authMethod": "claude.ai", "configDirectory": "/fake"}
+
 def read(path):
     with open(path, encoding="utf-8") as f: return f.read()
 
@@ -137,9 +141,13 @@ class Base(unittest.TestCase):
         self.home = os.path.join(self.tmp, "home"); os.makedirs(self.home)
         env = mock.patch.dict(os.environ, {"HOME": self.home, "CODEX_HOME": os.path.join(self.home, ".codex")})
         env.start(); self.addCleanup(env.stop)  # preflight looks only at a fake home
-        os.environ.pop("CODEX_API_KEY", None)
-        self.auth = os.path.join(self.home, ".codex", "auth.json")  # fake file-based Codex login (never real)
-        wjson(self.auth, {"fake": True})
+        for k in se.API_KEY_ENV + ("CLAUDE_CODE_OAUTH_TOKEN",): os.environ.pop(k, None)  # restored by patch.dict
+        self.auth = os.path.join(self.home, ".codex", "auth.json")  # fake file-based ChatGPT login (never real)
+        wjson(self.auth, FAKE_CODEX_AUTH)
+        self.status_calls = []
+        st = mock.patch.dict(se.AUTH_STATUS, {"fn": lambda cmd, timeout=30: self.status_calls.append(cmd) or
+                                              (0, json.dumps(FAKE_CLAUDE_STATUS), "")})
+        st.start(); self.addCleanup(st.stop)  # `claude auth status` is never really run
         self.runs = os.path.join(self.tmp, "runs"); os.makedirs(self.runs)
         td = mock.patch.object(tempfile, "tempdir", self.runs)  # per-run sandboxes land here
         td.start(); self.addCleanup(td.stop)
@@ -465,7 +473,7 @@ class TestRunAndGrade(Base):
         self.assertEqual(len(fx.calls), 21)
         self.assertNotIn("--max-budget-usd", se.CodexEngine().command("p", True, 5.0))
         res = dict(se.new_result(), cost_usd=None)
-        self.assertEqual(se.run_cost(res, eng, prices, fallback=1.92), 1.92)  # no usage reported: charge the bound
+        self.assertEqual(se.run_cost(res, eng, prices, fallback=1.92), (1.92, "cap_charged"))  # no usage: charge the bound
 
     def test_budget_stops_runs(self):
         spec, _ = self.spec()
@@ -607,7 +615,7 @@ class TestCLI(Base):
         self.assertIn("approval gates: requirements=NOT APPROVED, eval_set=NOT APPROVED", out)
         self.assertIn("[claude without_skill]", out); self.assertIn("--disable-slash-commands", out)
         self.assertIn("[codex with_skill] codex exec --json", out)
-        self.assertIn("priced total $", out)
+        self.assertIn("API-equivalent total $", out)
 
     def test_estimate_overrides_and_eva_passthrough(self):
         d = make_skill(self.tmp)
@@ -727,7 +735,7 @@ class TestCLI(Base):
         g = se.LLMGrader("claude-sonnet-5-5", exec_fn=FakeGraderExec(report_cost=False), budget=se.Budget(10.0),
                          prices={"grader": (1000.0, 1000.0)})
         g.grade({"prompt": "p", "expected_output": "e"}, {"final": "feat/x"}, [{"id": "1", "text": "t"}])
-        self.assertAlmostEqual(g.usage["cost_usd"], (100 + 10) * 1000.0 / 1e6)
+        self.assertAlmostEqual(g.usage["api_equivalent_usd"], (100 + 10) * 1000.0 / 1e6)
         self.assertAlmostEqual(g.budget.spent, 0.11)
 
     # P1e (round 3: runs are sandboxed; preflight checks what a sandbox cannot hide)
@@ -752,12 +760,12 @@ class TestCLI(Base):
         os.makedirs(anc); write(os.path.join(anc, "SKILL.md"), SKILL_MD)
         self.assertIn("has skills ['other']", se.preflight(spec, ["codex"], self.runs)[0])
         shutil.rmtree(os.path.join(self.tmp, ".agents"))
-        os.remove(self.auth)  # no file login and no CODEX_API_KEY: cannot isolate Codex auth
-        self.assertIn("no CODEX_API_KEY", se.preflight(spec, ["codex"], self.runs)[0])
-        with mock.patch.dict(os.environ, {"CODEX_API_KEY": "x"}):
-            self.assertEqual(se.preflight(spec, ["codex"], self.runs), [])
+        os.remove(self.auth)  # no file-based ChatGPT login: Codex auth cannot be isolated
+        self.assertIn("no file-based", se.preflight(spec, ["codex"], self.runs)[0])
+        with mock.patch.dict(os.environ, {"CODEX_API_KEY": "x"}):  # an API key is refused, not a substitute
+            self.assertTrue(any("CODEX_API_KEY is set" in p for p in se.preflight(spec, ["codex"], self.runs)))
         write(os.path.join(self.home, ".claude", "settings.json"), json.dumps({"apiKeyHelper": "/bin/echo"}))
-        self.assertIn("supplies auth", se.preflight(spec, ["claude"], self.runs)[0])
+        self.assertIn("configures API-key auth", se.preflight(spec, ["claude"], self.runs)[0])
         self.assertEqual(se.iterations(self.ws), [])
 
     # P2a

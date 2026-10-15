@@ -256,33 +256,7 @@ class TestIsolation(Base):
         self.assertIsNone(t["error"])
         self.assertEqual(os.listdir(self.runs), [])
 
-    def test_codex_env_links_auth_without_copying(self):
-        spec, _ = self.spec(evals=evals_doc(human=False))
-        seen = []
-        def fx(cmd, cwd, timeout, env=None):
-            ch = env["CODEX_HOME"]; link = os.path.join(ch, "auth.json")
-            seen.append((env["HOME"], ch, os.path.islink(link), os.path.realpath(link), cwd))
-            return 0, codex_jsonl("plain answer"), ""
-        se.run_iteration(spec, self.ws, [se.CodexEngine(exec_fn=fx)], runs=1, log=quiet)
-        home, ch, islink, target, cwd = seen[0]
-        root = os.path.dirname(cwd)
-        self.assertEqual((home, ch), (os.path.join(root, "home"), os.path.join(root, "codex_home")))
-        self.assertTrue(islink); self.assertEqual(target, os.path.realpath(self.auth))
-        self.assertEqual(rjson(self.auth), {"fake": True})  # real login untouched by cleanup
-        self.assertEqual(os.listdir(self.runs), [])
-        with mock.patch.dict(os.environ, {"CODEX_API_KEY": "k"}):
-            seen.clear(); se.run_iteration(spec, self.ws, [se.CodexEngine(exec_fn=fx)], runs=1, log=quiet)
-        self.assertFalse(seen[0][2])
-
-    def test_codex_replacing_auth_link_stops_and_keeps_sandbox(self):
-        spec, _ = self.spec(evals=evals_doc(human=False))
-        def fx(cmd, cwd, timeout, env=None):
-            link = os.path.join(env["CODEX_HOME"], "auth.json"); os.remove(link); write(link, "{}")
-            return 0, codex_jsonl("plain"), ""
-        n = se.run_iteration(spec, self.ws, [se.CodexEngine(exec_fn=fx)], runs=1, log=quiet)
-        self.assertIn("replaced the auth.json link", rjson(os.path.join(self.ws, "iteration-%d" % n, "plan.json"))["stopped"])
-        self.assertEqual(len(os.listdir(self.runs)), 1)  # kept for the user to inspect
-        self.assertEqual(rjson(self.auth), {"fake": True})
+    # Codex auth in the sandbox (read-only copy, ChatGPT only): tests/test_subscription_auth.py
 
     def test_codex_sandbox_discovery_check(self):
         spec, _ = self.spec(evals=evals_doc(human=False))

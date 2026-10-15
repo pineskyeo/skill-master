@@ -8,6 +8,8 @@ in README.md ("스킬 평가 하네스"). Python 3.9 standard library only.
 Safety: no model or CLI is ever executed unless the command line has --live AND a finite --budget-usd, the approval
 gates pass, and the cost estimate fits the budget. Without --live every command is a dry run: it prints the
 plan and the estimated cost. Engines and graders take an injectable exec_fn so tests run fully mocked.
+Auth is subscription only (Claude Code claude.ai OAuth, Codex ChatGPT login; README "Subscription auth"): API-key
+variables are refused and scrubbed from every child, and costs are API-equivalent (usage x API prices), not spend.
 
 Usage: python3 skill_eval.py <validate|estimate|plan|run|grade|calibrate|report|approve|register|snapshot|loop> <skill> ...
        (also reachable as: python3 eva.py eval <subcommand> ...)
@@ -236,10 +238,101 @@ def live_exec(cmd, cwd, timeout, env=None):
     """The only place a real CLI is started. Refuses unless main() enabled live mode (--live + --budget-usd + gates)."""
     if not _LIVE["on"]:
         raise LiveDisabled("refusing to execute %r: live mode needs --live and --budget-usd" % (cmd[0],))
-    env = dict(os.environ if env is None else env)
+    env = scrub_env(os.environ if env is None else env)  # subscription auth only: no API key reaches a child
     env.pop("CLAUDECODE", None)  # as skill-creator run_eval.py: allow nesting claude -p inside a Claude Code session
     p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, env=env)
     return p.returncode, p.stdout, p.stderr
+
+# ---------- subscription auth (README "Eval isolation" > "Subscription auth") ----------
+# Variables that switch Claude Code / Codex to API-key (per-token) billing. Their presence blocks --live (preflight)
+# and they are removed from every child environment anyway. Values are never read, printed or logged.
+API_KEY_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY")
+# `--json` and the method values "claude.ai" / "api_key" are from the Claude Code changelog
+# (~/.claude/cache/changelog.md: "Added `configDirectory` to the output of `claude auth status --json`", "it now
+# reports `api_key`"). The JSON key that holds the method is not documented there (추정), so every string value under
+# a key named like auth/method/source/provider is classified, and anything unrecognized fails closed.
+CLAUDE_AUTH_STATUS_CMD = ["claude", "auth", "status", "--json"]
+CODEX_SUBSCRIPTION_MODES = ("chatgpt",)  # ~/.codex/auth.json "auth_mode" (value seen on this machine, 2026-10-15)
+BILLING = "subscription"
+ACTUAL_SPEND_NOTE = ("not metered: subscription runs (claude.ai plan / ChatGPT plan) are not billed per token; plan "
+                     "limits and any extra-usage charges are visible only in your account")
+
+def scrub_env(env):
+    """Copy of env without the API-key variables (API_KEY_ENV)."""
+    return {k: v for k, v in dict(env).items() if k not in API_KEY_ENV}
+
+def api_key_env_problems(environ=None):
+    environ = os.environ if environ is None else environ
+    return ["%s is set (value not shown): API-key auth is not allowed, eval runs use subscription auth only; unset it"
+            % k for k in API_KEY_ENV if k in environ]
+
+def run_auth_status(cmd, timeout=30):
+    """Runs a local status command (no model call, nothing billed) with the same scrubbed env the runs get. Only
+    check_live_gates calls it, so dry runs still execute nothing."""
+    env = scrub_env(os.environ); env.pop("CLAUDECODE", None)
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+    return p.returncode, p.stdout, p.stderr
+
+AUTH_STATUS = {"fn": run_auth_status}  # tests replace this; it is never a model call
+
+def _string_values(obj, keyre, depth=0):
+    out = []
+    if isinstance(obj, dict) and depth < 4:
+        for k, v in obj.items():
+            if isinstance(v, str) and keyre.search(str(k)): out.append(v)
+            elif isinstance(v, (dict, list)): out += _string_values(v, keyre, depth + 1)
+    elif isinstance(obj, list) and depth < 4:
+        for v in obj: out += _string_values(v, keyre, depth + 1)
+    return out
+
+def _shown(v):
+    """A method value is echoed in errors only when it looks like a method name (never an email or a token)."""
+    return v if re.match(r"^[A-Za-z0-9._ -]{1,40}$", v) and "@" not in v else "<hidden>"
+
+def claude_auth_problems(status_fn=None):
+    """`claude auth status --json` must report a claude.ai (OAuth / subscription) login. API-key methods are refused;
+    no JSON, not logged in, or no recognizable method also refuse (fail closed). Raw output is never logged."""
+    try:
+        rc, out, _ = (status_fn or AUTH_STATUS["fn"])(CLAUDE_AUTH_STATUS_CMD)
+    except (OSError, subprocess.SubprocessError) as ex:
+        return ["claude: `claude auth status --json` could not run (%s); cannot verify subscription auth" % type(ex).__name__]
+    try: data = json.loads(out or "")
+    except ValueError: data = None
+    if rc != 0 or not isinstance(data, dict):
+        return ["claude: `claude auth status --json` gave no JSON (exit %s); cannot verify subscription auth" % rc]
+    if data.get("loggedIn") is False:
+        return ["claude: not logged in; run `claude` and /login with your claude.ai account (or set CLAUDE_CODE_OAUTH_TOKEN)"]
+    vals = _string_values(data, re.compile(r"auth|method|source|provider", re.I))
+    norm = [re.sub(r"[^a-z0-9]", "", v.lower()) for v in vals]
+    api = sorted({_shown(v) for v, n in zip(vals, norm) if "apikey" in n or n == "console"
+                  or ("authtoken" in n and "oauth" not in n)})  # ANTHROPIC_AUTH_TOKEN, not oauth_token
+    if api:
+        return ["claude: auth status reports API-key auth %s; eval runs use subscription auth only (log in with "
+                "claude.ai, or use a `claude setup-token` token in CLAUDE_CODE_OAUTH_TOKEN)" % api]
+    if not any(n == "claudeai" or "oauth" in n or "subscription" in n for n in norm):
+        return ["claude: auth status shows no claude.ai/OAuth login (methods seen: %s); cannot verify subscription "
+                "auth" % (sorted({_shown(v) for v in vals}) or "none")]
+    return []
+
+def codex_auth_mode(path):
+    """Only the "auth_mode" field of a Codex auth.json; tokens are never returned, printed or logged."""
+    try:
+        with open(path, encoding="utf-8") as f: data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    mode = data.get("auth_mode") if isinstance(data, dict) else None
+    return mode if isinstance(mode, str) else None
+
+def codex_auth_problems():
+    auth = os.path.join(real_codex_home(), "auth.json")
+    if not os.path.isfile(auth):
+        return ["codex: no file-based %s (ChatGPT login) to copy read-only into the isolated CODEX_HOME (keyring "
+                "storage cannot be isolated without changing it; API keys are not allowed)" % auth]
+    mode = codex_auth_mode(auth)
+    if mode not in CODEX_SUBSCRIPTION_MODES:
+        return ["codex: %s auth_mode is %s, not ChatGPT; eval runs use subscription auth only (`codex login` with "
+                "ChatGPT)" % (auth, repr(_shown(mode)) if mode else "missing/unreadable")]
+    return []
 
 def new_result():
     return {"final": "", "tool_calls": [], "input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0,
@@ -278,7 +371,10 @@ class Engine:
     def triggered(self, result, skill_name): raise NotImplementedError
     def sandbox_env(self, root):
         """Environment for one isolated run whose sandbox folder is root (see README "Eval isolation")."""
-        return dict(os.environ)
+        return scrub_env(os.environ)
+    def auth_record(self):
+        """How the run authenticates (names only, never values)."""
+        return {}
     def sandbox_problems(self, root, work, skill_name, with_skill):
         """Static check of what the engine could discover from this sandbox, before the CLI starts."""
         found = sorted(n for n, _ in skills_under(os.path.join(work, self.skills_rel), 1))
@@ -320,7 +416,13 @@ class ClaudeCodeEngine(Engine):
         if not with_skill: cmd += ["--disable-slash-commands"]
         return cmd + self.extra_args
     def sandbox_env(self, root):
-        return dict(os.environ, **self.ENV)
+        """Subscription auth from the user's own session: CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token`) is passed
+        through only if already exported, otherwise the CLI reads the Keychain login of the unchanged HOME /
+        CLAUDE_CONFIG_DIR. The harness never writes or logs a token. API-key variables are removed."""
+        return scrub_env(dict(os.environ, **self.ENV))
+    def auth_record(self):
+        return {"billing": BILLING, "method": "CLAUDE_CODE_OAUTH_TOKEN (env, value not logged)"
+                if "CLAUDE_CODE_OAUTH_TOKEN" in os.environ else "claude.ai login of the current user session (Keychain)"}
     def isolation_problems(self, res, with_skill, skill_name, user_names):
         """From the stream-json system/init event: no plugins, the skill under test loaded only in with_skill, and no
         user-level skill name. The init field names are (추정) from the Agent SDK docs; if absent we fail closed."""
@@ -375,16 +477,28 @@ class CodexEngine(Engine):
     Trigger detection is (추정): Codex documents no skill-invocation event, so a run counts as triggered when an
     item mentions .../skills/<name>/SKILL.md."""
     name, skills_rel = "codex", ".agents/skills"
+    def __init__(self, *a, **k):
+        Engine.__init__(self, *a, **k)
+        self._auth_digest = {}  # sandbox root -> sha256 of the copied auth.json (in memory only, never written)
     def sandbox_env(self, root):
         """HOME=<sandbox>/home hides $HOME/.agents/skills; CODEX_HOME=<sandbox>/codex_home hides $CODEX_HOME/skills
-        (user + plugin skills) and config.toml. Auth: CODEX_API_KEY when set, else a symlink to the real
-        $CODEX_HOME/auth.json (the secret is never copied or logged; after_run fails closed if Codex replaced it)."""
+        (user + plugin skills) and config.toml. Auth: a read-only copy (0400, in a 0700 folder) of the real
+        $CODEX_HOME/auth.json, only when its auth_mode is ChatGPT. The copy is removed with the sandbox; its content is
+        never printed or logged. A symlink is not used: chmod on it would change the user's own file."""
         home, ch = os.path.join(root, "home"), os.path.join(root, "codex_home")
-        os.makedirs(home); os.makedirs(ch)
-        if not os.environ.get("CODEX_API_KEY"):
-            auth = os.path.join(real_codex_home(), "auth.json")
-            if os.path.isfile(auth): os.symlink(auth, os.path.join(ch, "auth.json"))
-        return dict(os.environ, HOME=home, CODEX_HOME=ch)
+        os.makedirs(home, mode=0o700); os.makedirs(ch, mode=0o700); os.chmod(ch, 0o700)
+        probs = codex_auth_problems()
+        if probs: raise EvalError("; ".join(probs))
+        src, dst = os.path.join(real_codex_home(), "auth.json"), os.path.join(ch, "auth.json")
+        with open(src, "rb") as f: data = f.read()
+        fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try: os.write(fd, data)
+        finally: os.close(fd)
+        os.chmod(dst, 0o400)
+        self._auth_digest[root] = hashlib.sha256(data).hexdigest()
+        return scrub_env(dict(os.environ, HOME=home, CODEX_HOME=ch))
+    def auth_record(self):
+        return {"billing": BILLING, "method": "ChatGPT login (auth_mode chatgpt), read-only copy of auth.json, removed after the run"}
     def sandbox_problems(self, root, work, skill_name, with_skill):
         out = Engine.sandbox_problems(self, root, work, skill_name, with_skill)
         for label, d in (("sandbox HOME", os.path.join(root, "home", ".agents", "skills")),
@@ -394,11 +508,18 @@ class CodexEngine(Engine):
             if hits: out.append("%s skills folder %s has %s" % (label, d, sorted(hits)))
         return out
     def after_run(self, root):
-        link = os.path.join(root, "codex_home", "auth.json")
-        if os.path.lexists(link) and not os.path.islink(link):
-            return ["codex replaced the auth.json link in the isolated CODEX_HOME %s (token refresh?); your real "
-                    "auth.json may now be stale. The sandbox is kept, not deleted; check `codex login status`" % root]
-        return []
+        """The copy must be unchanged. If Codex rewrote it (token refresh, 추정), the refreshed login is deleted with
+        the sandbox and the real auth.json may hold a superseded token: stop and tell the user to check."""
+        want, p = self._auth_digest.pop(root, None), os.path.join(root, "codex_home", "auth.json")
+        if want is None: return []
+        try:
+            with open(p, "rb") as f: same = (not os.path.islink(p)) and hashlib.sha256(f.read()).hexdigest() == want
+        except OSError:
+            same = False
+        if same: return []
+        return ["codex changed or removed the read-only auth.json copy in its isolated CODEX_HOME (token refresh?). "
+                "The copy was deleted with the sandbox; your real auth.json was not touched but may be superseded: "
+                "run `codex login status` (and `codex login` if needed) before the next run"]
     def command(self, prompt, with_skill, budget_usd=None):
         cmd = ["codex", "exec", "--json", "--skip-git-repo-check", "--ephemeral", "--sandbox", "workspace-write"]
         if self.model: cmd += ["-m", self.model]
@@ -475,42 +596,47 @@ class Sandbox:
     case's fixture files plus, for with_skill, only the skill under test. Removed after the run."""
     def __init__(self, engine, spec, case, skill_path, run_root):
         self.engine, self.run_root = engine, os.path.realpath(run_root)
-        self.root = tempfile.mkdtemp(prefix="skill-eval-%s-" % engine.name, dir=self.run_root)
-        self.work = os.path.join(self.root, "work"); os.makedirs(self.work)
-        for f in case.get("files") or []:
-            dst = os.path.join(self.work, f); os.makedirs(os.path.dirname(dst), exist_ok=True)
-            shutil.copy2(os.path.join(spec["skill_dir"], f), dst)
-        self.name, self.with_skill = spec["skill_name"], bool(skill_path)
-        if skill_path: engine.install_skill(self.work, skill_path, self.name)
-        self.env = engine.sandbox_env(self.root)
+        self.root = tempfile.mkdtemp(prefix="skill-eval-%s-" % engine.name, dir=self.run_root)  # mode 0700
+        try:
+            self.work = os.path.join(self.root, "work"); os.makedirs(self.work)
+            for f in case.get("files") or []:
+                dst = os.path.join(self.work, f); os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(os.path.join(spec["skill_dir"], f), dst)
+            self.name, self.with_skill = spec["skill_name"], bool(skill_path)
+            if skill_path: engine.install_skill(self.work, skill_path, self.name)
+            self.env = engine.sandbox_env(self.root)
+        except BaseException:  # never leave a half-built sandbox (it may hold the auth copy)
+            shutil.rmtree(ensure_inside(self.run_root, self.root), ignore_errors=True)
+            raise
     def problems(self):
         return self.engine.sandbox_problems(self.root, self.work, self.name, self.with_skill)
     def record(self):
         """What the run saw (names and paths only; no environment values)."""
-        return {"sandbox": self.root, "with_skill": self.with_skill,
-                "env_overrides": sorted(k for k in self.env if os.environ.get(k) != self.env[k])}
+        return {"sandbox": self.root, "with_skill": self.with_skill, "auth": self.engine.auth_record(),
+                "env_overrides": sorted(k for k in self.env if os.environ.get(k) != self.env[k]),
+                "env_removed": sorted(k for k in os.environ if k not in self.env)}
     def copy_back(self, dst):
         """Keeps the run's output files for static checks (file_exists), without the installed skill copy."""
         skills = os.path.realpath(os.path.join(self.work, self.engine.skills_rel))
         ign = lambda d, names: [self.name] if os.path.realpath(d) == skills else []
         shutil.copytree(self.work, dst, symlinks=True, ignore=ign)
     def cleanup(self):
-        problems = self.engine.after_run(self.root)
-        if not problems:
+        """Always removes the sandbox (including the Codex auth copy); returns after_run problems."""
+        try:
+            problems = self.engine.after_run(self.root)
+        finally:
             shutil.rmtree(ensure_inside(self.run_root, self.root), ignore_errors=True)
         return problems
 
 def isolated_run(eng, prompt, spec, case, skill_path, run_dir, run_root, cap, user_names, keep_workdir):
     """Runs one CLI call in a fresh Sandbox and returns (result, fatal problems). Raises EvalError before the call
     (fail closed, nothing spent) when the sandbox could expose another skill. Afterwards, a leak shown by the run's
-    own init report, or Codex replacing its auth link, is returned as fatal: the caller charges the run, records it
+    own init report, or Codex changing its read-only auth copy, is returned as fatal: the caller charges the run, records it
     as an error and stops the iteration."""
     sb = Sandbox(eng, spec, case, skill_path, run_root)
-    ran = False
     try:
         probs = sb.problems()
         if probs: raise EvalError("isolation (%s): %s" % (eng.name, " | ".join(probs)))
-        ran = True
         res = eng.run(prompt, sb.work, with_skill=bool(skill_path), budget_usd=cap, env=sb.env)
         iso = eng.isolation_problems(res, bool(skill_path), spec["skill_name"], user_names)
         res["isolation"] = dict(sb.record(), problems=iso)
@@ -520,7 +646,7 @@ def isolated_run(eng, prompt, spec, case, skill_path, run_dir, run_root, cap, us
             elif os.path.isdir(wd): shutil.rmtree(wd)
             sb.copy_back(wd)
     finally:
-        after = sb.cleanup() if ran else (shutil.rmtree(ensure_inside(sb.run_root, sb.root), ignore_errors=True) or [])
+        after = sb.cleanup()
     fatal = iso + after
     if fatal and not res.get("error"): res["error"] = "isolation: " + "; ".join(fatal)
     return res, fatal
@@ -544,7 +670,7 @@ class LLMGrader:
     def __init__(self, model=DEFAULT_GRADER_MODEL, exec_fn=None, timeout=300, budget=None, prices=None):
         self.model, self.exec_fn, self.timeout, self.budget = model, exec_fn or live_exec, timeout, budget
         self.prices = prices or {}
-        self.usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
+        self.usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0, "api_equivalent_usd": 0.0}
     def _call(self, prompt, schema):
         cap = None
         if self.budget is not None and self.budget.finite():
@@ -557,7 +683,9 @@ class LLMGrader:
         rc, out, err = self.exec_fn(cmd, os.getcwd(), self.timeout)
         try: data = json.loads(out)
         except ValueError:
-            if self.budget is not None and cap is not None: self.budget.charge(cap)  # usage unknown: charge the cap
+            if cap is not None:  # usage unknown: charge the cap
+                self.usage["calls"] += 1; self.usage["api_equivalent_usd"] += cap
+                if self.budget is not None: self.budget.charge(cap)
             raise EvalError("grader returned non-JSON (exit %s): %s" % (rc, (err or out or "")[-300:]))
         if not isinstance(data, dict): data = {}
         u = data.get("usage") or {}
@@ -567,7 +695,7 @@ class LLMGrader:
         if cost is None and (tin or tout): cost = call_cost((tin, tout), price_for("grader", self.model, self.prices))
         if cost is None: cost = cap or 0.0
         self.usage["calls"] += 1
-        self.usage["input_tokens"] += tin; self.usage["output_tokens"] += tout; self.usage["cost_usd"] += cost
+        self.usage["input_tokens"] += tin; self.usage["output_tokens"] += tout; self.usage["api_equivalent_usd"] += cost
         if self.budget is not None: self.budget.charge(cost)
         so = data.get("structured_output")
         if not isinstance(so, dict): raise EvalError("grader output has no structured_output")
@@ -678,7 +806,7 @@ def format_estimate(est):
     for r in est["rows"]:
         lines.append("%-7s %-9s %-24s %6d %12d %10d %10s" % (r["engine"], r["kind"], r["model"][:24], r["calls"],
                      r["tokens_in"], r["tokens_out"], "?" if r["usd"] is None else "%.2f" % r["usd"]))
-    lines.append("total calls %d, priced total $%.2f%s" % (est["calls"], est["total_usd"],
+    lines.append("total calls %d, API-equivalent total $%.2f (subscription: not billed per token)%s" % (est["calls"], est["total_usd"],
                  "" if not est["unpriced_models"] else "  + UNPRICED: %s (pass --price)" % ", ".join(est["unpriced_models"])))
     lines.append("assumed tokens per call (in,out): " + ", ".join("%s=%d,%d" % (k, v[0], v[1]) for k, v in est["tokens"].items()))
     return "\n".join(lines)
@@ -730,8 +858,6 @@ def approve(gate, spec, ws, by):
     wjson(fp, data)
     return data[gate]
 
-AUTH_ENV_KEYS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
-
 def preflight(spec, engines, run_root=None, home=None):
     """Read-only, blocks --live (fail closed). Runs execute in per-run sandboxes under run_root (README "Eval
     isolation"); this checks what the sandboxes cannot hide:
@@ -740,10 +866,14 @@ def preflight(spec, engines, run_root=None, home=None):
     - claude: a same-named copy in ~/.claude/skills (incl. synced/) or a plugin. --setting-sources project,local
       should hide user skills (docs: the "user" source loads ~/.claude/skills), but whether the CLI flag hides already
       downloaded claude.ai synced skills and plugin skills is not verified (추정), so a same-named copy still blocks;
-    - claude: user settings.json supplying auth (apiKeyHelper / env token), which --setting-sources would drop;
-    - codex: skills in /etc/codex/skills (admin scope, cannot be hidden), and no usable auth (CODEX_API_KEY or a
-      file-based $CODEX_HOME/auth.json to link; its content is never read)."""
-    home, name, out = home or os.path.expanduser("~"), spec["skill_name"], []
+    - any API-key variable (API_KEY_ENV) in the environment: subscription auth only;
+    - claude: user settings.json supplying auth: apiKeyHelper / API-key env (refused) or an OAuth token in env, which
+      --setting-sources would drop;
+    - codex: skills in /etc/codex/skills (admin scope, cannot be hidden), and no file-based $CODEX_HOME/auth.json
+      whose auth_mode is ChatGPT (only that field is read).
+    `claude auth status` is checked in check_live_gates (it runs a CLI, so never in a dry run)."""
+    home, name = home or os.path.expanduser("~"), spec["skill_name"]
+    out = api_key_env_problems()
     root = os.path.realpath(run_root or tempfile.gettempdir())
     for e in engines:
         rel = {"claude": ".claude/skills", "codex": ".agents/skills"}.get(e)
@@ -763,16 +893,17 @@ def preflight(spec, engines, run_root=None, home=None):
             except ValueError:
                 st = {}
             env = st.get("env") if isinstance(st, dict) and isinstance(st.get("env"), dict) else {}
-            if isinstance(st, dict) and ("apiKeyHelper" in st or any(k in env for k in AUTH_ENV_KEYS)):
-                out.append("claude: ~/.claude/settings.json supplies auth (apiKeyHelper/env), but isolated runs use "
-                           "--setting-sources project,local and would not see it; export the credential instead")
+            if isinstance(st, dict) and ("apiKeyHelper" in st or any(k in env for k in API_KEY_ENV)):
+                out.append("claude: ~/.claude/settings.json configures API-key auth (apiKeyHelper or an API-key env "
+                           "entry; values not read); eval runs use subscription auth only")
+            elif "CLAUDE_CODE_OAUTH_TOKEN" in env:
+                out.append("claude: ~/.claude/settings.json sets CLAUDE_CODE_OAUTH_TOKEN, but isolated runs use "
+                           "--setting-sources project,local and would not see it; export it in the shell instead")
         if e == "codex":
             hits = skills_under(os.path.join("/etc", "codex", "skills"), 4)
             if hits:
                 out.append("codex: /etc/codex/skills has %s (admin skills load in every run)" % sorted(n for n, _ in hits))
-            if not os.environ.get("CODEX_API_KEY") and not os.path.isfile(os.path.join(real_codex_home(), "auth.json")):
-                out.append("codex: no CODEX_API_KEY and no file-based %s/auth.json to reference from the isolated "
-                           "CODEX_HOME (keyring auth cannot be isolated without changing it)" % real_codex_home())
+            out += codex_auth_problems()
     return out
 
 # ---------- running ----------
@@ -789,6 +920,8 @@ def skill_path_for(config, spec, old_skill):
     return spec["skill_dir"] if config == PRIMARY else (old_skill if config == "old_skill" else None)
 
 class Budget:
+    """limit and spent are API-equivalent USD (usage x API prices): with subscription auth nothing is billed per
+    token, so this is a usage limiter, not a record of money spent."""
     def __init__(self, usd): self.limit, self.spent = usd, 0.0
     def remaining(self): return self.limit - self.spent
     def finite(self): return self.limit != float("inf")
@@ -819,14 +952,52 @@ def guard_call(engine, kind, budget, prices, tokens):
     return None, bound, None
 
 def run_cost(res, engine, prices, fallback=0.0):
-    """Reported cost, else tokens x price; when the CLI reported neither, charge the call's cap/bound (fallback)."""
-    if res.get("cost_usd") is not None: return res["cost_usd"]
+    """API-equivalent USD of one run and where it came from: the CLI-reported cost (Claude total_cost_usd), else
+    usage tokens x API price; when the CLI reported neither, the call's cap/bound (fallback) is charged as an upper
+    bound. Subscription runs are not billed per token: this is what the call would cost at API prices."""
+    if res.get("cost_usd") is not None: return res["cost_usd"], "cli_reported"
     if res["input_tokens"] or res["output_tokens"]:
         c = call_cost((res["input_tokens"], res["output_tokens"]), price_for(engine.name, engine.model, prices))
-        if c is not None: return c
-    return fallback or 0.0
+        if c is not None: return c, "tokens_x_price"
+    return (fallback, "cap_charged") if fallback else (0.0, "unknown")
 
-def write_run(run_dir, res, engine, config, prompt, triggered):
+def append_cost(it_dir, command, usage):
+    """Appends one non-run cost entry (grade, calibrate, builder) to iteration-N/cost.json; runs are in timing.json."""
+    fp = os.path.join(it_dir, "cost.json")
+    data = rjson(fp, {}) or {}
+    data.setdefault("billing", BILLING)
+    data.setdefault("entries", []).append({"command": command, "at": now_iso(), "calls": usage.get("calls", 0),
+        "input_tokens": usage.get("input_tokens", 0), "output_tokens": usage.get("output_tokens", 0),
+        "api_equivalent_usd": round(usage.get("api_equivalent_usd", 0.0), 6)})
+    wjson(fp, data)
+
+def usage_delta(after, before):
+    return {k: after.get(k, 0) - before.get(k, 0) for k in after}
+
+def cost_summary(it_dir):
+    """API-equivalent cost of an iteration: every run's timing.json (exec + trigger, per engine) plus cost.json
+    entries (grading, calibration, builder). actual_spend_usd stays null: the harness cannot see plan billing."""
+    by_engine, unknown = {}, 0
+    for dp, dn, fn in os.walk(it_dir):
+        dn[:] = [d for d in dn if d not in ("workdir", "outputs")]  # run outputs may contain any file
+        if "timing.json" not in fn or dp == it_dir: continue
+        tm = rjson(os.path.join(dp, "timing.json"), {}) or {}
+        parts = os.path.relpath(dp, it_dir).split(os.sep)
+        kind = "trigger" if len(parts) > 1 and parts[1] == "trigger" else "exec"
+        v = tm.get("api_equivalent_usd", tm.get("cost_usd"))
+        if not isinstance(v, (int, float)) or tm.get("api_equivalent_source") == "unknown":
+            unknown += 1; v = 0.0
+        e = by_engine.setdefault(parts[0], {"exec": 0.0, "trigger": 0.0})
+        e[kind] = round(e[kind] + v, 6)
+    other = {}
+    for x in (rjson(os.path.join(it_dir, "cost.json"), {}) or {}).get("entries") or []:
+        other[x.get("command", "?")] = round(other.get(x.get("command", "?"), 0.0) + (x.get("api_equivalent_usd") or 0.0), 6)
+    total = sum(v for e in by_engine.values() for v in e.values()) + sum(other.values())
+    return {"billing": BILLING, "budget_basis": "api_equivalent",
+            "api_equivalent_usd": {"by_engine": by_engine, "other": other, "total": round(total, 4)},
+            "runs_without_usage": unknown, "actual_spend_usd": None, "actual_spend_note": ACTUAL_SPEND_NOTE}
+
+def write_run(run_dir, res, engine, config, prompt, triggered, api_eq=None):
     t = {"engine": engine.name, "model": engine.model, "configuration": config, "prompt": prompt, "final": res["final"],
          "tool_calls": res["tool_calls"], "triggered": triggered, "returncode": res.get("returncode"),
          "error": res.get("error"), "stderr_tail": res.get("stderr_tail", ""), "command": res.get("command")}
@@ -839,7 +1010,9 @@ def write_run(run_dir, res, engine, config, prompt, triggered):
         "executor_start": res.get("executor_start"), "executor_end": res.get("executor_end"),
         "executor_duration_seconds": round(res.get("duration_ms", 0) / 1000.0, 3),
         "input_tokens": res["input_tokens"], "output_tokens": res["output_tokens"],
-        "cached_input_tokens": res["cached_input_tokens"], "cost_usd": res.get("cost_usd")})
+        "cached_input_tokens": res["cached_input_tokens"], "cost_usd": res.get("cost_usd"),  # CLI-reported
+        "api_equivalent_usd": None if api_eq is None else round(api_eq[0], 6),
+        "api_equivalent_source": None if api_eq is None else api_eq[1], "billing": BILLING})
 
 class _Fatal(Exception): pass
 
@@ -861,6 +1034,7 @@ def run_iteration(spec, ws, engines, runs=DEFAULT_RUNS, baseline="none", old_ski
           "old_skill_sha256": skill_tree_hash(old_skill) if baseline == "old" else None,
           "isolation": {"run_root": run_root, "per_run_sandbox": True}})
     budget, prices, tokens = budget or Budget(float("inf")), prices or {}, tokens or DEFAULT_TOKENS
+    spent0 = budget.spent
     user_names = sorted({nm for nm, _ in claude_user_skills(os.path.expanduser("~"))}) if any(e.name == "claude" for e in engines) else []
     stopped = None
 
@@ -869,8 +1043,9 @@ def run_iteration(spec, ws, engines, runs=DEFAULT_RUNS, baseline="none", old_ski
         if stop: return None, stop
         res, fatal = isolated_run(eng, prompt, spec, case, skill_path_for(cfg, spec, old_skill), ensure_inside(it_dir, rd),
                                   run_root, cap, user_names, keep)
-        budget.charge(run_cost(res, eng, prices, fallback))
-        write_run(rd, res, eng, cfg, prompt, eng.triggered(res, spec["skill_name"]))
+        api_eq = run_cost(res, eng, prices, fallback)
+        budget.charge(api_eq[0])  # the budget limits API-equivalent cost
+        write_run(rd, res, eng, cfg, prompt, eng.triggered(res, spec["skill_name"]), api_eq)
         if fatal: raise _Fatal("isolation [%s %s]: %s" % (eng.name, cfg, "; ".join(fatal)))
         return res, None
 
@@ -908,8 +1083,8 @@ def run_iteration(spec, ws, engines, runs=DEFAULT_RUNS, baseline="none", old_ski
     except (_Fatal, EvalError) as ex:  # isolation could not be guaranteed: stop everything (fail closed)
         stopped = str(ex)
     meta = rjson(os.path.join(it_dir, "plan.json"))
-    meta.update(finished_at=now_iso(), spent_usd=round(budget.spent, 4) if budget.limit != float("inf") else None,
-                stopped=stopped)
+    meta.update(finished_at=now_iso(), billing=BILLING, stopped=stopped,
+                api_equivalent_usd=round(budget.spent - spent0, 4))  # exec + trigger runs of this call
     wjson(os.path.join(it_dir, "plan.json"), meta)
     if stopped: log("STOPPED: " + stopped)
     return n
@@ -962,10 +1137,19 @@ def check_grader_model(it_dir, grader_model):
 
 def grade_iteration(spec, ws, n, grader=None, seed=None, log=print):
     """Static checks first, then (with a grader) LLM yes/no items and blind pairwise comparison; human items are
-    queued in human_review.json and merged back when a reviewer filled in "passed"."""
+    queued in human_review.json and merged back when a reviewer filled in "passed". The grader's API-equivalent
+    cost is appended to cost.json even when grading stops early."""
     it_dir = os.path.join(ws, "iteration-%d" % n)
     if not os.path.isdir(it_dir): raise EvalError("no %s" % it_dir)
     if grader is not None: check_grader_model(it_dir, grader.model)
+    before = dict(grader.usage) if grader is not None else None
+    try:
+        _grade(spec, ws, it_dir, grader, seed, log)
+    finally:
+        if grader is not None and grader.usage["calls"] != before["calls"]:
+            append_cost(it_dir, "grade", usage_delta(grader.usage, before))
+
+def _grade(spec, ws, it_dir, grader, seed, log):
     cases = {c["id"]: c for c in spec["cases"]}
     hr_path = os.path.join(it_dir, "human_review.json")
     old_hr = {x["key"]: x for x in (rjson(hr_path, {}) or {}).get("items", [])}
@@ -1092,6 +1276,14 @@ def calibrate(golden_path, grader):
     return {"n": n, "agreement": round(agree, 4), "kappa": round(kappa, 4), "threshold": AGREEMENT_MIN,
             "grader_model": grader.model, "golden": os.path.abspath(golden_path),
             "disagreements": [r for r in rows if r["grader"] is not r["human"]]}
+
+def calibrate_metered(golden_path, grader, it_dir):
+    """calibrate() plus its API-equivalent grader cost in it_dir/cost.json (recorded even when it stops early)."""
+    before = dict(grader.usage)
+    try:
+        return calibrate(golden_path, grader)
+    finally:
+        if grader.usage["calls"] != before["calls"]: append_cost(it_dir, "calibrate", usage_delta(grader.usage, before))
 
 # ---------- aggregation, report, gate ----------
 def stats(values):
@@ -1220,7 +1412,7 @@ def build_benchmark(spec, ws, n):
     bench = {"metadata": {"skill_name": spec["skill_name"], "skill_path": spec["skill_dir"], "timestamp": now_iso(),
                           "engines": plan.get("engines"), "configurations": plan.get("configurations"),
                           "evals_run": plan.get("evals_run"), "runs_per_configuration": plan.get("runs_per_configuration"),
-                          "spent_usd": plan.get("spent_usd"), "stopped": plan.get("stopped"),
+                          "billing": plan.get("billing", BILLING), "stopped": plan.get("stopped"),
                           # what was tested (recorded at run start) vs what is on disk now; register compares them
                           "skill_sha256": plan.get("skill_sha256"), "eval_set_sha256": plan.get("eval_set_sha256"),
                           "current_skill_sha256": skill_tree_hash(spec["skill_dir"]),
@@ -1228,6 +1420,8 @@ def build_benchmark(spec, ws, n):
              "runs": runs, "run_summary": summarize(runs), "per_engine": per_engine, "trigger": trig, "pairwise": pw,
              "static_failures": static_fail, "pressure": pressure, "completeness": completeness,
              "execution_errors": exec_errors,
+             # API-equivalent cost (usage x API prices / CLI-reported) kept apart from actual spend (subscription)
+             "cost": cost_summary(it_dir),
              # counted from grading.json (not the human_review.json queue): an item is graded only once grade wrote it
              "human_pending": sum(1 for r in runs for e in r["expectations"]
                                   if e.get("layer") == "human" and not isinstance(e.get("passed"), bool)),
@@ -1302,8 +1496,9 @@ def comparison_md(bench, gate, n):
     L = ["# %s — iteration %d" % (m["skill_name"], n), "",
          "- configurations: %s, runs per configuration: %s, engines: %s" % (", ".join(m.get("configurations") or []),
              m.get("runs_per_configuration"), ", ".join("%s(%s)" % (k, v or "default") for k, v in (m.get("engines") or {}).items())),
-         "- spent: %s%s" % ("n/a" if m.get("spent_usd") is None else "$%.2f" % m["spent_usd"],
-                            ", STOPPED: %s" % m["stopped"] if m.get("stopped") else ""), "",
+         "- API-equivalent cost: $%.2f (usage x API prices; the budget limit); actual spend: not metered (%s auth)%s"
+         % (((bench.get("cost") or {}).get("api_equivalent_usd") or {}).get("total", 0.0), m.get("billing") or BILLING,
+            ", STOPPED: %s" % m["stopped"] if m.get("stopped") else ""), "",
          "## Gate", "", "**%s**" % ("NEEDS HUMAN APPROVAL" if gate["needs_approval"] else "auto-approved (no problems)")]
     L += ["- problem: " + p for p in gate["problems"]] + ["- note: " + x for x in gate["notes"]]
     L += ["", "## Pass rate / time / tokens", "", "| engine | configuration | pass_rate | time_s | tokens | graded runs |",
@@ -1345,6 +1540,18 @@ def comparison_md(bench, gate, n):
         x = r["result"]
         L.append("| %s | %s | %s | %d | %s | %d | %.1f | %d |" % (r["engine"], r["eval_name"], r["configuration"], r["run_number"],
                  "-" if x["pass_rate"] is None else "%.2f" % x["pass_rate"], x["pending"], x["time_seconds"], x["tokens"]))
+    c = bench.get("cost")
+    if c:
+        ae = c["api_equivalent_usd"]
+        L += ["", "## Cost", "", "Billing: %s. API-equivalent = CLI-reported cost, else usage tokens x API price (or the "
+              "charged cap when a call reported no usage); it is what `--budget-usd` limits. Actual spend: %s."
+              % (c["billing"], c["actual_spend_note"]), "", "| item | API-equivalent USD |", "|---|---|"]
+        for eng, kinds in sorted(ae["by_engine"].items()):
+            L += ["| %s %s | %.4f |" % (eng, k, v) for k, v in sorted(kinds.items())]
+        L += ["| %s | %.4f |" % (k, v) for k, v in sorted(ae["other"].items())]
+        L += ["| **total** | **%.4f** |" % ae["total"], "| actual spend | not metered |"]
+        if c.get("runs_without_usage"):
+            L.append("- %d run(s) reported no usage and no price: counted as $0 here" % c["runs_without_usage"])
     if bench["notes"]:
         L += ["", "## Notes", ""] + ["- " + x for x in bench["notes"]]
     return "\n".join(L) + "\n"
@@ -1393,6 +1600,7 @@ class ClaudeBuilder:
     def __init__(self, instructions, model, budget, prices=None, exec_fn=None, timeout=900):
         self.instructions, self.model, self.budget, self.prices = instructions, model, budget, prices or {}
         self.exec_fn, self.timeout, self.calls = exec_fn or live_exec, timeout, 0
+        self.usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0, "api_equivalent_usd": 0.0}
     def command(self, prompt, cap):
         cmd = ["claude", "-p", prompt, "--model", self.model, "--output-format", "json", "--no-session-persistence",
                "--permission-mode", "acceptEdits", "--tools", self.TOOLS, "--disable-slash-commands"]
@@ -1422,6 +1630,10 @@ class ClaudeBuilder:
             cost = call_cost((tin, int(u.get("output_tokens") or 0)), price_for("builder", self.model, self.prices))
         if cost is None: cost = cap or 0.0  # usage unknown: charge the cap
         if self.budget is not None: self.budget.charge(cost)
+        self.usage["calls"] += 1; self.usage["input_tokens"] += tin
+        self.usage["output_tokens"] += int(u.get("output_tokens") or 0); self.usage["api_equivalent_usd"] += cost
+        append_cost(it_dir, "builder", {"calls": 1, "input_tokens": tin, "output_tokens": int(u.get("output_tokens") or 0),
+                                        "api_equivalent_usd": cost})
         return rc
 
 def loop(spec, ws, engines, grader, builder, max_iterations=MAX_AUTO_ITERATIONS, runs=DEFAULT_RUNS, baseline="none",
@@ -1441,7 +1653,8 @@ def loop(spec, ws, engines, grader, builder, max_iterations=MAX_AUTO_ITERATIONS,
         n = run_iteration(spec, ws, engines, runs, baseline, old_skill, budget, prices, log=log, tokens=tokens,
                           run_root=run_root)
         grade_iteration(spec, ws, n, grader, seed, log=log)
-        if golden: wjson(os.path.join(ws, "iteration-%d" % n, "calibration.json"), calibrate(golden, grader))
+        if golden: wjson(os.path.join(ws, "iteration-%d" % n, "calibration.json"),
+                         calibrate_metered(golden, grader, os.path.join(ws, "iteration-%d" % n)))
         _, gate = report_iteration(spec, ws, n)
         log("iteration-%d gate: %s" % (n, gate["problems"] or "clean"))
         if not gate["problems"]: return {"status": "clean", "iteration": n}
@@ -1485,6 +1698,8 @@ def plan_text(spec, problems, a, engines, ws, est):
         "approved" if approval_ok("requirements", spec, ws) else "NOT APPROVED",
         "approved" if approval_ok("eval_set", spec, ws) else "NOT APPROVED")]
     L += ["preflight problems (block --live):"] + ["  - " + w for w in preflight(spec, [e.name for e in engines], a.run_root)]
+    L += ["auth: subscription only (Claude claude.ai OAuth, Codex ChatGPT login); `claude auth status --json` is "
+          "checked only with --live"]
     if spec["cases"]:
         c = spec["cases"][0]
         L.append("sample commands (eval %s, run in <workspace>/iteration-N/<engine>/%s/<config>/run-k/workdir):" % (c["id"], eval_dir_name(c)))
@@ -1524,10 +1739,20 @@ def read_builder_prompt(a):
     if not text.strip(): raise EvalError("--builder-prompt %s is empty" % a.builder_prompt)
     return text
 
+def subscription_problems(a, engines):
+    """Live gate: no API-key variable anywhere (run/loop also get it from preflight), and `claude auth status` shows a
+    claude.ai login whenever the command calls claude (Claude engine, grader for grade/calibrate/loop, builder)."""
+    out = [] if a.cmd in ("run", "loop") else api_key_env_problems()  # run/loop: reported by preflight
+    if a.cmd in ("grade", "calibrate", "loop") or any(e.name == "claude" for e in engines):
+        out += claude_auth_problems()
+    return out
+
 def check_live_gates(a, spec, problems, ws, n, engines, tokens, prices, budget_left, iterations_left=None):
     """Every --live gate; raises EvalError on the first failure. `loop` calls it again before each iteration with the
     reloaded eval set, the remaining iterations and the remaining budget."""
     if problems: raise EvalError("eval set has %d validation problem(s); run `validate`" % len(problems))
+    auth = subscription_problems(a, engines)
+    if auth: raise EvalError("subscription auth: " + " | ".join(auth))
     for g in ("requirements", "eval_set"):
         if not approval_ok(g, spec, ws): raise EvalError("gate %s not approved (write %s/requirements.md, then `approve --gate %s`)" % (g, ws, g))
     live_est = live_estimate(a, spec, ws, n, engines, tokens, prices, iterations_left)
@@ -1573,7 +1798,9 @@ def main(argv=None):
             s.add_argument("--price", action="append", help="KEY=IN,OUT USD/MTok; KEY = engine name, model id or 'grader'")
             s.add_argument("--tokens", action="append", help="KIND=IN,OUT assumed tokens per call; KIND exec|trigger|grader|pairwise")
             s.add_argument("--cases", type=int); s.add_argument("--llm-cases", type=int); s.add_argument("--trigger-queries", type=int)
-            s.add_argument("--live", action="store_true"); s.add_argument("--budget-usd", type=float)
+            s.add_argument("--live", action="store_true")
+            s.add_argument("--budget-usd", type=float, help="limit in API-equivalent USD (usage x API prices); "
+                           "subscription runs are not billed per token")
             s.add_argument("--seed", type=int)
             s.add_argument("--run-root", help="folder for the per-run sandboxes (default: system temp folder)")
     for n in ("validate", "estimate", "plan", "run", "grade", "calibrate", "report", "loop"):
@@ -1644,8 +1871,8 @@ def _dispatch(a):
     live_cmds = ("run", "grade", "calibrate", "loop")
     if a.cmd == "plan" or (a.cmd in live_cmds and not a.live and a.cmd != "grade"):
         print(plan_text(spec, problems, a, engines, ws, est))
-        print("\nDRY RUN: nothing was executed. Real runs need --live --budget-usd X, approved requirements/eval_set, "
-              "no validation or preflight problems, and an estimate within budget.")
+        print("\nDRY RUN: nothing was executed. Real runs need --live --budget-usd X (API-equivalent USD), subscription "
+              "auth only, approved requirements/eval_set, no validation or preflight problems, and an estimate within budget.")
         return 0
     if a.cmd == "grade" and not a.live:
         n = a.iteration or (iterations(ws) or [None])[-1]
@@ -1665,12 +1892,12 @@ def _dispatch(a):
     if a.cmd == "run":
         n = run_iteration(spec, ws, engines, a.runs, a.baseline, a.old_skill, budget, prices, tokens=tokens,
                           run_root=a.run_root)
-        print("iteration-%d done, spent ~$%.2f" % (n, budget.spent)); return 0
+        print("iteration-%d done, API-equivalent ~$%.2f (subscription: not billed per token)" % (n, budget.spent)); return 0
     if a.cmd == "grade":
         grade_iteration(spec, ws, n, grader, a.seed)
-        print("graded iteration-%d, spent ~$%.2f" % (n, budget.spent)); return 0
+        print("graded iteration-%d, API-equivalent ~$%.2f (subscription: not billed per token)" % (n, budget.spent)); return 0
     if a.cmd == "calibrate":
-        cal = calibrate(a.golden, grader)
+        cal = calibrate_metered(a.golden, grader, os.path.join(ws, "iteration-%d" % n))
         wjson(os.path.join(ws, "iteration-%d" % n, "calibration.json"), cal)
         print("agreement %.2f kappa %.2f (n=%d)" % (cal["agreement"], cal["kappa"], cal["n"])); return 0
     if a.cmd == "loop":

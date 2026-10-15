@@ -117,10 +117,10 @@ python3 -m unittest discover -s tests -v                # 테스트 (pytest도 p
 ## 스킬 평가 하네스 (skill_eval.py)
 스킬을 실제 에이전트(Claude Code, Codex)로 실행해 **스킬 있음 vs 없음**(또는 새 버전 vs 이전 버전)을 비교합니다. `python3 skill_eval.py <명령> <skill>` 또는 `python3 eva.py eval <명령> <skill>`.
 
-**안전 장치(기본은 dry run)**: `--live`와 `--budget-usd`가 둘 다 없으면 어떤 CLI도 실행하지 않고 계획과 예상 비용만 출력합니다(작업 폴더도 만들지 않음). 실제 CLI를 띄우는 곳은 `live_exec` 하나이고, `main()`이 아래 조건을 모두 확인한 뒤에만 켭니다. `run`·`loop`·`grade`·`calibrate`의 `--live`에 같은 조건이 걸립니다: ① 유한한 `--budget-usd > 0`, ② 평가셋 검증 문제 0개, ③ `requirements`·`eval_set` 승인, ④ 모든 모델의 가격을 앎(`--price`는 유한한 양수만, `--tokens`도 양수만), ⑤ (run·loop) preflight 문제 0개, ⑥ (run·loop) Codex의 호출당 최악 비용 상한이 예산 안, ⑦ 예상 비용 ≤ 예산. **`loop`는 매 iteration 시작 전에 ①~⑦을 다시 확인합니다**(평가셋을 다시 읽어 검증, `eval_set` 승인 해시 — 입력 파일 포함 — 재확인, preflight 재실행, 남은 iteration 비용 ≤ 남은 예산). 하나라도 실패하면 `gates-failed`로 멈춥니다.
+**안전 장치(기본은 dry run)**: `--live`와 `--budget-usd`가 둘 다 없으면 어떤 CLI도 실행하지 않고 계획과 예상 비용만 출력합니다(작업 폴더도 만들지 않음). 실제 CLI를 띄우는 곳은 `live_exec` 하나이고, `main()`이 아래 조건을 모두 확인한 뒤에만 켭니다. `run`·`loop`·`grade`·`calibrate`의 `--live`에 같은 조건이 걸립니다: ⓪ 구독 인증만 사용(API 키 환경변수 없음, `claude auth status`가 claude.ai 로그인, Codex `auth_mode`가 ChatGPT — 아래 **Subscription auth**), ① 유한한 `--budget-usd > 0`(**API 환산 비용** 기준, 아래 **Cost**), ② 평가셋 검증 문제 0개, ③ `requirements`·`eval_set` 승인, ④ 모든 모델의 가격을 앎(`--price`는 유한한 양수만, `--tokens`도 양수만), ⑤ (run·loop) preflight 문제 0개, ⑥ (run·loop) Codex의 호출당 최악 비용 상한이 예산 안, ⑦ 예상 비용 ≤ 예산. **`loop`는 매 iteration 시작 전에 ①~⑦을 다시 확인합니다**(평가셋을 다시 읽어 검증, `eval_set` 승인 해시 — 입력 파일 포함 — 재확인, preflight 재실행, 남은 iteration 비용 ≤ 남은 예산). 하나라도 실패하면 `gates-failed`로 멈춥니다.
 - **builder**: 셸 명령 `--builder`는 없앴습니다(지정하면 dry-run이든 `--live`든 오류). 임의 셸 명령은 유료 CLI를 예산 밖에서 부를 수 있기 때문입니다. 대신 `--builder-prompt FILE`은 iteration 사이에 `claude -p` 한 번을 `live_exec`로 실행합니다: 작업 폴더 = 스킬 폴더, `--tools Read,Edit,Write,Glob,Grep`(Bash 없음 → 다른 CLI를 띄울 수 없음), `--permission-mode acceptEdits`, `--disable-slash-commands`, `--max-budget-usd`(남은 예산의 절반), 비용은 같은 예산에서 차감(보고가 없으면 상한액 차감). 직전 iteration의 `comparison.md`를 프롬프트에 넣습니다. `--builder-model`(기본 `claude-opus-5-5`)과 `--tokens builder=IN,OUT`(가정 80k/8k)로 `loop` 예상 비용에 (iteration 수 − 1)회가 더해집니다. builder가 `evals/`를 고치면 다음 iteration 전 승인 재확인에서 멈춥니다. 편집 범위가 스킬 폴더로 한정되는지는 확인하지 않았습니다(추정: acceptEdits는 작업 폴더 기준).
 - **예상 비용의 근거**: `--live`일 때는 항상 검증된 평가셋 개수로 계산합니다. `--cases/--llm-cases/--trigger-queries`는 `estimate`·`plan` 전용이고 다른 명령에 주면 오류입니다. `grade --live`는 그 iteration 폴더에 실제로 있는 run 수(LLM 항목 있는 run + pairwise 짝)로, `calibrate --live`는 골든 예시 개수 × 채점 호출로, `loop --live`는 한 iteration 비용(+`--golden` 보정) × `--max-iterations`로 계산합니다.
-- **호출당 예산 제어(H)**: 실행 중 실제 사용액(Claude는 `total_cost_usd`, 아니면 토큰×가격, 둘 다 없으면 그 호출의 상한)을 예산에서 빼고, 예산이 모자라면 멈추고 `plan.json`의 `stopped`에 적습니다. Claude(실행·채점 모두)에는 남은 예산의 절반(`CLAUDE_CAP_HEADROOM` 0.5, 센트 내림)만 `--max-budget-usd`로 넘깁니다. CLI가 이 상한을 얼마나 넘을 수 있는지는 문서에서 확인하지 못해 여유를 둔 값입니다. 그 값이 $0.01 미만이면 호출하지 않습니다. **Codex는 호출당 상한 옵션이 없습니다.** 그래서 호출 전마다 최악 비용 상한(가정 토큰 × `WORST_CASE_FACTOR` 3 × 단가)이 남은 예산 안일 때만 호출합니다. 이 값은 추정 상한이지 **강제 상한이 아니며**, 실제 한 호출이 이보다 비쌀 수 있습니다(`--tokens`로 가정을 키우면 더 보수적).
+- **호출당 예산 제어(H)**: 실행 중 호출마다 API 환산 비용(Claude는 `total_cost_usd`, 아니면 토큰×가격, 둘 다 없으면 그 호출의 상한)을 예산에서 빼고, 예산이 모자라면 멈추고 `plan.json`의 `stopped`에 적습니다. Claude(실행·채점 모두)에는 남은 예산의 절반(`CLAUDE_CAP_HEADROOM` 0.5, 센트 내림)만 `--max-budget-usd`로 넘깁니다. CLI가 이 상한을 얼마나 넘을 수 있는지는 문서에서 확인하지 못해 여유를 둔 값입니다. 그 값이 $0.01 미만이면 호출하지 않습니다. **Codex는 호출당 상한 옵션이 없습니다.** 그래서 호출 전마다 최악 비용 상한(가정 토큰 × `WORST_CASE_FACTOR` 3 × 단가)이 남은 예산 안일 때만 호출합니다. 이 값은 추정 상한이지 **강제 상한이 아니며**, 실제 한 호출이 이보다 비쌀 수 있습니다(`--tokens`로 가정을 키우면 더 보수적).
 - `--claude-arg`·`--codex-arg`로 모델·예산을 바꾸거나 격리를 여는 플래그는 거부합니다: Claude `--model`, `--fallback-model`, `--max-budget-usd`, `--settings`, `--setting-sources`, `--plugin-dir`, `--plugin-url`, `--add-dir`, `--mcp-config`; Codex `-m`, `--model`, `-p`, `--profile`, `--oss`, `-c/--config model…`, `-C`/`--cd`, `--add-dir`. 가격은 `--claude-model`/`--codex-model` 기준이기 때문입니다.
 
 | 명령 | 하는 일 |
@@ -150,6 +150,7 @@ python3 -m unittest discover -s tests -v                # 테스트 (pytest도 p
 ├── requirements.md, approvals.json, registration.json, skill-snapshot/
 └── iteration-N/
     ├── plan.json, benchmark.json, comparison.md, gate.json, human_review.json, calibration.json
+    ├── cost.json                      # 채점·보정·builder 호출의 API 환산 비용 기록 (run 비용은 각 timing.json)
     └── <engine>/                      # claude | codex
         ├── benchmark.json             # 이 엔진만, skill-creator 스키마 그대로
         ├── eval-<id>-<name>/
@@ -157,7 +158,7 @@ python3 -m unittest discover -s tests -v                # 테스트 (pytest도 p
         │   └── with_skill|without_skill|old_skill/run-<k>/
         │       ├── workdir/           # 격리 실행 폴더에서 돌려받은 결과물 (설치한 스킬 사본은 제외). 실행 자체는 임시 sandbox에서
         │       ├── outputs/transcript.json, outputs/final.md
-        │       ├── timing.json        # total_tokens, duration_ms, input/output/cached tokens, cost_usd
+        │       ├── timing.json        # total_tokens, duration_ms, input/output/cached tokens, cost_usd(CLI 보고값), api_equivalent_usd/_source, billing
         │       └── grading.json
         └── trigger/<config>/results.json   # run_eval.py 출력 형식
 ```
@@ -180,16 +181,42 @@ python3 -m unittest discover -s tests -v                # 테스트 (pytest도 p
 - `--strict-mcp-config`("Only use MCP servers from --mcp-config", 로컬 help), 환경변수 `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, `ENABLE_CLAUDEAI_MCP_SERVERS=false`(SDK 문서 "What settingSources does not control" 표), `--settings '{"disableBundledSkills": true}'`("To turn bundled skills off, use the `disableBundledSkills` setting", https://code.claude.com/docs/en/skills) — 두 설정이 같은 조건이 되도록.
 - without_skill: `--disable-slash-commands`(로컬 help "Disable all skills").
 - 실행 후 검사(fail closed): stream-json `system/init` 이벤트의 `skills`·`plugins` 목록으로 — 플러그인 0개, with_skill에 시험 스킬이 있음, without_skill에 스킬 0개, 사용자 수준 스킬 이름(`~/.claude/skills` + synced + 플러그인)이 없음. init 이벤트나 `skills` 목록이 없으면 확인 불가로 보고 실패 처리. 이 필드 이름은 Agent SDK 문서 기준 **(추정)**이며 첫 실제 실행에서 확인해야 합니다. 위반하면 그 run을 오류로 기록하고 iteration을 멈춥니다(이미 쓴 비용은 차감).
-- preflight: 시험 스킬과 **같은 이름의 사용자 수준 사본**(`~/.claude/skills/**`, synced 포함, 플러그인)이 있으면 거부합니다(`--setting-sources`로 가려지는지 미확인이므로). 사용자 settings.json이 인증을 제공(`apiKeyHelper`, `env`의 `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`/`CLAUDE_CODE_OAUTH_TOKEN`)하면 `user`를 빼는 순간 인증이 사라지므로 거부합니다(값은 읽어 출력하지 않고 키 존재만 봄). 현재 이 PC의 settings.json에는 그런 키가 없습니다(`enabledPlugins`만 있음, 2026-10-15 확인).
+- preflight: 시험 스킬과 **같은 이름의 사용자 수준 사본**(`~/.claude/skills/**`, synced 포함, 플러그인)이 있으면 거부합니다(`--setting-sources`로 가려지는지 미확인이므로). 사용자 settings.json의 인증 설정도 봅니다(값은 읽거나 출력하지 않고 키 존재만 확인): `apiKeyHelper`나 `env`의 API 키 변수는 API 키 인증이라 거부합니다. `env`의 `CLAUDE_CODE_OAUTH_TOKEN`은 `user` 소스를 빼면 사라지므로 거부하고, 셸에서 export하라고 안내합니다. 현재 이 PC의 settings.json에는 그런 키가 없습니다(`enabledPlugins`만 있음, 2026-10-15 확인).
 
 **Codex** — run마다 `HOME=<sandbox>/home`, `CODEX_HOME=<sandbox>/codex_home`.
 - 스킬 위치(https://learn.chatgpt.com/docs/build-skills, 조사 에이전트 인용): REPO `$CWD/.agents/skills`·상위·`$REPO_ROOT/.agents/skills`, USER `$HOME/.agents/skills`, ADMIN `/etc/codex/skills`, SYSTEM(내장). `$CODEX_HOME/skills`(이 PC의 `~/.codex/skills`에 사용자 스킬 11개 + `.system/`)는 공식 문서에 없고 제3자 자료만 있음(추정). 둘 다 sandbox로 바꾸므로 어느 쪽이든 가려집니다. HOME을 바꾸면 `~/.agents/skills`가 가려진다는 것은 문서 표현("$HOME/.agents/skills") 기준 **추정**(코드 미확인).
-- 인증: "`file` stores credentials in `auth.json` under `CODEX_HOME`"(https://learn.chatgpt.com/docs/auth). `CODEX_API_KEY`가 있으면 그것을 씁니다("You can use `CODEX_API_KEY` with `codex exec`", non-interactive 문서). 없으면 sandbox `codex_home/auth.json`을 진짜 `$CODEX_HOME/auth.json`의 **심볼릭 링크**로 둡니다 — 비밀 내용을 복사하거나 로그에 쓰지 않고, 정리할 때 `rmtree`는 링크만 지웁니다(테스트로 확인). 위험(추정): Codex가 토큰을 갱신하며 auth.json을 새 파일로 바꿔 쓰면(rename) 갱신된 토큰은 sandbox에만 남고 진짜 auth.json이 낡을 수 있습니다. 그래서 실행 후 링크가 일반 파일로 바뀌었으면 iteration을 멈추고 **그 sandbox를 지우지 않고 남깁니다**(경로 안내, `codex login status` 확인 권고). keyring 저장 방식이면 링크할 파일이 없어 preflight가 거부합니다(`CODEX_API_KEY` 필요).
+- 인증: "`file` stores credentials in `auth.json` under `CODEX_HOME`"(https://learn.chatgpt.com/docs/auth). ChatGPT 로그인의 auth.json을 sandbox `codex_home/`에 **읽기 전용 사본**으로 둡니다. API 키(`CODEX_API_KEY`/`OPENAI_API_KEY`)는 쓰지 않고 거부합니다. 자세한 내용은 아래 **Subscription auth**.
 - sandbox에 `config.toml`이 없으므로 사용자 Codex 설정(모델, MCP 등)은 쓰지 않습니다. 모델은 `--codex-model`(없으면 CLI 기본값).
 - 실행 직전 검사: sandbox HOME의 `.agents/skills`, sandbox CODEX_HOME의 `skills`(`.system/` 내장 스킬 제외), `/etc/codex/skills`에 스킬이 하나라도 있으면 거부. Codex는 로드된 스킬 목록을 보고하는 이벤트가 문서에 없어 실행 후 검사는 auth 링크만 합니다(추정 한계).
 - 확인 못 한 것: 이 세션에서 `codex exec --help` 실행이 허용되지 않아 Codex 플래그는 문서로만 확인했습니다. `.system` 스킬이 새 CODEX_HOME에 자동 설치되는지(제3자 자료는 그렇다고 함).
 
-**preflight**(`run`·`loop --live`를 막음, 읽기 전용): run-root와 그 모든 상위 폴더의 `.claude/skills`·`.agents/skills`에 스킬이 있으면 거부, Claude 같은 이름 사용자 사본, Claude 인증이 사용자 settings에서 오는 경우, `/etc/codex/skills`의 스킬, Codex 인증 없음(`CODEX_API_KEY`도 file 방식 auth.json도 없음). 사용자 수준 Codex 스킬(`~/.agents/skills`, `~/.codex/skills`)은 sandbox HOME/CODEX_HOME으로 가려지므로 더는 거부 사유가 아닙니다. 끊어진 심볼릭 링크와 링크 순환은 건너뜁니다(테스트로 확인).
+**preflight**(`run`·`loop --live`를 막음, 읽기 전용, `plan`에도 표시): API 키 환경변수가 설정됨, run-root와 그 모든 상위 폴더의 `.claude/skills`·`.agents/skills`에 스킬이 있음, Claude 같은 이름 사용자 사본, 사용자 settings.json의 API 키 인증·OAuth 토큰, `/etc/codex/skills`의 스킬, Codex file 방식 auth.json이 없거나 `auth_mode`가 ChatGPT가 아님. `claude auth status`는 CLI를 실행해야 하므로 preflight가 아니라 `--live` 게이트에서만 확인합니다. 사용자 수준 Codex 스킬(`~/.agents/skills`, `~/.codex/skills`)은 sandbox HOME/CODEX_HOME으로 가려지므로 더는 거부 사유가 아닙니다. 끊어진 심볼릭 링크와 링크 순환은 건너뜁니다(테스트로 확인).
+
+#### Subscription auth (구독 인증만)
+실제 실행은 **구독 인증으로만** 합니다. Claude Code는 claude.ai OAuth(구독 플랜), Codex는 ChatGPT 로그인을 씁니다. API 키는 어떤 경로로도 쓰지 않고, 사용자의 기존 로그인도 바꾸지 않습니다.
+- **API 키 변수 거부 + 제거**: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `CODEX_API_KEY` 중 하나라도 설정돼 있으면(빈 값 포함) 실행을 거부합니다. `run`·`loop`는 preflight에서, `grade`·`calibrate`는 `--live` 게이트에서 거부합니다. 그와 별개로 모든 자식 프로세스 환경(`live_exec`, run별 sandbox 환경, `claude auth status`)에서 이 변수들을 항상 지웁니다. 값은 읽지도 출력하지도 않습니다. run의 격리 기록(`isolation.env_removed`)에는 지운 변수 이름만 남깁니다.
+- **Claude — 두 가지 방법** (하네스는 토큰을 만들거나 파일·로그에 쓰지 않음)
+  1. **사용자 데스크톱 세션이나 그 안의 tmux에서 실행**: HOME·`CLAUDE_CONFIG_DIR`을 그대로 두므로 기존 Keychain 로그인을 씁니다(위 Claude Code 항목의 근거). SSH 세션이나 데스크톱 밖에서 시작한 tmux 서버에서는 Keychain을 못 읽을 수 있습니다(추정: macOS 로그인 키체인 잠금 해제는 로그인 세션 기준).
+  2. **`claude setup-token`으로 만든 장기 OAuth 토큰을 셸에서 `CLAUDE_CODE_OAUTH_TOKEN`으로 export**: 하네스는 이 변수가 **이미 환경에 있을 때만** 자식에게 그대로 넘깁니다. transcript, plan, 격리 기록 어디에도 쓰지 않습니다(테스트: 실행 뒤 workspace 전체에 토큰 문자열이 없음). `~/.claude/settings.json`의 `env`로 주면 `--setting-sources project,local`에서 빠지므로 preflight가 거부합니다.
+  - **확인 (`--live` 게이트, dry run에서는 실행 안 함)**: `claude auth status --json`을 실행합니다(모델 호출 아님, 과금 없음). 결과 JSON에서 이름에 auth/method/source/provider가 들어간 키의 값을 분류합니다.
+    - API 키 계열(`api_key`, `apiKeyHelper`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `console`) → 거부
+    - `claude.ai`, oauth, subscription → 통과
+    - 그 밖(예: Bedrock), JSON이 아님, 종료코드가 0이 아님, `loggedIn: false` → 거부(fail closed)
+    - 출력 원문은 저장하거나 출력하지 않습니다. 오류에는 방법 이름만 넣고, 이메일 같은 값은 `<hidden>`으로 가립니다.
+  - 근거: 로컬 Claude Code changelog(`~/.claude/cache/changelog.md`)의 세 항목입니다. "Added `claude auth login`, `claude auth status`, and `claude auth logout` CLI subcommands", "Added `configDirectory` to the output of `claude auth status --json`", "Fixed `claude auth status` reporting a Console sign-in's stored API key as `claude.ai`; it now reports `api_key`".
+  - **JSON 키 이름(`authMethod`, `loggedIn` 등)은 확인하지 못했습니다(추정)**. 이 세션에서 `claude auth status` 실행이 허용되지 않았기 때문입니다. 형식이 다르면 첫 `--live`가 실행 전에 fail closed로 멈춥니다. 그때 사용자가 `claude auth status --json` 출력의 키 이름을 보고 맞추면 됩니다.
+  - 위 수정 이전 버전 CLI는 Console 로그인에 저장된 API 키를 `claude.ai`로 보고할 수 있습니다(changelog 기준). 환경변수는 따로 막지만, 그런 저장 키는 이 검사로 못 걸러낼 수 있습니다(추정).
+- **Codex — ChatGPT 로그인**
+  - `$CODEX_HOME/auth.json`(file 저장 방식)에서 `auth_mode` 필드**만** 파싱합니다. 토큰 필드는 반환하지도 출력하지도 않습니다. 값이 `chatgpt`여야 하고, `apikey`이거나 필드가 없거나 파싱에 실패하면 거부합니다. keyring 저장 방식이면 파일이 없어 거부합니다.
+  - 이 PC 확인값(2026-10-15, 최상위 키 이름과 `auth_mode`만 확인): `auth_mode`는 `chatgpt`, 파일 권한은 0600.
+  - run마다 sandbox `codex_home/`(0700)에 **읽기 전용 사본(0400)** 을 `O_EXCL`로 새로 만듭니다. 실행이 끝나면 sandbox와 함께 항상 지웁니다(오류, 격리 실패, sandbox 생성 중 실패도 포함). 원본은 읽기만 하며 내용과 권한이 그대로입니다(테스트로 확인).
+  - 심볼릭 링크는 쓰지 않습니다. 링크에 chmod를 하면 사용자 원본의 권한이 바뀌기 때문입니다. 이전 방식(링크 + 이상 시 sandbox 보존)은 비밀 사본을 임시 폴더에 남길 수 있어서 바꿨습니다.
+  - 실행 뒤 사본이 바뀌었거나 없어졌으면(토큰 갱신으로 추정) iteration을 멈추고 안내합니다. 비교는 메모리 안 sha256으로만 하고 해시는 어디에도 쓰지 않습니다.
+  - 갱신된 사본은 sandbox와 함께 지워집니다. 갱신 토큰이 회전형이면 원본이 무효가 될 수 있습니다(추정). 그때는 `codex login status`로 확인하고 필요하면 `codex login`을 다시 합니다.
+- **남는 한계(추정)**
+  - 구독 인증에서도 Claude `--max-budget-usd`가 API 환산 비용 기준으로 동작하는지 확인하지 못했습니다.
+  - 플랜 사용 한도에 걸리면 run은 오류로 기록됩니다. 하네스는 플랜 한도를 모릅니다.
+  - `CLAUDE_CODE_USE_BEDROCK` 같은 제3자 제공자 변수는 따로 검사하지 않습니다. 대신 auth status가 claude.ai가 아니면 거부합니다(그 경우의 status 출력 형식은 미확인).
 
 **참고한 표준 방식**: skill-creator `scripts/run_eval.py`는 격리를 거의 하지 않습니다 — `.claude`가 있는 프로젝트 루트를 cwd로 쓰고 `.claude/commands/<name>.md`를 잠깐 만들었다 지우며, 환경에서 `CLAUDECODE`만 뺍니다(https://github.com/anthropics/skills/blob/main/skills/skill-creator/scripts/run_eval.py, 조사 에이전트 확인). agentskills.io는 "Each eval run should start with a clean context — no leftover state from previous runs or from the skill development process."라고만 합니다(https://agentskills.io/skill-creation/evaluating-skills). 이 하네스의 sandbox·사용자 스킬 차단·init 검사는 그보다 엄격한 자체 규칙(H)입니다.
 
@@ -211,7 +238,23 @@ python3 -m unittest discover -s tests -v                # 테스트 (pytest도 p
 
 **첫 실제 eval 대상 (제안)**: 이전 계획의 `dev-setup`은 pinesky-skills 저장소와 함께 삭제되어 대상에서 뺐습니다. 대신 이 저장소의 `golden/skills/csv-cleaner`를 제안합니다. 이유: 저장소 안에 있어 사라질 위험이 없고, 같은 이름의 설치본이 없으며(preflight 문제 0, 2026-10-15 dry-run), `scripts/clean.py`가 결정적이라 결과를 기계로 확인하기 쉽고, 입력 파일(`evals/files/*.csv`)이 이미 있습니다. 실행 전에 할 일: ① `evals/trigger_evals.json`(10+10) 작성, ② 문자열 assertion 일부를 `static` 검사 객체로(예: `file_exists` `orders_clean.csv`), ③ eval 1 프롬프트의 `data/orders_2025.csv` 경로가 실제 입력 위치 `evals/files/orders_2025.csv`와 다름 — 맞출지 결정, ④ `requirements.md` 작성과 `requirements`·`eval_set` 승인, ⑤ 첫 실행은 `--engines claude --runs 1`로 init 이벤트 필드(격리 검사) 확인. `style-lab`은 `disable-model-invocation`이라 트리거 평가가 의미가 없고, `find-skills`는 `~/.agents/skills`에 원본만 있어(저장소 없음) 후순위입니다.
 
-**비용 추정**: 호출 수 = 실행(케이스 × 설정 2 × runs) + 트리거(쿼리 × runs × 스킬 있는 설정 수) + 채점(llm 항목 있는 케이스 × 설정 2 × runs) + pairwise(케이스 × runs), 엔진마다. 호출당 토큰은 **가정값**입니다(exec 60k/4k, trigger 25k/500, grader 12k/800, pairwise 16k/800 — 측정값 아님, 파일럿 뒤 `--tokens`로 교체). 입력 토큰은 전부 기본 입력 단가로 계산해 캐시 할인을 빼므로 상한 쪽 추정입니다. Claude 단가는 위 요금 페이지(2026-10-15)에서 옮긴 값이고, Codex/OpenAI 단가는 1차 출처로 확인하지 못해 넣지 않았습니다(`--price codex=IN,OUT` 필요, 없으면 `--live` 거부).
+### Cost
+구독 인증 실행은 토큰당 과금이 없습니다. 그래서 하네스는 아래 두 값을 **따로** 기록합니다.
+- **API 환산 비용(API-equivalent)**: 같은 호출을 API 단가로 냈다면 들었을 금액입니다. 호출마다 다음 순서로 정합니다.
+  1. CLI 보고값(Claude `total_cost_usd`. 구독 인증에서도 API 단가 환산값을 보고한다는 것은 추정)
+  2. 없으면 사용 토큰 × API 단가(`PRICES`/`--price`)
+  3. 둘 다 없으면 그 호출에 걸었던 상한(cap/bound)을 큰 쪽 값으로 사용
+  - **`--budget-usd`는 이 값의 한도이고, 예산 게이트도 이 값으로 판단합니다**(호출 전 상한·호출 후 차감·예상 비용 ≤ 예산 모두).
+- **실제 지출(actual spend)**: `actual_spend_usd: null`입니다. 플랜 요금이나 추가 사용 과금은 하네스가 볼 수 없어 계정에서 확인해야 합니다. 0으로 적지 않습니다.
+- 기록 위치
+  - run별 `timing.json`: `cost_usd`(CLI 보고 원값), `api_equivalent_usd`, `api_equivalent_source`(`cli_reported`|`tokens_x_price`|`cap_charged`|`unknown`), `billing: "subscription"`
+  - `plan.json`: `api_equivalent_usd`(그 `run`의 실행+트리거 합, 이전 `spent_usd`를 대체), `billing`
+  - iteration의 `cost.json` `entries[]`: 채점(`grade`), 보정(`calibrate`), builder 호출(호출 수, 토큰, `api_equivalent_usd`). 중간에 멈춰도 기록합니다. builder 비용은 그 builder가 읽은 iteration에 붙으므로, 그 iteration의 `report`를 다시 돌려야 benchmark에 들어갑니다.
+  - `benchmark.json` `cost`: `billing`, `budget_basis: "api_equivalent"`, `api_equivalent_usd{by_engine{exec,trigger}, other{grade,calibrate,builder}, total}`, `runs_without_usage`, `actual_spend_usd: null`, `actual_spend_note`
+  - `comparison.md`: 위쪽 한 줄과 `## Cost` 표(실제 지출 = not metered)
+  - 실행 출력 문구: "API-equivalent ~$X (subscription: not billed per token)"
+
+**비용 추정**(`estimate`/`plan`, "API-equivalent total"): 호출 수 = 실행(케이스 × 설정 2 × runs) + 트리거(쿼리 × runs × 스킬 있는 설정 수) + 채점(llm 항목 있는 케이스 × 설정 2 × runs) + pairwise(케이스 × runs), 엔진마다. 호출당 토큰은 **가정값**입니다(exec 60k/4k, trigger 25k/500, grader 12k/800, pairwise 16k/800 — 측정값 아님, 파일럿 뒤 `--tokens`로 교체). 입력 토큰은 전부 기본 입력 단가로 계산해 캐시 할인을 빼므로 상한 쪽 추정입니다. Claude 단가는 위 요금 페이지(2026-10-15)에서 옮긴 값이고, Codex/OpenAI 단가는 1차 출처로 확인하지 못해 넣지 않았습니다(`--price codex=IN,OUT` 필요, 없으면 `--live` 거부).
 
 ### skill-creator 대비 차이(deviation)
 - **엔진 계층 추가**: skill-creator는 `iteration-N/eval-*/<config>/run-*`입니다. 하네스는 엔진이 둘이라 `iteration-N/<engine>/eval-*/...`로 한 단계 더 둡니다. 엔진 폴더 안은 skill-creator 구조 그대로이고 엔진별 `benchmark.json`도 skill-creator 스키마입니다. skill-creator `scripts/aggregate_benchmark.py iteration-N/<engine>`은 모든 run에 채점된 항목이 하나 이상 있을 때 동작합니다(가짜 엔진 결과로 확인). 아직 채점 안 된 run(`pass_rate: null`, 예: human 항목만 있는 케이스의 리뷰 전)이 있으면 그 스크립트는 `TypeError`로 멈추므로 하네스의 `report`를 쓰세요. 최상위 `iteration-N/benchmark.json`은 같은 필드에 `per_engine`, `trigger`, `pairwise`, `static_failures`, `pressure`, `human_pending`, `llm_not_graded`, `calibration`, `gate`를 더하고 `runs[]`에 `engine`을 더한 확장입니다.
