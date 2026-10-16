@@ -550,8 +550,9 @@ def claude_launch_problems(cwd, config_dir=None, require_hooks=False):
     probs = list(probs)
     cfg = config_dir or claude_config_dir()
     remote = os.path.join(cfg, CLAUDE_REMOTE_SETTINGS)
-    remotes = [remote] + [os.path.join(d, CLAUDE_REMOTE_SETTINGS) for d in switch_account_config_dirs()
-                          if config_dir is None]
+    alt = switch_account_config_dirs() if config_dir is None else []  # accounts the shim may retry this call on
+    remotes = [remote] + [os.path.join(d, CLAUDE_REMOTE_SETTINGS) for d in alt]
+    alt_user = [os.path.join(d, f) for d in alt for f in CLAUDE_SETTINGS_FILES]
     if require_hooks:
         for p in files + remotes:
             if not os.path.lexists(p): continue
@@ -565,7 +566,8 @@ def claude_launch_problems(cwd, config_dir=None, require_hooks=False):
                 if "policyHelper" in st:
                     probs.append("claude: managed policyHelper in %s may override the gated launch policy" % p)
     return api_key_env_problems() + probs + claude_settings_auth_problems(
-        claude_project_settings(ancestors(cwd)) + files + remotes)
+        claude_project_settings(ancestors(cwd)) + files + remotes + alt_user) + \
+        [q for d in alt for q in claude_undetectable_skill_problems(d)]
 
 # Built-in plugins ship inside the CLI as "<name>@builtin" and load unless settings.enabledPlugins["<name>@builtin"]
 # is false (https://code.claude.com/docs/en/plugins/mods/admin: enabledPlugins / pluginConfigs with @builtin ids;

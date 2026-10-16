@@ -135,7 +135,9 @@ def serve(page, port):
     _, items = load_items(page)
     if has_grader(items): sys.exit("page carries grader fields; refusing")
     outdir = os.path.dirname(os.path.abspath(page))
-    body = open(page, "rb").read()
+    items = blind_items(items)  # the served page is regenerated from the sanitized items, never the file as-is
+    body = render(items, os.path.basename(page), "%s_%s" % (os.path.basename(os.path.dirname(os.path.dirname(outdir))),
+                                                            fingerprint(items))).encode("utf-8")
 
     class H(http.server.BaseHTTPRequestHandler):
         def _send(self, code, ctype, data):

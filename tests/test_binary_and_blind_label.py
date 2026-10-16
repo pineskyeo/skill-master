@@ -58,6 +58,16 @@ class BlindLabel(unittest.TestCase):
         g, _ = lb.validate_submission({"answers": {"a/1": {"human_passed": False}}}, items)
         self.assertNotIn("grader", json.dumps(g)); self.assertNotIn("verdict", json.dumps(g))
 
+    def test_served_page_is_regenerated(self):
+        out = self.build()
+        txt = open(out).read().replace("</body>", "<p>grader said PASS EXTRA-LEAK</p></body>")
+        open(out, "w").write(txt)
+        _, items = lb.load_items(out)
+        page = lb.render(lb.blind_items(items), "x", "k")
+        self.assertNotIn("EXTRA-LEAK", page)
+        import inspect
+        self.assertIn("render(items", inspect.getsource(lb.serve))
+
     def test_storage_key_changes_with_items(self):
         a = lb.fingerprint(lb.blind_items(ITEMS))
         changed = [dict(ITEMS[0], output="different"), ITEMS[1]]

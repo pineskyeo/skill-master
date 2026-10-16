@@ -57,6 +57,13 @@ class AccountMarker(unittest.TestCase):
         self.assertTrue(any(".claude-acct1" in p and "ANTHROPIC_API_KEY" in p for p in probs), probs)
         self.assertFalse(any("v\"" in p for p in probs))
 
+    def test_launch_checks_account_user_settings(self):
+        home = tempfile.mkdtemp(); acct = os.path.join(home, ".claude-acct1"); os.mkdir(acct)
+        with open(os.path.join(acct, "settings.json"), "w") as f: json.dump({"env": {"ANTHROPIC_API_KEY": "v"}}, f)
+        with mock.patch.object(se, "switch_account_config_dirs", lambda: [acct]):
+            probs = se.claude_launch_problems(tempfile.mkdtemp())
+        self.assertTrue(any("settings.json" in p and ".claude-acct1" in p for p in probs), probs)
+
     def test_account_dirs_follow_shim_inputs(self):
         home = tempfile.mkdtemp()
         for n in ("acct1", "acct2"): os.mkdir(os.path.join(home, ".claude-" + n))
