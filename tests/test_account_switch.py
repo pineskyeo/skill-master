@@ -10,8 +10,27 @@ class AccountMarker(unittest.TestCase):
     def test_claude_gets_marker_and_optin(self):
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("SKILL_EVAL_ACCOUNT_SWITCH", None)
-            env = se.with_account_marker({"PATH": "/bin"}, ["claude", "-p", "x"])
+            env = se.with_account_marker({"PATH": "/bin"}, ["claude", "-p", "x", "--tools", ""])
         self.assertEqual(env["CLAUDE_AS_CALLER"], "skill_eval"); self.assertEqual(env["CLAUDE_AS_AUTO_SWITCH"], "1")
+
+    def test_bash_capable_claude_never_opts_in(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SKILL_EVAL_ACCOUNT_SWITCH", None)
+            self._bash_capable()
+
+    def _bash_capable(self):
+        for cmd in (["claude", "-p", "x"], ["claude", "-p", "--tools", "Read,Bash"], ["claude", "-p", "--tools=default"],
+                    ["claude", "-p", "--tools", "", "--tools", "Bash(ls *)"], ["claude", "-p", "--tools"],
+                    ["claude", "-p", "--tools", "", "--mcp-config", "m.json"], ["claude", "-p", "--tools", "", "--plugin-dir=p"],
+                    ["claude", "-p", "--tools", "", "--plugin-url", "http://x/p.zip"],
+                    ["claude", "-p", "--tools", "", "--plugin-url=http://x/p.zip"]):
+            env = se.with_account_marker({}, cmd)
+            self.assertEqual(env["CLAUDE_AS_CALLER"], "skill_eval"); self.assertEqual(env["CLAUDE_AS_AUTO_SWITCH"], "0", cmd)
+
+    def test_launch_shapes(self):
+        self.assertTrue(se.claude_bash_disabled(["claude", "-p", "x", "--tools", ""]))  # grader shape
+        self.assertTrue(se.claude_bash_disabled(["claude", "-p", "--tools", "Read,Edit,Write,Glob,Grep"]))  # builder
+        self.assertFalse(se.claude_bash_disabled(["claude", "-p", "x", "--allowedTools", "Edit(/**)"]))  # executor
 
     def test_opt_out(self):
         with mock.patch.dict(os.environ, {"SKILL_EVAL_ACCOUNT_SWITCH": "0"}):

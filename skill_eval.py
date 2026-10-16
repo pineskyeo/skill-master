@@ -331,8 +331,29 @@ def with_account_marker(env, cmd):
     for k in list(ACCOUNT_MARKER_ENV) + [ACCOUNT_SWITCH_OPT_IN]: env.pop(k, None)
     if cmd and os.path.basename(cmd[0]) == "claude":
         env.update(ACCOUNT_MARKER_ENV)
-        env[ACCOUNT_SWITCH_OPT_IN] = "1" if account_switch_enabled() else "0"
+        env[ACCOUNT_SWITCH_OPT_IN] = "1" if account_switch_enabled() and claude_bash_disabled(cmd) else "0"
     return env
+
+def claude_bash_disabled(cmd):
+    """P1 option b (2026-10-17): only a claude call whose --tools values provably exclude Bash may account-switch
+    (grader: --tools ""; builder: Read,Edit,Write,Glob,Grep). Executor runs keep Bash, so they always stay on acct0
+    and no acctN token is ever in a Bash-capable agent's process environment. Same rule as claude-accts shim v8."""
+    vals, i = [], 0
+    while i < len(cmd):
+        a = cmd[i]
+        if a == "--tools":
+            if i + 1 >= len(cmd): return False
+            vals.append(cmd[i + 1]); i += 2; continue
+        if a.startswith("--tools="): vals.append(a.split("=", 1)[1])
+        i += 1
+    # --tools does not restrict MCP/plugin tools: an explicit MCP config or plugin dir (e.g. via --claude-arg) keeps acct0
+    if not vals or any(a in ("--mcp-config", "--plugin-dir", "--plugin-url")
+                       or a.startswith(("--mcp-config=", "--plugin-dir=", "--plugin-url="))
+                       for a in cmd): return False
+    for v in vals:
+        for t in re.split(r"[,\s]+", v.strip()):
+            if t and (re.match(r"^bash(\(|$)", t, re.I) or t.lower() == "default"): return False
+    return True
 
 def switch_account_config_dirs(home=None, environ=None):
     """Config dirs of every account the shim may switch to (only when switching is enabled), derived from the same
