@@ -289,7 +289,8 @@ def live_exec(cmd, cwd, timeout, env=None):
         raise LiveDisabled("refusing to execute %r: live mode needs --live and --budget-usd" % (cmd[0],))
     env = scrub_env(os.environ if env is None else env)  # subscription auth only: no API key reaches a child
     env.pop("CLAUDECODE", None)  # as skill-creator run_eval.py: allow nesting claude -p inside a Claude Code session
-    p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, env=env)
+    p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, env=env,
+                       stdin=subprocess.DEVNULL)  # codex exec waits for stdin when it is an open pipe/terminal
     return p.returncode, p.stdout, p.stderr
 
 # ---------- subscription auth (README "Eval isolation" > "Subscription auth") ----------
@@ -1457,11 +1458,25 @@ def grader_label(engine, model, effort=None):
     return "%s(%s%s)" % (engine, model or "CLI default model", ", effort %s" % effort if effort else "")
 
 CODEX_GRADER_SANDBOX = "read-only"
-CODEX_GRADER_NOTE = ("the Codex grader runs `codex exec --sandbox read-only` in a fresh temp folder with an isolated "
+# Tools the Codex grader never needs (the transcript is inline in the prompt): each is switched off with
+# `--disable <feature>` (= -c features.<name>=false, codex-cli 0.162.1 `codex features list`), plus web search off.
+# Without a shell / exec / browser / image tool the model has no way to read auth.json from the isolated CODEX_HOME
+# (the read-only sandbox only blocks writes). Enforced after the call too: any non-message item fails closed.
+CODEX_GRADER_DISABLED_FEATURES = ("shell_tool", "unified_exec", "shell_snapshot", "view_image", "browser_use",
+                                  "browser_use_external", "in_app_browser", "computer_use", "apps", "plugins",
+                                  "multi_agent", "image_generation", "code_mode_host", "skill_search", "tool_suggest",
+                                  "hooks", "sleep_tool")
+CODEX_GRADER_ALLOWED_ITEMS = ("agent_message", "reasoning", "error")  # "error": CLI notice (e.g. code mode off), not a tool
+_CODEX_GRADER_NOTE_OLD = ("the Codex grader runs `codex exec --sandbox read-only` in a fresh temp folder with an isolated "
                      "CODEX_HOME holding a read-only copy of auth.json; that copy is READABLE by the grader agent (the "
                      "read-only sandbox permits reads), and the grader prompt contains the untrusted transcript of the "
                      "run under test, so a prompt injection could make it quote the token into grading.json / "
                      "comparison-k.json evidence")
+
+CODEX_GRADER_NOTE = ("the Codex grader runs `codex exec --sandbox read-only` with its tools switched off (no shell, "
+                     "exec, browser, image or web tool: CODEX_GRADER_DISABLED_FEATURES) in a fresh temp folder with an "
+                     "isolated CODEX_HOME holding a read-only copy of auth.json that the codex process needs to log in; "
+                     "a call whose events show any tool use, or whose answer contains any auth.json value, is refused")
 
 def codex_grader_command_problems(cmd):
     """The Codex grader launch shape: codex exec --json with exactly one --sandbox read-only, no flag that widens it."""
@@ -1472,6 +1487,25 @@ def codex_grader_command_problems(cmd):
     wide = [x for x in cmd if x in ("--full-auto", "--dangerously-bypass-approvals-and-sandbox", "--yolo", "--add-dir")
             or x.startswith(("--sandbox=", "--add-dir="))]
     if wide: out.append("flags that change the sandbox: %s" % wide)
+    off = {cmd[i + 1] for i, x in enumerate(cmd[:-1]) if x == "--disable"}
+    miss = [f for f in CODEX_GRADER_DISABLED_FEATURES if f not in off]
+    if miss: out.append("grader tools not disabled: %s" % miss)
+    if "--enable" in cmd or any(x.startswith("--enable=") for x in cmd): out.append("--enable is not allowed for the grader")
+    if 'web_search="disabled"' not in [cmd[i + 1] for i, x in enumerate(cmd[:-1]) if x == "-c"]:
+        out.append('web search must be off (-c web_search="disabled")')
+    return out
+
+def auth_secret_strings(data):
+    """Every string of 16+ chars in a Codex auth.json (and each JWT segment of 24+), in memory only, never printed."""
+    try: o = json.loads(data.decode("utf-8"))
+    except Exception: return set()
+    out, stack = set(), [o]
+    while stack:
+        x = stack.pop()
+        if isinstance(x, dict): stack.extend(x.values())
+        elif isinstance(x, list): stack.extend(x)
+        elif isinstance(x, str) and len(x) >= 16:
+            out.add(x); out.update(p for p in x.split(".") if len(p) >= 24)
     return out
 
 def extract_json_object(text):
@@ -1508,6 +1542,8 @@ class CodexGrader(LLMGrader):
         return grader_call_usd(kind, "codex", self.model, self.tokens, self.prices)
     def command(self, prompt, schema, cap=None):
         cmd = ["codex", "exec", "--json", "--skip-git-repo-check", "--ephemeral", "--sandbox", CODEX_GRADER_SANDBOX]
+        for f in CODEX_GRADER_DISABLED_FEATURES: cmd += ["--disable", f]
+        cmd += ["-c", 'web_search="disabled"']
         if self.model: cmd += ["-m", self.model]
         if self.effort: cmd += ["-c", CODEX_EFFORT_CONFIG % self.effort]
         return cmd + [codex_grader_prompt(prompt, schema)]
@@ -1537,6 +1573,13 @@ class CodexGrader(LLMGrader):
             except Exception as ex:
                 failed = "call failed after launch (%s)" % type(ex).__name__
             left = list(eng.after_run(root))
+            try:
+                with open(os.path.join(real_codex_home(), "auth.json"), "rb") as f: secrets = auth_secret_strings(f.read())
+            except OSError: secrets = set()
+            if any(v in (out or "") or v in (err or "") for v in secrets):
+                failed = failed or "output contained an auth.json value (discarded, not saved)"
+                out, err = "", ""
+            secrets = None
         finally:
             gone = remove_sandbox(eng, os.path.realpath(run_root), root)
             left += gone
@@ -1553,6 +1596,9 @@ class CodexGrader(LLMGrader):
         self.usage["input_tokens"] += tin; self.usage["output_tokens"] += tout; self.usage["api_equivalent_usd"] += cost
         if self.budget is not None: self.budget.charge(cost)
         if left: raise EvalError("codex grader sandbox: %s; charged $%.2f and stopped" % ("; ".join(left), cost))
+        if res is not None and failed is None:
+            used = sorted({c.get("tool") for c in res["tool_calls"]} - set(CODEX_GRADER_ALLOWED_ITEMS))
+            if used: failed = "used tools although they are disabled (%s); answer discarded" % ", ".join(map(str, used))
         if failed: raise EvalError("codex grader %s; charged $%.2f and stopped" % (failed, cost))
         if res["error"] or rc != 0:
             raise EvalError("codex grader call failed (exit %s, %s); charged $%.2f and stopped"

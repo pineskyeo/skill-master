@@ -53,7 +53,7 @@ class TestClaudeEffort(Base):
 
     def test_codex_engine_effort_uses_the_config_override(self):
         cmd = se.CodexEngine(effort="high").command("p", True)
-        self.assertEqual(cmd[cmd.index("-c") + 1], "model_reasoning_effort=high")
+        self.assertIn("model_reasoning_effort=high", [cmd[i + 1] for i, x in enumerate(cmd[:-1]) if x == "-c"])
 
     def test_plan_and_plan_json_record_model_and_effort(self):
         d = self.approved_skill()
@@ -77,7 +77,7 @@ class TestCodexGraderCommand(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--sandbox") + 1], "read-only")
         self.assertNotIn("workspace-write", cmd)
         self.assertNotIn("-m", cmd)  # Codex default model
-        self.assertEqual(cmd[cmd.index("-c") + 1], "model_reasoning_effort=high")
+        self.assertIn("model_reasoning_effort=high", [cmd[i + 1] for i, x in enumerate(cmd[:-1]) if x == "-c"])
         self.assertIn('"enum": ["yes", "no"]', cmd[-1])  # the schema is in the prompt
         self.assertEqual(se.codex_grader_command_problems(cmd), [])
 
@@ -240,7 +240,7 @@ class TestEstimateAndGates(Base):
             rc, out, _ = self.dry("--engines", "claude", "--grader-engine", "codex", "--grader-effort", "high")
         self.assertEqual(rc, 0, out)
         self.assertIn("live gates that would refuse this command (0)", out)
-        self.assertIn("grader budget: SOFT LIMIT", out); self.assertIn("READABLE by the grader agent", out)
+        self.assertIn("grader budget: SOFT LIMIT", out); self.assertIn("with its tools switched off", out)
         self.assertNotIn("codex:CLI default", out)  # run budget excludes the later grade command
 
     def test_claude_grader_equal_to_the_model_under_test_is_refused(self):
