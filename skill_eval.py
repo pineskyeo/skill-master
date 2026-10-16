@@ -2078,21 +2078,49 @@ def check_grader_model(it_dir, grader_model, grader_engine="claude"):
     if any(e == "claude" and not m for e, m in models.items()):
         raise EvalError("claude executor model unknown (CLI default) in plan.json; the grader cannot be shown to differ")
 
-def grade_iteration(spec, ws, n, grader=None, seed=None, log=print):
+def parse_id_list(text, flag):
+    """'1,2' -> frozenset({1, 2}); None -> None (no narrowing). Positive integers only."""
+    if text is None: return None
+    out = set()
+    for x in str(text).split(","):
+        x = x.strip()
+        if not re.match(r"^[1-9][0-9]*$", x): raise EvalError("%s: comma-separated positive integers, got %r" % (flag, text))
+        out.add(int(x))
+    return frozenset(out)
+
+def grade_scope(a):
+    """(case ids, run numbers) from grade --grade-cases/--grade-runs; None = all."""
+    return (parse_id_list(getattr(a, "grade_cases", None), "--grade-cases"),
+            parse_id_list(getattr(a, "grade_runs", None), "--grade-runs"))
+
+def in_scope(scope, case_id, run_k):
+    cs, rs = scope or (None, None)
+    return (cs is None or case_id in cs) and (rs is None or run_k in rs)
+
+def check_scope(spec, scope):
+    cs = (scope or (None, None))[0]
+    unknown = sorted(cs - {c["id"] for c in spec["cases"]}) if cs else []
+    if unknown: raise EvalError("--grade-cases: no eval case with id %s" % ", ".join(map(str, unknown)))
+
+def run_number(rd):
+    return int(os.path.basename(rd).split("-")[1])
+
+def grade_iteration(spec, ws, n, grader=None, seed=None, log=print, scope=None):
     """Static checks first, then (with a grader) LLM yes/no items and blind pairwise comparison; human items are
     queued in human_review.json and merged back when a reviewer filled in "passed". The grader's API-equivalent
     cost is appended to cost.json even when grading stops early."""
     it_dir = os.path.join(ws, "iteration-%d" % n)
     if not os.path.isdir(it_dir): raise EvalError("no %s" % it_dir)
     if grader is not None: check_grader_model(it_dir, grader.model, getattr(grader, "engine", "claude"))
+    check_scope(spec, scope)
     before = dict(grader.usage) if grader is not None else None
     try:
-        _grade(spec, ws, it_dir, grader, seed, log)
+        _grade(spec, ws, it_dir, grader, seed, log, scope)
     finally:
         if grader is not None and grader.usage["calls"] != before["calls"]:
             append_cost(it_dir, "grade", usage_delta(grader.usage, before))
 
-def _grade(spec, ws, it_dir, grader, seed, log):
+def _grade(spec, ws, it_dir, grader, seed, log, scope=None):
     cases = {c["id"]: c for c in spec["cases"]}
     hr_path = os.path.join(it_dir, "human_review.json")
     old_hr = {x["key"]: x for x in (rjson(hr_path, {}) or {}).get("items", [])}
@@ -2102,6 +2130,7 @@ def _grade(spec, ws, it_dir, grader, seed, log):
         case = cases.get(md.get("eval_id"))
         t = rjson(os.path.join(rd, "outputs", "transcript.json"))
         if case is None or t is None: continue
+        if not in_scope(scope, case["id"], run_number(rd)): continue  # out of --grade-cases/--grade-runs: untouched
         res, llm_items = {}, []
         for it in case["items"]:
             if it["layer"] == "static":
@@ -2143,12 +2172,15 @@ def _grade(spec, ws, it_dir, grader, seed, log):
                                   "output_chars": len(t.get("final") or "")},
             "timing": {"executor_duration_seconds": timing.get("executor_duration_seconds", 0.0),
                        "total_duration_seconds": timing.get("total_duration_seconds", 0.0)}})
+    if scope is not None and scope != (None, None):  # narrowed: keep queue entries of runs outside the scope
+        mine = {q["key"] for q in queue}
+        queue = [x for x in old_hr.values() if x["key"] not in mine] + queue
     wjson(hr_path, {"instructions": "Set \"passed\" to true/false (and optionally \"note\"), then re-run grade.",
                     "items": queue})
-    if grader is not None: pairwise(spec, it_dir, grader, seed)
+    if grader is not None: pairwise(spec, it_dir, grader, seed, scope)
     log("graded %s (%d human item(s) queued)" % (it_dir, sum(1 for q in queue if not isinstance(q["passed"], bool))))
 
-def pair_list(spec, it_dir):
+def pair_list(spec, it_dir, scope=None):
     """[(eval_dir, case, baseline_config, k, path_with_skill, path_baseline)] for the blind pairwise comparison."""
     cases, out = {c["id"]: c for c in spec["cases"]}, []
     for eng in sorted(os.listdir(it_dir)):
@@ -2164,24 +2196,26 @@ def pair_list(spec, it_dir):
                 pa = os.path.join(ep, ed, PRIMARY, "run-%d" % k, "outputs", "transcript.json")
                 pb = os.path.join(ep, ed, base, "run-%d" % k, "outputs", "transcript.json")
                 if not (os.path.isfile(pa) and os.path.isfile(pb)): break
-                out.append((os.path.join(ep, ed), case, base, k, pa, pb)); k += 1
+                if in_scope(scope, case["id"], k): out.append((os.path.join(ep, ed), case, base, k, pa, pb))
+                k += 1
     return out
 
-def grade_counts(spec, it_dir):
+def grade_counts(spec, it_dir, scope=None):
     """(LLM grader calls, pairwise calls) that `grade --live` would make for this iteration."""
     cases, n = {c["id"]: c for c in spec["cases"]}, 0
     for eng, ed, cfg, rd in walk_runs(it_dir):
         case = cases.get((rjson(os.path.join(ed, "eval_metadata.json"), {}) or {}).get("eval_id"))
-        if case and os.path.isfile(os.path.join(rd, "outputs", "transcript.json")) \
+        if case and in_scope(scope, case["id"], run_number(rd)) \
+                and os.path.isfile(os.path.join(rd, "outputs", "transcript.json")) \
                 and any(it["layer"] == "llm" for it in case["items"]):
             n += 1
-    return n, len(pair_list(spec, it_dir))
+    return n, len(pair_list(spec, it_dir, scope))
 
-def pairwise(spec, it_dir, grader, seed=None):
+def pairwise(spec, it_dir, grader, seed=None, scope=None):
     """Blind A/B per (engine, case, run k): with_skill run-k vs baseline run-k, order randomized and recorded."""
     seed = random.SystemRandom().randrange(2 ** 31) if seed is None else seed
     rng = random.Random(seed)
-    for ed, case, base, k, pa, pb in pair_list(spec, it_dir):
+    for ed, case, base, k, pa, pb in pair_list(spec, it_dir, scope):
         swap = rng.random() < 0.5
         a_cfg, b_cfg = (base, PRIMARY) if swap else (PRIMARY, base)
         ta, tb = rjson(pa if not swap else pb), rjson(pb if not swap else pa)
@@ -2721,7 +2755,8 @@ def live_estimate(a, spec, ws, n, engines, tokens, prices, iterations_left=None)
     ge = grader_engine_of(a)
     if a.cmd == "grade":
         check_grader_model(os.path.join(ws, "iteration-%d" % n), a.grader_model, ge)
-        ng, npw = grade_counts(spec, os.path.join(ws, "iteration-%d" % n))
+        check_scope(spec, grade_scope(a))
+        ng, npw = grade_counts(spec, os.path.join(ws, "iteration-%d" % n), grade_scope(a))
         return grader_estimate(ng, npw, a.grader_model, tokens, prices, ge)
     if a.cmd == "calibrate":
         return grader_estimate(len(load_golden(a.golden)), 0, a.grader_model, tokens, prices, ge)
@@ -2865,7 +2900,7 @@ def spec_counts(spec, a):
     n_trig = o("trigger_queries") if o("trigger_queries") is not None else len(spec["triggers"] or [])
     return n_cases, n_llm, n_trig
 
-def main(argv=None):
+def build_parser():
     p = argparse.ArgumentParser(prog="skill_eval", description=__doc__.split("\n")[0])
     sp = p.add_subparsers(dest="cmd", required=True)
     def common(s, run_opts=True):
@@ -2911,6 +2946,10 @@ def main(argv=None):
     for n in ("validate", "estimate", "plan", "run", "grade", "calibrate", "report", "loop"):
         s = sp.add_parser(n); common(s, n not in ("validate", "report"))
         if n in ("grade", "report", "calibrate"): s.add_argument("--iteration", type=int)
+        if n == "grade":
+            s.add_argument("--grade-cases", help="grade only these eval ids (comma-separated); estimate and budget gate "
+                           "count only them; other runs' grading/comparison files are left untouched")
+            s.add_argument("--grade-runs", help="grade only these run numbers k (comma-separated), e.g. 1")
         if n == "calibrate": s.add_argument("--golden", required=True)
         if n == "loop":
             s.add_argument("--builder", help=argparse.SUPPRESS)  # removed: an arbitrary shell command is not metered
@@ -2924,6 +2963,10 @@ def main(argv=None):
     s = sp.add_parser("snapshot"); common(s, False)
     sp.add_parser("check-builtin-plugins", help="free: `claude --settings <launch settings> plugin list --json` and "
                   "the enabled state of every @builtin plugin (no model call; loaded skills are not shown)")
+    return p
+
+def main(argv=None):
+    p = build_parser()
     a = p.parse_args(argv)
     if a.cmd == "check-builtin-plugins":
         rc, lines = builtin_plugin_check()
@@ -2995,7 +3038,7 @@ def _dispatch(a):
     if a.cmd == "grade" and not a.live:
         n = a.iteration or (iterations(ws) or [None])[-1]
         if n is None: raise EvalError("no iterations in %s" % ws)
-        grade_iteration(spec, ws, n, None); print("static + human queue only (dry run); LLM items not graded"); return 0
+        grade_iteration(spec, ws, n, None, scope=grade_scope(a)); print("static + human queue only (dry run); LLM items not graded"); return 0
     # --- live: the same gates for run, loop, grade and calibrate ---
     if a.budget_usd is None or not math.isfinite(a.budget_usd) or a.budget_usd <= 0:
         raise EvalError("--live needs a finite --budget-usd > 0")
@@ -3019,7 +3062,7 @@ def _dispatch(a):
                           run_root=a.run_root)
         print("iteration-%d done, API-equivalent ~$%.2f (subscription: not billed per token)" % (n, budget.spent)); return 0
     if a.cmd == "grade":
-        grade_iteration(spec, ws, n, grader, a.seed)
+        grade_iteration(spec, ws, n, grader, a.seed, scope=grade_scope(a))
         print("graded iteration-%d, API-equivalent ~$%.2f (subscription: not billed per token)" % (n, budget.spent)); return 0
     if a.cmd == "calibrate":
         cal = calibrate_metered(a.golden, grader, os.path.join(ws, "iteration-%d" % n))
