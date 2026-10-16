@@ -362,3 +362,11 @@ python3 -m unittest discover -s tests -v                # 테스트 (pytest도 p
 ## Known limitations
 
 - Sentence splitting in description-when: a period directly followed by a lowercase letter (e.g. "Use when needed.the user wants a summary.") is not treated as a sentence boundary, so the condition is not cut there.
+
+## 블라인드 라벨링 (`label_blind.py`, 2026-10-16)
+
+`calibrate --golden`용 사람 라벨은 채점기 판정을 보지 않고 만듭니다. 이전 페이지(`label_v3_server.html`)는 Codex 판정을 보여 주고 라벨을 `agree ? grader_passed : !grader_passed`로 계산했으며 `fillAll`(모두 동의)이 있어 agreement 1.00이 순환적이었습니다.
+- `python3 label_blind.py build <기존 페이지 또는 items JSON> <새 html>`: 채점기 필드(`grader`, `grader_passed`, `grader_evidence` 등)를 뺀 페이지를 새 파일로 만듭니다(기존 파일은 덮어쓰지 않음).
+- `python3 label_blind.py serve <새 html> [--port 8765]`: `http://127.0.0.1:8765/`에서 열고, 사람이 항목마다 통과/불통과를 직접 고릅니다. 모든 항목에 답해야 저장되며, 같은 폴더에 `golden_labels_blind_<시각>.json`(`label` = `human_passed`, `blind: true`)으로 저장합니다. 모델 호출 없음.
+- 테스트: `tests/test_binary_and_blind_label.py`.
+

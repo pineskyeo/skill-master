@@ -575,9 +575,27 @@ CLAUDE_BUILTIN_PLUGIN_NAMES = ("cc-plugin-agents-md", "cc-plugin-claude-test", "
 BUILTIN_PLUGIN_RE = re.compile(rb"cc-plugin-[a-z0-9]+(?:-[a-z0-9]+)*")
 _BUILTIN_SCAN = {}  # cache: one binary scan per process, so every launch of a run gets the same --settings
 
-def claude_binary_path(which=None):
+SHIM_REAL_RE = re.compile(rb'CLAUDE_AS_REAL_CLAUDE"\)\s*or\s*"([^"]+)"')
+
+def resolve_past_shim(p, environ=None):
+    """The real CLI behind the ~/bin/claude account shim (claude-accts): $CLAUDE_REAL_BIN, else the shim's
+    $CLAUDE_AS_REAL_CLAUDE, else the absolute default written in the shim. A non-shim path is returned unchanged; a
+    shim whose target cannot be found returns None (scan reports it, the static list still applies)."""
+    environ = os.environ if environ is None else environ
+    if environ.get("CLAUDE_REAL_BIN"): return os.path.realpath(environ["CLAUDE_REAL_BIN"])
+    try:
+        with open(p, "rb") as f: head = f.read(65536)
+    except OSError: return p
+    if not head.startswith(b"#!") or b"CLAUDE_AS_REAL_CLAUDE" not in head: return p
+    m = SHIM_REAL_RE.search(head)
+    real = environ.get("CLAUDE_AS_REAL_CLAUDE") or (m.group(1).decode("utf-8", "replace") if m else None)
+    if not real or not os.path.isabs(real): return None
+    real = os.path.realpath(real)
+    return None if real == os.path.realpath(p) or not os.path.isfile(real) else real
+
+def claude_binary_path(which=None, environ=None):
     p = (which or shutil.which)("claude")
-    return os.path.realpath(p) if p else None
+    return resolve_past_shim(os.path.realpath(p), environ) if p else None
 
 def scan_builtin_plugin_names(path, chunk=1 << 24):
     """cc-plugin-* names found in the file at path (read in overlapping chunks; nothing is executed)."""
