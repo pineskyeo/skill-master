@@ -57,6 +57,24 @@ class AccountMarker(unittest.TestCase):
         self.assertTrue(any(".claude-acct1" in p and "ANTHROPIC_API_KEY" in p for p in probs), probs)
         self.assertFalse(any("v\"" in p for p in probs))
 
+    def test_account_dirs_follow_shim_inputs(self):
+        home = tempfile.mkdtemp()
+        for n in ("acct1", "acct2"): os.mkdir(os.path.join(home, ".claude-" + n))
+        self.assertEqual(se.switch_account_config_dirs(None, {"CLAUDE_AS_HOME": home}),
+                         [os.path.join(home, ".claude-acct1"), os.path.join(home, ".claude-acct2")])
+        self.assertEqual(se.switch_account_config_dirs(None, {"CLAUDE_AS_HOME": home, "CLAUDE_ACCOUNTS": "acct0,acct2"}),
+                         [os.path.join(home, ".claude-acct2")])
+        self.assertEqual(se.switch_account_config_dirs(None, {"CLAUDE_AS_HOME": home, "SKILL_EVAL_ACCOUNT_SWITCH": "0"}), [])
+
+    def test_preflight_checks_account_user_settings(self):
+        home = tempfile.mkdtemp(); os.mkdir(os.path.join(home, ".claude"))
+        acct = os.path.join(home, ".claude-acct1"); os.mkdir(acct)
+        with open(os.path.join(acct, "settings.json"), "w") as f: json.dump({"apiKeyHelper": "x"}, f)
+        spec = {"skill_name": "zz-none"}
+        with mock.patch.object(se, "codex_auth_problems", lambda: []):
+            probs = se.preflight(spec, ["claude"], run_root=tempfile.mkdtemp(), home=home)
+        self.assertTrue(any(".claude-acct1" in p and "apiKeyHelper" in p for p in probs), probs)
+
 
 if __name__ == "__main__":
     unittest.main()

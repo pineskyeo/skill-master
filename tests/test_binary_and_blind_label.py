@@ -24,7 +24,8 @@ class BinaryPath(unittest.TestCase):
     def test_env_overrides(self):
         other = w(os.path.join(self.d, "other"), "x")
         self.assertEqual(se.claude_binary_path(lambda n: self.shim, {"CLAUDE_AS_REAL_CLAUDE": other}), os.path.realpath(other))
-        self.assertEqual(se.claude_binary_path(lambda n: self.shim, {"CLAUDE_REAL_BIN": other}), os.path.realpath(other))
+        # only what the shim itself executes counts; no separate scan override
+        self.assertEqual(se.claude_binary_path(lambda n: self.shim, {"CLAUDE_REAL_BIN": other}), os.path.realpath(self.real))
 
     def test_non_shim_unchanged_and_missing_target_none(self):
         self.assertEqual(se.claude_binary_path(lambda n: self.real, {}), os.path.realpath(self.real))
@@ -49,6 +50,19 @@ ITEMS = [{"id": "a/1", "case": 1, "arm": "on", "run": "run-1", "pressure": False
 
 
 class BlindLabel(unittest.TestCase):
+    def test_nested_grader_fields_removed(self):
+        items = [dict(ITEMS[0], tool_calls=[{"tool": "Bash", "input": {"c": "x"}, "grader_passed": True,
+                                             "meta": {"verdict": "pass"}}])]
+        b = lb.blind_items(items)
+        self.assertFalse(lb.has_grader(b)); self.assertNotIn("grader", json.dumps(b))
+        g, _ = lb.validate_submission({"answers": {"a/1": {"human_passed": False}}}, items)
+        self.assertNotIn("grader", json.dumps(g)); self.assertNotIn("verdict", json.dumps(g))
+
+    def test_storage_key_changes_with_items(self):
+        a = lb.fingerprint(lb.blind_items(ITEMS))
+        changed = [dict(ITEMS[0], output="different"), ITEMS[1]]
+        self.assertNotEqual(a, lb.fingerprint(lb.blind_items(changed)))
+
     def build(self):
         d = tempfile.mkdtemp(); src = os.path.join(d, "items.json"); out = os.path.join(d, "page.html")
         json.dump({"iteration": 3, "items": ITEMS}, open(src, "w")); lb.build(src, out); return out

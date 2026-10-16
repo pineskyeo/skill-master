@@ -8,7 +8,7 @@ refused until every item has an answer. Nothing here calls a model.
   python3 label_blind.py build SRC.html|items.json OUT.html     # strip grader fields from an existing items set
   python3 label_blind.py serve OUT.html [--port 8765]           # http://127.0.0.1:PORT/ ; POST /submit saves JSON
 """
-import argparse, datetime, html, http.server, json, os, re, sys
+import argparse, datetime, hashlib, html, http.server, json, os, re, sys
 
 GRADER_KEYS = ("grader", "grader_passed", "grader_evidence", "grader_model", "label", "human_answer")
 KEEP = ("id", "case", "case_name", "arm", "run", "pressure", "pressure_context", "prompt", "expected_output", "output",
@@ -25,10 +25,30 @@ def load_items(src):
     return (data.get("iteration") if isinstance(data, dict) else None), items
 
 
+GRADER_KEY_RE = re.compile(r"grader|verdict|human_answer|^label$|^passed$|^human_passed$", re.I)
+
+
+def strip_grader(v):
+    """Deep copy of v without any grader-looking key at any depth."""
+    if isinstance(v, dict): return {k: strip_grader(x) for k, x in v.items() if not GRADER_KEY_RE.search(str(k))}
+    if isinstance(v, list): return [strip_grader(x) for x in v]
+    return v
+
+
+def has_grader(v):
+    if isinstance(v, dict): return any(GRADER_KEY_RE.search(str(k)) or has_grader(x) for k, x in v.items())
+    if isinstance(v, list): return any(has_grader(x) for x in v)
+    return False
+
+
+def fingerprint(items):
+    return hashlib.sha256(json.dumps(items, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:16]
+
+
 def blind_items(items):
     out = []
     for it in items:
-        b = {k: it.get(k) for k in KEEP if k in it}
+        b = {k: strip_grader(it.get(k)) for k in KEEP if k in it}
         b.setdefault("tool_calls", [])
         out.append(b)
     ids = [b["id"] for b in out]
@@ -48,7 +68,7 @@ def validate_submission(sub, items):
     for it in items:
         a = ans[it["id"]]
         note = a.get("note") if isinstance(a.get("note"), str) else ""
-        e = {k: it.get(k) for k in ("id", "prompt", "expected_output", "output", "tool_calls", "item", "set", "case",
+        e = {k: strip_grader(it.get(k)) for k in ("id", "prompt", "expected_output", "output", "tool_calls", "item", "set", "case",
                                      "arm", "run", "pressure")}
         e.update(human_passed=a["human_passed"], label=a["human_passed"], note=note, blind=True)
         ex.append(e)
@@ -104,7 +124,8 @@ def render(items, title, key):
 def build(src, out):
     it_n, items = load_items(src)
     b = blind_items(items)
-    key = "%s_it%s_%d" % (os.path.basename(os.path.dirname(os.path.dirname(os.path.abspath(out)))), it_n, len(b))
+    key = "%s_it%s_%s" % (os.path.basename(os.path.dirname(os.path.dirname(os.path.abspath(out)))), it_n,
+                          fingerprint(b))  # changed items never restore old answers
     with open(out, "x", encoding="utf-8") as f:  # never overwrite an existing page
         f.write(render(b, os.path.basename(out), key))
     return len(b)
@@ -112,7 +133,7 @@ def build(src, out):
 
 def serve(page, port):
     _, items = load_items(page)
-    if any(k in it for it in items for k in GRADER_KEYS): sys.exit("page carries grader fields; refusing")
+    if has_grader(items): sys.exit("page carries grader fields; refusing")
     outdir = os.path.dirname(os.path.abspath(page))
     body = open(page, "rb").read()
 

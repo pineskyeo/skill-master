@@ -334,13 +334,19 @@ def with_account_marker(env, cmd):
         env[ACCOUNT_SWITCH_OPT_IN] = "1" if account_switch_enabled() else "0"
     return env
 
-def switch_account_config_dirs(home=None):
-    """~/.claude-acctN dirs the shim may switch to (only when switching is enabled); their server-managed cache is
-    checked like the default config dir's."""
-    if not account_switch_enabled(): return []
-    home = home or os.path.expanduser("~")
-    try: names = sorted(os.listdir(home))
-    except OSError: return []
+def switch_account_config_dirs(home=None, environ=None):
+    """Config dirs of every account the shim may switch to (only when switching is enabled), derived from the same
+    inputs as the shim: home = $CLAUDE_AS_HOME or ~, accounts = $CLAUDE_ACCOUNTS or every ~/.claude-acctN. Each gets
+    the same preflight/launch checks as the default config dir (settings auth, remote cache, user/synced skills)."""
+    environ = os.environ if environ is None else environ
+    if not account_switch_enabled(environ): return []
+    home = home or environ.get("CLAUDE_AS_HOME") or os.path.expanduser("~")
+    listed = environ.get("CLAUDE_ACCOUNTS")
+    if listed:
+        names = [".claude-" + n.strip() for n in listed.split(",") if n.strip() and n.strip() != "acct0"]
+    else:
+        try: names = sorted(os.listdir(home))
+        except OSError: return []
     return [os.path.join(home, n) for n in names
             if re.match(r"^\.claude-acct[1-9][0-9]{0,2}$", n) and os.path.isdir(os.path.join(home, n))]
 # `--json` and the method values "claude.ai" / "api_key" are from the Claude Code changelog
@@ -578,11 +584,10 @@ _BUILTIN_SCAN = {}  # cache: one binary scan per process, so every launch of a r
 SHIM_REAL_RE = re.compile(rb'CLAUDE_AS_REAL_CLAUDE"\)\s*or\s*"([^"]+)"')
 
 def resolve_past_shim(p, environ=None):
-    """The real CLI behind the ~/bin/claude account shim (claude-accts): $CLAUDE_REAL_BIN, else the shim's
-    $CLAUDE_AS_REAL_CLAUDE, else the absolute default written in the shim. A non-shim path is returned unchanged; a
+    """The real CLI behind the ~/bin/claude account shim (claude-accts), chosen exactly as the shim chooses what it
+    executes: $CLAUDE_AS_REAL_CLAUDE, else the absolute default written in the shim. A non-shim path is returned unchanged; a
     shim whose target cannot be found returns None (scan reports it, the static list still applies)."""
     environ = os.environ if environ is None else environ
-    if environ.get("CLAUDE_REAL_BIN"): return os.path.realpath(environ["CLAUDE_REAL_BIN"])
     try:
         with open(p, "rb") as f: head = f.read(65536)
     except OSError: return p
@@ -985,6 +990,8 @@ class ClaudeCodeEngine(Engine):
             if os.path.isdir(cd) and any(f.endswith(".md") for _, _, fn in os.walk(cd) for f in fn):
                 out.append("custom command files in %s would load like skills" % cd)
         out += claude_undetectable_skill_problems(claude_config_dir())
+        for acfg in switch_account_config_dirs():  # the shim may retry this run on another account's config dir
+            out += claude_undetectable_skill_problems(acfg)
         if skill_name and skill_name in claude_bundled_skills()["names"]:
             out.append("skill name %r is also a bundled skill: the launch cannot set it off without hiding the skill "
                        "under test, and the init check cannot tell the two apart" % skill_name)
@@ -1877,6 +1884,12 @@ def preflight(spec, engines, run_root=None, home=None):
             out += mprobs + claude_settings_auth_problems(
                 user_settings + [p for p in claude_project_settings(ancestors(root)) if p not in user_settings]
                 + files + [os.path.join(cfg, CLAUDE_REMOTE_SETTINGS)])
+            for acfg in switch_account_config_dirs(home):  # accounts the shim may retry on: same checks
+                for n_, p in claude_user_skills(acfg, config_dir=True):
+                    if n_ == name:
+                        out.append("claude: skill %r is also installed at %s (account the shim may switch to)" % (name, p))
+                out += claude_undetectable_skill_problems(acfg) + claude_settings_auth_problems(
+                    [os.path.join(acfg, f) for f in CLAUDE_SETTINGS_FILES + (CLAUDE_REMOTE_SETTINGS,)])
         if e == "codex":
             hits = skills_under(CODEX_ADMIN_SKILLS, 4)
             if hits:
