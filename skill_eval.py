@@ -289,6 +289,7 @@ def live_exec(cmd, cwd, timeout, env=None):
         raise LiveDisabled("refusing to execute %r: live mode needs --live and --budget-usd" % (cmd[0],))
     env = scrub_env(os.environ if env is None else env)  # subscription auth only: no API key reaches a child
     env.pop("CLAUDECODE", None)  # as skill-creator run_eval.py: allow nesting claude -p inside a Claude Code session
+    env = with_account_marker(env, cmd)
     p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, env=env,
                        stdin=subprocess.DEVNULL)  # codex exec waits for stdin when it is an open pipe/terminal
     return p.returncode, p.stdout, p.stderr
@@ -312,6 +313,36 @@ NON_SUBSCRIPTION_ENV = API_KEY_ENV + PROVIDER_ENV
 # Not refused, but removed from every child: Claude runs authenticate only with the existing Keychain login of the
 # unchanged config dir, the same login `claude auth status` verified. An exported setup-token would replace it.
 IGNORED_AUTH_ENV = ("CLAUDE_CODE_OAUTH_TOKEN",)
+# Account switching (2026-10-16, README "Subscription auth" > "계정 자동 전환"). skill_eval itself still never passes a
+# token (IGNORED_AUTH_ENV above is scrubbed first). Every `claude` child gets an explicit caller marker; the ~/bin/claude
+# account shim (claude-accts v5) then may, only on a usage-limit error from acct0, retry once on ~/.claude-acctN with
+# that account's Keychain token, which the shim alone injects (and CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 so the eval
+# agent's Bash/hooks do not inherit it). SKILL_EVAL_ACCOUNT_SWITCH=0 opts out (marker kept, shim pins acct0).
+# Without the shim on PATH the marker is ignored by the real CLI.
+ACCOUNT_MARKER_ENV = {"CLAUDE_AS_CALLER": "skill_eval"}
+ACCOUNT_SWITCH_OPT_IN = "CLAUDE_AS_AUTO_SWITCH"
+
+def account_switch_enabled(environ=None):
+    return (os.environ if environ is None else environ).get("SKILL_EVAL_ACCOUNT_SWITCH", "1") != "0"
+
+def with_account_marker(env, cmd):
+    """env plus the caller marker (and opt-in) when cmd launches claude; other CLIs get env unchanged."""
+    env = dict(env)
+    for k in list(ACCOUNT_MARKER_ENV) + [ACCOUNT_SWITCH_OPT_IN]: env.pop(k, None)
+    if cmd and os.path.basename(cmd[0]) == "claude":
+        env.update(ACCOUNT_MARKER_ENV)
+        env[ACCOUNT_SWITCH_OPT_IN] = "1" if account_switch_enabled() else "0"
+    return env
+
+def switch_account_config_dirs(home=None):
+    """~/.claude-acctN dirs the shim may switch to (only when switching is enabled); their server-managed cache is
+    checked like the default config dir's."""
+    if not account_switch_enabled(): return []
+    home = home or os.path.expanduser("~")
+    try: names = sorted(os.listdir(home))
+    except OSError: return []
+    return [os.path.join(home, n) for n in names
+            if re.match(r"^\.claude-acct[1-9][0-9]{0,2}$", n) and os.path.isdir(os.path.join(home, n))]
 # `--json` and the method values "claude.ai" / "api_key" are from the Claude Code changelog
 # (~/.claude/cache/changelog.md: "Added `configDirectory` to the output of `claude auth status --json`", "it now
 # reports `api_key`"). The JSON key that holds the method is not documented there (추정), so every string value under
@@ -343,6 +374,7 @@ def run_auth_status(cmd, timeout=30):
     """Runs a local status command (no model call, nothing billed) with the same scrubbed env the runs get. Only
     check_live_gates calls it, so dry runs still execute nothing."""
     env = scrub_env(os.environ); env.pop("CLAUDECODE", None)
+    env = with_account_marker(env, cmd)
     p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
     return p.returncode, p.stdout, p.stderr
 
@@ -512,8 +544,10 @@ def claude_launch_problems(cwd, config_dir=None, require_hooks=False):
     probs = list(probs)
     cfg = config_dir or claude_config_dir()
     remote = os.path.join(cfg, CLAUDE_REMOTE_SETTINGS)
+    remotes = [remote] + [os.path.join(d, CLAUDE_REMOTE_SETTINGS) for d in switch_account_config_dirs()
+                          if config_dir is None]
     if require_hooks:
-        for p in files + [remote]:
+        for p in files + remotes:
             if not os.path.lexists(p): continue
             try: st = _read_settings(p)
             except Exception: continue  # the existing auth/settings validation reports unreadable sources
@@ -525,7 +559,7 @@ def claude_launch_problems(cwd, config_dir=None, require_hooks=False):
                 if "policyHelper" in st:
                     probs.append("claude: managed policyHelper in %s may override the gated launch policy" % p)
     return api_key_env_problems() + probs + claude_settings_auth_problems(
-        claude_project_settings(ancestors(cwd)) + files + [remote])
+        claude_project_settings(ancestors(cwd)) + files + remotes)
 
 # Built-in plugins ship inside the CLI as "<name>@builtin" and load unless settings.enabledPlugins["<name>@builtin"]
 # is false (https://code.claude.com/docs/en/plugins/mods/admin: enabledPlugins / pluginConfigs with @builtin ids;
@@ -745,7 +779,7 @@ def builtin_plugin_check(run_fn=None):
 def claude_child_env(config_dir=None):
     env = dict(os.environ, **CLAUDE_CHILD_ENV)
     if config_dir: env["CLAUDE_CONFIG_DIR"] = config_dir
-    return scrub_env(env)
+    return with_account_marker(scrub_env(env), ["claude"])
 
 def launch_claude(exec_fn, cmd, cwd, timeout, env=None, skill_name=None):
     """Grader and builder launch path: refuses (EvalError, before the call) unless cmd carries the isolation args (for
