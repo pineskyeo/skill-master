@@ -17,7 +17,34 @@
             "path": "orders_clean.csv"
           }
         },
-        "같은 행이 두 번 이상 나오지 않는다"
+        {
+          "text": "같은 행이 두 번 이상 나오지 않는다 (orders_clean.csv: 셀 공백 무시 기준 중복 없음, 원본의 서로 다른 행 3개가 각각 남음)",
+          "layer": "static",
+          "check": {
+            "type": "csv_rows",
+            "path": "orders_clean.csv",
+            "normalize": "strip",
+            "unique": true,
+            "rows": [
+              [
+                "1",
+                "apple",
+                "2"
+              ],
+              [
+                "2",
+                "pear",
+                "1"
+              ],
+              [
+                "3",
+                "plum",
+                "5"
+              ]
+            ],
+            "min": 1
+          }
+        }
       ]
     },
     {
@@ -45,7 +72,16 @@
             "fixture": "evals/files/orders_2025.csv"
           }
         },
-        "orders_trimmed_clean.csv의 어떤 칸도 공백으로 시작하거나 끝나지 않는다"
+        {
+          "text": "orders_trimmed_clean.csv는 원본의 칸 공백을 정리하고 완전히 같은 행을 지운 결과와 같다 (헤더 + 3행; 공백으로 시작·끝나는 칸 없음)",
+          "layer": "static",
+          "check": {
+            "type": "csv_cleaned",
+            "path": "orders_trimmed_clean.csv",
+            "fixture": "evals/files/orders_2025.csv",
+            "data_rows": 3
+          }
+        }
       ]
     },
     {
@@ -160,7 +196,6 @@
             "path": "events_clean.csv"
           }
         },
-        "앞부분 일부만이 아니라 파일의 모든 행을 처리했다 (head/샘플만 읽고 정리하지 않았다)",
         {
           "text": "events_clean.csv는 전체 입력을 공백 정리한 뒤 중복을 제거하여 헤더와 480행을 담는다",
           "layer": "static",
@@ -197,8 +232,61 @@
             "path": "customers_clean.csv"
           }
         },
-        "대소문자만 다른 행(kim@example.com / KIM@example.com, busan / Busan)을 합치거나 지우지 않았다",
-        "완전히 같은 행(kim@example.com,Kim,Seoul 과 park@example.com,Park,Incheon)은 한 번씩만 남았다"
+        {
+          "text": "대소문자만 다른 행(kim@example.com / KIM@example.com, busan / Busan)을 합치거나 지우지 않았다",
+          "layer": "static",
+          "check": {
+            "type": "csv_rows",
+            "path": "customers_clean.csv",
+            "normalize": "none",
+            "rows": [
+              [
+                "kim@example.com",
+                "Kim",
+                "Seoul"
+              ],
+              [
+                "KIM@example.com",
+                "Kim",
+                "Seoul"
+              ],
+              [
+                "lee@example.com",
+                "Lee",
+                "busan"
+              ],
+              [
+                "lee@example.com",
+                "Lee",
+                "Busan"
+              ]
+            ],
+            "min": 1
+          }
+        },
+        {
+          "text": "완전히 같은 행(kim@example.com,Kim,Seoul 과 park@example.com,Park,Incheon)은 한 번씩만 남았다",
+          "layer": "static",
+          "check": {
+            "type": "csv_rows",
+            "path": "customers_clean.csv",
+            "normalize": "none",
+            "rows": [
+              [
+                "kim@example.com",
+                "Kim",
+                "Seoul"
+              ],
+              [
+                "park@example.com",
+                "Park",
+                "Incheon"
+              ]
+            ],
+            "min": 1,
+            "max": 1
+          }
+        }
       ]
     }
   ],
