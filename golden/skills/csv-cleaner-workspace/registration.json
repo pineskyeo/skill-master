@@ -1,0 +1,15 @@
+{
+  "skill_name": "csv-cleaner",
+  "skill_path": "/Users/pinesky/workspace/스킬_마스터/golden/skills/csv-cleaner",
+  "iteration": 4,
+  "benchmark_sha256": "33b55d01d2ba696bfb60d2f96f3e3ae42542019861fe2b2ccd84b15c6a6e296a",
+  "skill_sha256": "05d9f9876fe7b2d53a7abc2289262a39dbdb458ed4d03ce51995d2fd0f93bd58",
+  "eval_set_sha256": "9d81fe09c1d28d7be1dd98e883b7111d191a6f0f5a3514ad0760d3e68ba9fe8b",
+  "skill_md_sha256": "7a3b8c00a725e25fd42472a743ea84671253eda8ed4e1c30be8f97fd637b33f5",
+  "registered_at": "2026-10-19T09:22:19Z",
+  "approval": {
+    "sha256": "33b55d01d2ba696bfb60d2f96f3e3ae42542019861fe2b2ccd84b15c6a6e296a",
+    "by": "pinesky",
+    "at": "2026-10-19T09:22:19Z"
+  }
+}
