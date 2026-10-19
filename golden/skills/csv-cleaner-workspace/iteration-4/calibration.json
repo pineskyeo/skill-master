@@ -1,0 +1,9 @@
+{
+  "n": 6,
+  "agreement": 1.0,
+  "kappa": 1.0,
+  "threshold": 0.8,
+  "grader_model": "codex(CLI default model)",
+  "golden": "/Users/pinesky/workspace/스킬_마스터/golden/skills/csv-cleaner-workspace/iteration-3/calibration/golden_labels_blind_20261019-180741-733904.json",
+  "disagreements": []
+}

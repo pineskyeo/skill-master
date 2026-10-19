@@ -4,8 +4,6 @@
     "failing static checks in with_skill runs: 2"
   ],
   "needs_approval": true,
-  "notes": [
-    "grader not calibrated for this iteration (run `calibrate --golden ...`)"
-  ],
+  "notes": [],
   "human_pending_only": false
 }

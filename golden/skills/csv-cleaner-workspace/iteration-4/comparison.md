@@ -1,14 +1,13 @@
 # csv-cleaner — iteration 4
 
 - configurations: with_skill, without_skill, runs per configuration: 3, engines: claude(claude-sonnet-5-5)
-- API-equivalent cost: $32.92 (usage x API prices; the budget limit); actual spend: not metered (subscription auth)
+- API-equivalent cost: $35.80 (usage x API prices; the budget limit); actual spend: not metered (subscription auth)
 
 ## Gate
 
 **NEEDS HUMAN APPROVAL**
 - problem: regression [claude]: with_skill pass_rate 0.94 < previous iteration 0.98
 - problem: failing static checks in with_skill runs: 2
-- note: grader not calibrated for this iteration (run `calibrate --golden ...`)
 
 ## Pass rate / time / tokens
 
@@ -37,7 +36,7 @@
 
 ## Grader calibration
 
-- not run
+- agreement 1.00, kappa 1.00 on 6 golden examples (threshold 0.80), grader codex(CLI default model)
 
 ## Static check failures (with_skill)
 
@@ -93,8 +92,9 @@ Billing: subscription. API-equivalent = CLI-reported cost, else usage tokens x A
 |---|---|
 | claude exec | 8.0292 |
 | claude trigger | 11.2134 |
+| calibrate | 2.8800 |
 | grade | 13.6800 |
-| **total** | **32.9226** |
+| **total** | **35.8026** |
 | actual spend | not metered |
 
 ## Notes

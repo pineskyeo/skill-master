@@ -8,6 +8,14 @@
       "input_tokens": 266235,
       "output_tokens": 1936,
       "api_equivalent_usd": 13.68
+    },
+    {
+      "command": "calibrate",
+      "at": "2026-10-19T09:11:00Z",
+      "calls": 6,
+      "input_tokens": 64078,
+      "output_tokens": 503,
+      "api_equivalent_usd": 2.88
     }
   ]
 }

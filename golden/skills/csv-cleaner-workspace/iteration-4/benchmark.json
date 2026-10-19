@@ -2,7 +2,7 @@
   "metadata": {
     "skill_name": "csv-cleaner",
     "skill_path": "/Users/pinesky/workspace/스킬_마스터/golden/skills/csv-cleaner",
-    "timestamp": "2026-10-19T09:01:37Z",
+    "timestamp": "2026-10-19T09:11:07Z",
     "engines": {
       "claude": "claude-sonnet-5-5"
     },
@@ -2041,9 +2041,10 @@
         }
       },
       "other": {
-        "grade": 13.68
+        "grade": 13.68,
+        "calibrate": 2.88
       },
-      "total": 32.9226
+      "total": 35.8026
     },
     "runs_without_usage": 0,
     "actual_spend_usd": null,
@@ -2051,7 +2052,15 @@
   },
   "human_pending": 0,
   "llm_not_graded": 0,
-  "calibration": null,
+  "calibration": {
+    "n": 6,
+    "agreement": 1.0,
+    "kappa": 1.0,
+    "threshold": 0.8,
+    "grader_model": "codex(CLI default model)",
+    "golden": "/Users/pinesky/workspace/스킬_마스터/golden/skills/csv-cleaner-workspace/iteration-3/calibration/golden_labels_blind_20261019-180741-733904.json",
+    "disagreements": []
+  },
   "notes": [
     "[claude] eval 2: 'orders_trimmed_clean.csv는 원본의 칸 공백을 정리하고 완전히 같은 행을 지운 결과와 같다 (헤더 + 3행; 공백으로 시작·끝나는 칸 없음)' passes in every configuration - may not differentiate skill value",
     "[claude] eval 2: '원본 orders_2025.csv는 바뀌지 않았다' passes in every configuration - may not differentiate skill value",
@@ -2068,9 +2077,7 @@
       "failing static checks in with_skill runs: 2"
     ],
     "needs_approval": true,
-    "notes": [
-      "grader not calibrated for this iteration (run `calibrate --golden ...`)"
-    ],
+    "notes": [],
     "human_pending_only": false
   }
 }
