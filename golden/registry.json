@@ -1,0 +1,47 @@
+[
+  {
+    "kind": "agent",
+    "name": "code-reviewer",
+    "version": "",
+    "description": "Reviews a repository read-only and explains it in plain Korean. Use when the user asks for a code review.",
+    "path": "agents/code-reviewer",
+    "verdict": "PASS",
+    "score": 1.0
+  },
+  {
+    "kind": "agent",
+    "name": "research-assistant",
+    "version": "",
+    "description": "Researches a topic on the web and writes a sourced Korean brief. Use when the user asks for research.",
+    "path": "agents/research-assistant",
+    "verdict": "PASS",
+    "score": 1.0
+  },
+  {
+    "kind": "skill",
+    "name": "csv-cleaner",
+    "version": "1.0.0",
+    "description": "Removes duplicate rows and trims whitespace in one CSV file. Use when a CSV has messy rows before analysis.",
+    "path": "skills/csv-cleaner",
+    "verdict": "PASS",
+    "score": 1.0
+  },
+  {
+    "kind": "skill",
+    "name": "korean-proofreader",
+    "version": "1.0.0",
+    "description": "한국어 문서의 맞춤법과 띄어쓰기를 교정한다. 사용자가 한국어 글의 교정을 요청할 때 사용한다.",
+    "path": "skills/korean-proofreader",
+    "verdict": "PASS",
+    "score": 1.0
+  },
+  {
+    "kind": "skill",
+    "name": "pdf-summarizer",
+    "version": "1.0.0",
+    "description": "Summarizes a single PDF document into a Korean one-page brief. Use when the user hands over a PDF and asks for a summary.",
+    "path": "skills/pdf-summarizer",
+    "verdict": "PASS",
+    "score": 1.0
+  }
+]
