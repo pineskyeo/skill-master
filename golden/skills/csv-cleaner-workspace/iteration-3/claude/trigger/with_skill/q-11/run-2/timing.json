@@ -1,0 +1,15 @@
+{
+  "total_tokens": 62068,
+  "duration_ms": 10764,
+  "total_duration_seconds": 10.764,
+  "executor_start": "2026-10-16T08:04:31Z",
+  "executor_end": "2026-10-16T08:04:42Z",
+  "executor_duration_seconds": 10.764,
+  "input_tokens": 61078,
+  "output_tokens": 990,
+  "cached_input_tokens": 59420,
+  "cost_usd": 0.022462,
+  "api_equivalent_usd": 0.132056,
+  "api_equivalent_source": "tokens_x_price",
+  "billing": "subscription"
+}

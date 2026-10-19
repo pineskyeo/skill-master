@@ -1,0 +1,191 @@
+{
+  "skill_name": "csv-cleaner",
+  "description": "Removes duplicate rows and trims whitespace in one CSV file. Use when a CSV has messy rows before analysis.",
+  "results": [
+    {
+      "query": "orders.csv에 똑같은 행이 여러 번 들어가 있어. 중복 줄 지워서 새 파일로 저장해줘",
+      "should_trigger": true,
+      "trigger_rate": 1.0,
+      "triggers": 1,
+      "runs": 1,
+      "errors": 0,
+      "pass": true
+    },
+    {
+      "query": "Can you dedupe customers_export.csv? Some rows show up two or three times.",
+      "should_trigger": true,
+      "trigger_rate": 1.0,
+      "triggers": 1,
+      "runs": 1,
+      "errors": 0,
+      "pass": true
+    },
+    {
+      "query": "sales_q3.csv 칸마다 앞뒤에 공백이 붙어 있어서 pandas groupby가 제대로 안 돼. 공백 좀 정리해줘",
+      "should_trigger": true,
+      "trigger_rate": 1.0,
+      "triggers": 1,
+      "runs": 1,
+      "errors": 0,
+      "pass": true
+    },
+    {
+      "query": "분석 들어가기 전에 data/raw_leads.csv 정리 좀 해줘. 중복 행 빼고 셀 앞뒤 공백도 없애고",
+      "should_trigger": true,
+      "trigger_rate": 1.0,
+      "triggers": 1,
+      "runs": 1,
+      "errors": 0,
+      "pass": true
+    },
+    {
+      "query": "survey_responses.csv has trailing spaces in every column and some submissions are duplicated. Clean it up before I load it.",
+      "should_trigger": true,
+      "trigger_rate": 1.0,
+      "triggers": 1,
+      "runs": 1,
+      "errors": 0,
+      "pass": true
+    },
+    {
+      "query": "inventory.csv 중복 제거해서 inventory_clean.csv로 만들어줘",
+      "should_trigger": true,
+      "trigger_rate": 1.0,
+      "triggers": 1,
+      "runs": 1,
+      "errors": 0,
+      "pass": true
+    },
+    {
+      "query": "ERP에서 뽑은 csv인데 값이 ' 서울 '처럼 앞뒤에 공백이 껴 있어. 공백만 없애줘",
+      "should_trigger": true,
+      "trigger_rate": 0.0,
+      "triggers": 0,
+      "runs": 1,
+      "errors": 0,
+      "pass": false
+    },
+    {
+      "query": "Remove the exact duplicate lines from transactions_2025.csv and write the result to transactions_dedup.csv",
+      "should_trigger": true,
+      "trigger_rate": 0.0,
+      "triggers": 0,
+      "runs": 1,
+      "errors": 0,
+      "pass": false
+    },
+    {
+      "query": "엑셀로 열기 전에 members.csv에서 완전히 같은 행은 하나만 남기고 지워줘",
+      "should_trigger": true,
+      "trigger_rate": 0.0,
+      "triggers": 0,
+      "runs": 1,
+      "errors": 0,
+      "pass": false
+    },
+    {
+      "query": "My CSV treats ' apple ' and 'apple' as different values because of stray whitespace. Fix the file so they match.",
+      "should_trigger": true,
+      "trigger_rate": 1.0,
+      "triggers": 1,
+      "runs": 1,
+      "errors": 0,
+      "pass": true
+    },
+    {
+      "query": "orders.csv에서 order_id별로 qty 합계 내줘",
+      "should_trigger": false,
+      "trigger_rate": 0.0,
+      "triggers": 0,
+      "runs": 1,
+      "errors": 0,
+      "pass": true
+    },
+    {
+      "query": "Convert report.xlsx to a CSV file",
+      "should_trigger": false,
+      "trigger_rate": 0.0,
+      "triggers": 0,
+      "runs": 1,
+      "errors": 0,
+      "pass": true
+    },
+    {
+      "query": "old.csv랑 new.csv 비교해서 달라진 행만 보여줘",
+      "should_trigger": false,
+      "trigger_rate": 0.0,
+      "triggers": 0,
+      "runs": 1,
+      "errors": 0,
+      "pass": true
+    },
+    {
+      "query": "customers.csv에서 이메일이 같은 고객을 한 줄로 합쳐줘. 이름 철자는 조금씩 달라",
+      "should_trigger": false,
+      "trigger_rate": 0.0,
+      "triggers": 0,
+      "runs": 1,
+      "errors": 0,
+      "pass": true
+    },
+    {
+      "query": "Write a Python function that strips whitespace from every string in a list",
+      "should_trigger": false,
+      "trigger_rate": 0.0,
+      "triggers": 0,
+      "runs": 1,
+      "errors": 0,
+      "pass": true
+    },
+    {
+      "query": "sales.csv의 날짜 형식을 2025/01/03에서 2025-01-03으로 바꿔줘",
+      "should_trigger": false,
+      "trigger_rate": 0.0,
+      "triggers": 0,
+      "runs": 1,
+      "errors": 0,
+      "pass": true
+    },
+    {
+      "query": "This JSON file has duplicate entries in its items array; remove them",
+      "should_trigger": false,
+      "trigger_rate": 0.0,
+      "triggers": 0,
+      "runs": 1,
+      "errors": 0,
+      "pass": true
+    },
+    {
+      "query": "products.csv에서 price가 비어 있는 행은 0으로 채워줘",
+      "should_trigger": false,
+      "trigger_rate": 0.0,
+      "triggers": 0,
+      "runs": 1,
+      "errors": 1,
+      "pass": true
+    },
+    {
+      "query": "Merge jan.csv, feb.csv and mar.csv into one file",
+      "should_trigger": false,
+      "trigger_rate": 0.0,
+      "triggers": 0,
+      "runs": 1,
+      "errors": 1,
+      "pass": true
+    },
+    {
+      "query": "visits.csv 읽어서 요일별 방문 수 막대그래프 그려줘",
+      "should_trigger": false,
+      "trigger_rate": 0.0,
+      "triggers": 0,
+      "runs": 1,
+      "errors": 1,
+      "pass": true
+    }
+  ],
+  "summary": {
+    "total": 20,
+    "passed": 17,
+    "failed": 3
+  }
+}

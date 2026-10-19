@@ -1,0 +1,11 @@
+{
+  "winner": "B",
+  "reasoning": "B는 완전히 같은 행 2개만 제거해 기대한 5행을 남겼고, 이메일과 도시의 대소문자가 다른 행도 보존했습니다. A는 대소문자가 다른 행까지 임의로 합쳐 3행으로 줄여 기대 결과를 위반했습니다.",
+  "mapping": {
+    "A": "without_skill",
+    "B": "with_skill"
+  },
+  "winner_configuration": "with_skill",
+  "seed": 933315327,
+  "grader_model": "codex(CLI default model)"
+}

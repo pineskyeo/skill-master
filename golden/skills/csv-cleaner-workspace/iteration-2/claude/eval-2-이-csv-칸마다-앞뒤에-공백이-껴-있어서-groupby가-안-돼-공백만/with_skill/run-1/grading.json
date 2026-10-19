@@ -1,0 +1,29 @@
+{
+  "expectations": [
+    {
+      "text": "어떤 칸도 공백으로 시작하거나 끝나지 않는다",
+      "id": "2.0",
+      "layer": "llm",
+      "passed": true,
+      "evidence": "최종 Write 내용은 \"order_id,item,qty\\n1,apple,2\\n1,apple,2\\n2,pear,1\\n3,plum,5\\n3,plum,5\\n3,plum,5\\n\"이며, 모든 칸에 앞뒤 공백이 없다.",
+      "status": "graded",
+      "grader": "codex(CLI default model, effort high)"
+    }
+  ],
+  "summary": {
+    "passed": 1,
+    "failed": 0,
+    "total": 1,
+    "pass_rate": 1.0,
+    "pending": 0
+  },
+  "execution_metrics": {
+    "total_tool_calls": 5,
+    "errors_encountered": 0,
+    "output_chars": 218
+  },
+  "timing": {
+    "executor_duration_seconds": 15.106,
+    "total_duration_seconds": 15.106
+  }
+}

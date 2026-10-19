@@ -1,0 +1,13 @@
+{
+  "billing": "subscription",
+  "entries": [
+    {
+      "command": "grade",
+      "at": "2026-10-15T03:20:36Z",
+      "calls": 18,
+      "input_tokens": 263982,
+      "output_tokens": 2073,
+      "api_equivalent_usd": 9.36
+    }
+  ]
+}

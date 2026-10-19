@@ -1,0 +1,11 @@
+{
+  "winner": "A",
+  "reasoning": "Run A produced the expected header plus five rows, preserving case differences and removing only identical duplicates. Run B incorrectly merged case-distinct email and city rows, leaving only three data rows.",
+  "mapping": {
+    "A": "with_skill",
+    "B": "without_skill"
+  },
+  "winner_configuration": "with_skill",
+  "seed": 1160942609,
+  "grader_model": "codex(CLI default model)"
+}

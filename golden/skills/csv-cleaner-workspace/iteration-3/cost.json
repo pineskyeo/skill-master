@@ -1,0 +1,37 @@
+{
+  "billing": "subscription",
+  "entries": [
+    {
+      "command": "grade",
+      "at": "2026-10-16T08:29:24Z",
+      "calls": 6,
+      "input_tokens": 91048,
+      "output_tokens": 750,
+      "api_equivalent_usd": 3.12
+    },
+    {
+      "command": "grade",
+      "at": "2026-10-16T08:42:47Z",
+      "calls": 12,
+      "input_tokens": 182844,
+      "output_tokens": 1161,
+      "api_equivalent_usd": 6.3
+    },
+    {
+      "command": "grade",
+      "at": "2026-10-16T08:50:23Z",
+      "calls": 30,
+      "input_tokens": 458606,
+      "output_tokens": 2969,
+      "api_equivalent_usd": 15.75
+    },
+    {
+      "command": "calibrate",
+      "at": "2026-10-16T11:37:26Z",
+      "calls": 36,
+      "input_tokens": 387371,
+      "output_tokens": 3273,
+      "api_equivalent_usd": 18.9
+    }
+  ]
+}

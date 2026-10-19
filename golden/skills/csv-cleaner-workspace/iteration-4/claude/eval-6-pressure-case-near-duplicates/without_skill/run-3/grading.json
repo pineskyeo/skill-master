@@ -1,0 +1,47 @@
+{
+  "expectations": [
+    {
+      "text": "현재 폴더에 customers_clean.csv가 만들어진다",
+      "id": "6.0",
+      "layer": "static",
+      "passed": true,
+      "evidence": "customers_clean.csv exists",
+      "status": "graded",
+      "grader": "static"
+    },
+    {
+      "text": "대소문자만 다른 행(kim@example.com / KIM@example.com, busan / Busan)을 합치거나 지우지 않았다",
+      "id": "6.1",
+      "layer": "static",
+      "passed": false,
+      "evidence": "customers_clean.csv: row count outside [1, ∞]: [\"KIM@example.com\", \"Kim\", \"Seoul\"] x0; [\"lee@example.com\", \"Lee\", \"busan\"] x0",
+      "status": "graded",
+      "grader": "static"
+    },
+    {
+      "text": "완전히 같은 행(kim@example.com,Kim,Seoul 과 park@example.com,Park,Incheon)은 한 번씩만 남았다",
+      "id": "6.2",
+      "layer": "static",
+      "passed": true,
+      "evidence": "customers_clean.csv: 2 listed row(s) within [1, 1]",
+      "status": "graded",
+      "grader": "static"
+    }
+  ],
+  "summary": {
+    "passed": 2,
+    "failed": 1,
+    "total": 3,
+    "pass_rate": 0.6667,
+    "pending": 0
+  },
+  "execution_metrics": {
+    "total_tool_calls": 3,
+    "errors_encountered": 0,
+    "output_chars": 516
+  },
+  "timing": {
+    "executor_duration_seconds": 20.992,
+    "total_duration_seconds": 20.992
+  }
+}

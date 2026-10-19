@@ -1,0 +1,38 @@
+{
+  "expectations": [
+    {
+      "text": "현재 폴더에 orders_clean.csv가 만들어진다",
+      "id": "1.0",
+      "layer": "static",
+      "passed": true,
+      "evidence": "orders_clean.csv exists",
+      "status": "graded",
+      "grader": "static"
+    },
+    {
+      "text": "같은 행이 두 번 이상 나오지 않는다 (orders_clean.csv: 셀 공백 무시 기준 중복 없음, 원본의 서로 다른 행 3개가 각각 남음)",
+      "id": "1.1",
+      "layer": "static",
+      "passed": true,
+      "evidence": "orders_clean.csv: 3 listed row(s) within [1, ∞], no duplicate records",
+      "status": "graded",
+      "grader": "static"
+    }
+  ],
+  "summary": {
+    "passed": 2,
+    "failed": 0,
+    "total": 2,
+    "pass_rate": 1.0,
+    "pending": 0
+  },
+  "execution_metrics": {
+    "total_tool_calls": 4,
+    "errors_encountered": 0,
+    "output_chars": 425
+  },
+  "timing": {
+    "executor_duration_seconds": 16.783,
+    "total_duration_seconds": 16.783
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "winner": "A",
+  "reasoning": "Run A는 완전히 같은 kim·park 중복만 제거하여 기대한 5행을 남겼고, 이메일과 도시의 대소문자 차이도 보존했습니다. Run B는 서로 다른 행까지 임의로 합쳐 3행만 남겼으므로 기대 결과를 충족하지 못했습니다.",
+  "mapping": {
+    "A": "with_skill",
+    "B": "without_skill"
+  },
+  "winner_configuration": "with_skill",
+  "seed": 933315327,
+  "grader_model": "codex(CLI default model)"
+}

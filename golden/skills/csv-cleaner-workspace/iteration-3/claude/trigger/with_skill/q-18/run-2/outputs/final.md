@@ -1,0 +1,5 @@
+I couldn't merge the files because `jan.csv`, `feb.csv` and `mar.csv` don't exist in the working directory (`/private/var/folders/1y/7cgp6w0n4p10n9cqyplr22dw0000gn/T/skill-eval-claude-iw6k2rft/work`). Reading each one returned "File does not exist."
+
+My Bash access is also restricted. It only allows a `clean.py` invocation with two paths, so I couldn't run `ls` to look for the files elsewhere. The `csv-cleaner` skill is for deduplicating and trimming a single file, so it doesn't fit a merge.
+
+Can you tell me where the three files are, or copy them into the working directory? Once I can read them, I'll write the merged file with the Write tool. I'd keep the header from `jan.csv` only, and I'd check that all three files have the same columns first. Tell me if you'd rather have a different output name or want duplicate rows removed. Otherwise I'll write `merged.csv`.

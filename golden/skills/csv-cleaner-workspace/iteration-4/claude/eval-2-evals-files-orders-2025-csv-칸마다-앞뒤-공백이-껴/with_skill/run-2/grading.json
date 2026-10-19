@@ -1,0 +1,47 @@
+{
+  "expectations": [
+    {
+      "text": "현재 폴더에 orders_trimmed_clean.csv가 만들어진다",
+      "id": "2.0",
+      "layer": "static",
+      "passed": true,
+      "evidence": "orders_trimmed_clean.csv exists",
+      "status": "graded",
+      "grader": "static"
+    },
+    {
+      "text": "원본 orders_2025.csv는 바뀌지 않았다",
+      "id": "2.1",
+      "layer": "static",
+      "passed": true,
+      "evidence": "evals/files/orders_2025.csv equals fixture",
+      "status": "graded",
+      "grader": "static"
+    },
+    {
+      "text": "orders_trimmed_clean.csv는 원본의 칸 공백을 정리하고 완전히 같은 행을 지운 결과와 같다 (헤더 + 3행; 공백으로 시작·끝나는 칸 없음)",
+      "id": "2.2",
+      "layer": "static",
+      "passed": true,
+      "evidence": "orders_trimmed_clean.csv: 3 rows, expected 3 and exact cleaned fixture content matched",
+      "status": "graded",
+      "grader": "static"
+    }
+  ],
+  "summary": {
+    "passed": 3,
+    "failed": 0,
+    "total": 3,
+    "pass_rate": 1.0,
+    "pending": 0
+  },
+  "execution_metrics": {
+    "total_tool_calls": 6,
+    "errors_encountered": 0,
+    "output_chars": 476
+  },
+  "timing": {
+    "executor_duration_seconds": 22.696,
+    "total_duration_seconds": 22.696
+  }
+}

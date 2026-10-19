@@ -1,0 +1,13 @@
+{
+  "problems": [
+    "regression [claude]: with_skill pass_rate 0.37 < without_skill 0.57",
+    "failing static checks in with_skill runs: 4",
+    "execution failed [claude]: 3 trigger run(s) with errors",
+    "trigger criteria failed [claude]: 3 of 20 queries"
+  ],
+  "needs_approval": true,
+  "notes": [
+    "grader not calibrated for this iteration (run `calibrate --golden ...`)"
+  ],
+  "human_pending_only": false
+}

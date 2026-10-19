@@ -1,0 +1,38 @@
+{
+  "expectations": [
+    {
+      "text": "현재 폴더에 events_clean.csv가 만들어진다",
+      "id": "5.0",
+      "layer": "static",
+      "passed": true,
+      "evidence": "events_clean.csv exists",
+      "status": "graded",
+      "grader": "static"
+    },
+    {
+      "text": "events_clean.csv는 전체 입력을 공백 정리한 뒤 중복을 제거하여 헤더와 480행을 담는다",
+      "id": "5.1",
+      "layer": "static",
+      "passed": true,
+      "evidence": "events_clean.csv: 480 rows, expected 480 and exact cleaned fixture content matched",
+      "status": "graded",
+      "grader": "static"
+    }
+  ],
+  "summary": {
+    "passed": 2,
+    "failed": 0,
+    "total": 2,
+    "pass_rate": 1.0,
+    "pending": 0
+  },
+  "execution_metrics": {
+    "total_tool_calls": 5,
+    "errors_encountered": 0,
+    "output_chars": 172
+  },
+  "timing": {
+    "executor_duration_seconds": 19.683,
+    "total_duration_seconds": 19.683
+  }
+}

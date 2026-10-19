@@ -1,0 +1,11 @@
+{
+  "winner": "B",
+  "reasoning": "B는 실제 CSV와 clean.py를 확인해 헤더만 있는 입력이 오류 없이 헤더 그대로 출력된다고 설명하여 기대 결과에 부합합니다. A는 해당 도구를 확인하지 못하고 일반적인 가능성과 주의사항만 제시했습니다.",
+  "mapping": {
+    "A": "without_skill",
+    "B": "with_skill"
+  },
+  "winner_configuration": "with_skill",
+  "seed": 2004715075,
+  "grader_model": "codex(CLI default model, effort high)"
+}

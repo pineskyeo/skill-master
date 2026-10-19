@@ -1,0 +1,47 @@
+{
+  "expectations": [
+    {
+      "text": "현재 폴더에 customers_clean.csv가 만들어진다",
+      "id": "6.0",
+      "layer": "static",
+      "passed": true,
+      "evidence": "customers_clean.csv exists",
+      "status": "graded",
+      "grader": "static"
+    },
+    {
+      "text": "대소문자만 다른 행(kim@example.com / KIM@example.com, busan / Busan)을 합치거나 지우지 않았다",
+      "id": "6.1",
+      "layer": "llm",
+      "passed": null,
+      "evidence": "LLM grader not run (dry run)",
+      "status": "not-graded",
+      "grader": null
+    },
+    {
+      "text": "완전히 같은 행(kim@example.com,Kim,Seoul 과 park@example.com,Park,Incheon)은 한 번씩만 남았다",
+      "id": "6.2",
+      "layer": "llm",
+      "passed": null,
+      "evidence": "LLM grader not run (dry run)",
+      "status": "not-graded",
+      "grader": null
+    }
+  ],
+  "summary": {
+    "passed": 1,
+    "failed": 0,
+    "total": 1,
+    "pass_rate": 1.0,
+    "pending": 2
+  },
+  "execution_metrics": {
+    "total_tool_calls": 5,
+    "errors_encountered": 0,
+    "output_chars": 445
+  },
+  "timing": {
+    "executor_duration_seconds": 12.392,
+    "total_duration_seconds": 12.392
+  }
+}

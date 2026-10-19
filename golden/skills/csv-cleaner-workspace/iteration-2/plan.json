@@ -1,0 +1,40 @@
+{
+  "skill_name": "csv-cleaner",
+  "skill_path": "/Users/pinesky/workspace/스킬_마스터/golden/skills/csv-cleaner",
+  "old_skill": null,
+  "configurations": [
+    "with_skill",
+    "without_skill"
+  ],
+  "runs_per_configuration": 1,
+  "engines": {
+    "claude": "claude-sonnet-5-5"
+  },
+  "evals_run": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
+  "efforts": {
+    "claude": "high"
+  },
+  "trigger_queries": 20,
+  "started_at": "2026-10-15T03:11:01Z",
+  "skill_sha256": "cc7d24e841dd6c86c8abc57748f37f380783dc3274b1d8f1a501749f035b1a66",
+  "eval_set_sha256": "90b2dde489da6be2fa1fbad1949770456bdfef6023d2d7c4451250e2980b6c52",
+  "old_skill_sha256": null,
+  "isolation": {
+    "run_root": "/private/var/folders/1y/7cgp6w0n4p10n9cqyplr22dw0000gn/T",
+    "per_run_sandbox": true
+  },
+  "budget_enforcement": {
+    "claude": "per_call_cap"
+  },
+  "finished_at": "2026-10-15T03:17:00Z",
+  "billing": "subscription",
+  "stopped": null,
+  "api_equivalent_usd": 10.8033
+}

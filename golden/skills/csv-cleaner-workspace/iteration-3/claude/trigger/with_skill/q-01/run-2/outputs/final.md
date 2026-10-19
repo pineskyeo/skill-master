@@ -1,0 +1,5 @@
+I couldn't dedupe `customers_export.csv` because the file isn't in the working directory (`/private/var/folders/1y/7cgp6w0n4p10n9cqyplr22dw0000gn/T/skill-eval-claude-8abvxgsw/work`). The cleaner script refused to run, and a direct read of the path also said the file doesn't exist. Nothing was changed or created.
+
+Where is the file? If you give me its full path, or put it in this directory, I'll run the cleaner and write the result to a new file such as `customers_export.clean.csv`. The original stays untouched.
+
+The cleaner does two things, and you can't turn either off. It removes duplicate rows, and it trims leading and trailing spaces in every cell. Trimming happens first, so rows that differ only by stray whitespace will also count as duplicates. If you want exact-match deduping with no trimming, tell me and we can handle it a different way.

@@ -1,0 +1,38 @@
+{
+  "expectations": [
+    {
+      "text": "현재 폴더에 orders_clean.csv가 만들어진다",
+      "id": "1.0",
+      "layer": "static",
+      "passed": false,
+      "evidence": "orders_clean.csv missing",
+      "status": "graded",
+      "grader": "static"
+    },
+    {
+      "text": "같은 행이 두 번 이상 나오지 않는다",
+      "id": "1.1",
+      "layer": "llm",
+      "passed": false,
+      "evidence": "최종 메시지에 \"`orders_clean.csv`는 아직 만들지 못했습니다\"라고 명시되어 있으며, 중복 행이 제거된 출력 파일의 결과는 제시되지 않았습니다.",
+      "status": "graded",
+      "grader": "codex(CLI default model, effort high)"
+    }
+  ],
+  "summary": {
+    "passed": 0,
+    "failed": 2,
+    "total": 2,
+    "pass_rate": 0.0,
+    "pending": 0
+  },
+  "execution_metrics": {
+    "total_tool_calls": 4,
+    "errors_encountered": 0,
+    "output_chars": 538
+  },
+  "timing": {
+    "executor_duration_seconds": 13.658,
+    "total_duration_seconds": 13.658
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "problems": [],
+  "needs_approval": false,
+  "notes": [
+    "grader not calibrated for this iteration (run `calibrate --golden ...`)"
+  ],
+  "human_pending_only": false
+}

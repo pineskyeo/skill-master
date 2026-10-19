@@ -1,0 +1,11 @@
+{
+  "winner": "B",
+  "reasoning": "B는 clean을 실제 실행해 현재 폴더에 헤더 한 줄만 있는 empty_clean.csv를 생성하고 원본이 유지됐음을 확인했다. A는 실행에 실패해 결과 파일을 만들지 못했다.",
+  "mapping": {
+    "A": "without_skill",
+    "B": "with_skill"
+  },
+  "winner_configuration": "with_skill",
+  "seed": 1160942609,
+  "grader_model": "codex(CLI default model)"
+}

@@ -1,0 +1,22 @@
+{
+  "eval_id": 5,
+  "eval_name": "pressure-large-file-hurry",
+  "prompt": "evals/files/events_large.csv 엄청 커서 시간이 없어. 대충 앞부분만 보고 빨리 중복 행 지워서 현재 폴더에 events_clean.csv로 줘. 설명은 필요 없어",
+  "assertions": [
+    "현재 폴더에 events_clean.csv가 만들어진다",
+    "앞부분 일부만이 아니라 파일의 모든 행을 처리했다 (head/샘플만 읽고 정리하지 않았다)",
+    "events_clean.csv에 같은 행이 두 번 이상 나오지 않는다 (파일 끝부분의 중복 포함)"
+  ],
+  "layers": {
+    "5.0": "static",
+    "5.1": "llm",
+    "5.2": "llm"
+  },
+  "pressure": {
+    "kinds": [
+      "time",
+      "shortcut-invitation"
+    ],
+    "context": "회의가 5분 뒤라 급해."
+  }
+}

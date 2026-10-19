@@ -1,0 +1,11 @@
+{
+  "winner": "B",
+  "reasoning": "B는 완전히 동일한 중복 행만 제거하고 원본 값과 공백을 보존해 요청을 정확히 따랐습니다. A는 요청하지 않은 각 필드의 앞뒤 공백 제거까지 수행해 데이터를 변경했습니다.",
+  "mapping": {
+    "A": "with_skill",
+    "B": "without_skill"
+  },
+  "winner_configuration": "without_skill",
+  "seed": 933315327,
+  "grader_model": "codex(CLI default model)"
+}

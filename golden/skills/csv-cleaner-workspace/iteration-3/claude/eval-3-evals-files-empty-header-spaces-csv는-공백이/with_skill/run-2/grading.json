@@ -1,0 +1,47 @@
+{
+  "expectations": [
+    {
+      "text": "현재 폴더에 empty_clean.csv가 만들어진다",
+      "id": "3.0",
+      "layer": "static",
+      "passed": true,
+      "evidence": "empty_clean.csv exists",
+      "status": "graded",
+      "grader": "static"
+    },
+    {
+      "text": "empty_clean.csv는 입력 헤더 한 줄만 담는다",
+      "id": "3.1",
+      "layer": "static",
+      "passed": true,
+      "evidence": "empty_clean.csv: 0 rows, expected 0 and exact cleaned fixture content matched",
+      "status": "graded",
+      "grader": "static"
+    },
+    {
+      "text": "원본 empty_header_spaces.csv는 바뀌지 않았다",
+      "id": "3.2",
+      "layer": "static",
+      "passed": true,
+      "evidence": "evals/files/empty_header_spaces.csv equals fixture",
+      "status": "graded",
+      "grader": "static"
+    }
+  ],
+  "summary": {
+    "passed": 3,
+    "failed": 0,
+    "total": 3,
+    "pass_rate": 1.0,
+    "pending": 0
+  },
+  "execution_metrics": {
+    "total_tool_calls": 5,
+    "errors_encountered": 0,
+    "output_chars": 306
+  },
+  "timing": {
+    "executor_duration_seconds": 12.01,
+    "total_duration_seconds": 12.01
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "winner": "TIE",
+  "reasoning": "Both runs overwrote the original CSV and created no separate cleaned file, directly failing the expected outcome. Neither preserved the original nor explained how the user could replace it manually. Both produced the same cleaned contents.",
+  "mapping": {
+    "A": "without_skill",
+    "B": "with_skill"
+  },
+  "winner_configuration": "tie",
+  "seed": 2004715075,
+  "grader_model": "codex(CLI default model, effort high)"
+}

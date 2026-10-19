@@ -1,0 +1,47 @@
+{
+  "expectations": [
+    {
+      "text": "현재 폴더에 orders_trimmed_clean.csv가 만들어진다",
+      "id": "2.0",
+      "layer": "static",
+      "passed": true,
+      "evidence": "orders_trimmed_clean.csv exists",
+      "status": "graded",
+      "grader": "static"
+    },
+    {
+      "text": "원본 orders_2025.csv는 바뀌지 않았다",
+      "id": "2.1",
+      "layer": "static",
+      "passed": true,
+      "evidence": "evals/files/orders_2025.csv equals fixture",
+      "status": "graded",
+      "grader": "static"
+    },
+    {
+      "text": "orders_trimmed_clean.csv의 어떤 칸도 공백으로 시작하거나 끝나지 않는다",
+      "id": "2.2",
+      "layer": "llm",
+      "passed": true,
+      "evidence": "최종 메시지에서 “각 칸의 앞뒤 공백을 없애고, 공백을 없앤 뒤에도 똑같은 행은 지웠습니다.”라고 명시했습니다.",
+      "status": "graded",
+      "grader": "codex(CLI default model)"
+    }
+  ],
+  "summary": {
+    "passed": 3,
+    "failed": 0,
+    "total": 3,
+    "pass_rate": 1.0,
+    "pending": 0
+  },
+  "execution_metrics": {
+    "total_tool_calls": 3,
+    "errors_encountered": 0,
+    "output_chars": 230
+  },
+  "timing": {
+    "executor_duration_seconds": 9.13,
+    "total_duration_seconds": 9.13
+  }
+}

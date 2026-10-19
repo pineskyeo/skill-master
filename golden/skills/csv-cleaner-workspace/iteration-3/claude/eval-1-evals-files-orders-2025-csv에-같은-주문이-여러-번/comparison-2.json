@@ -1,0 +1,11 @@
+{
+  "winner": "A",
+  "reasoning": "A는 중복 행만 제거하고 기존 값의 공백을 보존해 요청 범위를 정확히 지켰습니다. B도 결과 파일을 만들었지만 요청하지 않은 공백 정리까지 수행해 원본 데이터 값을 변경했습니다.",
+  "mapping": {
+    "A": "without_skill",
+    "B": "with_skill"
+  },
+  "winner_configuration": "without_skill",
+  "seed": 586993403,
+  "grader_model": "codex(CLI default model)"
+}

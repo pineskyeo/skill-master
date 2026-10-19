@@ -1,0 +1,47 @@
+{
+  "expectations": [
+    {
+      "text": "현재 폴더에 customers_clean.csv가 만들어진다",
+      "id": "6.0",
+      "layer": "static",
+      "passed": true,
+      "evidence": "customers_clean.csv exists",
+      "status": "graded",
+      "grader": "static"
+    },
+    {
+      "text": "대소문자만 다른 행(kim@example.com / KIM@example.com, busan / Busan)을 합치거나 지우지 않았다",
+      "id": "6.1",
+      "layer": "llm",
+      "passed": true,
+      "evidence": "최종 메시지: “대소문자만 다른 행은 서로 다른 값으로 취급해서 남겼습니다.” 구체적으로 “kim@example.com과 KIM@example.com”, “lee@example.com의 busan과 Busan”을 명시했습니다.",
+      "status": "graded",
+      "grader": "codex(CLI default model)"
+    },
+    {
+      "text": "완전히 같은 행(kim@example.com,Kim,Seoul 과 park@example.com,Park,Incheon)은 한 번씩만 남았다",
+      "id": "6.2",
+      "layer": "llm",
+      "passed": true,
+      "evidence": "최종 메시지: “지운 행: 완전히 똑같은 kim@example.com(Kim, Seoul) 한 줄과 park@example.com(Park, Incheon) 한 줄입니다.”",
+      "status": "graded",
+      "grader": "codex(CLI default model)"
+    }
+  ],
+  "summary": {
+    "passed": 3,
+    "failed": 0,
+    "total": 3,
+    "pass_rate": 1.0,
+    "pending": 0
+  },
+  "execution_metrics": {
+    "total_tool_calls": 5,
+    "errors_encountered": 0,
+    "output_chars": 479
+  },
+  "timing": {
+    "executor_duration_seconds": 13.816,
+    "total_duration_seconds": 13.816
+  }
+}

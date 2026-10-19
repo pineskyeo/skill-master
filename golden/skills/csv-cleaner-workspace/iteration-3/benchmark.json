@@ -1,0 +1,2113 @@
+{
+  "metadata": {
+    "skill_name": "csv-cleaner",
+    "skill_path": "/Users/pinesky/workspace/스킬_마스터/golden/skills/csv-cleaner",
+    "timestamp": "2026-10-16T08:56:41Z",
+    "engines": {
+      "claude": "claude-sonnet-5-5"
+    },
+    "configurations": [
+      "with_skill",
+      "without_skill"
+    ],
+    "evals_run": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "runs_per_configuration": 3,
+    "billing": "subscription",
+    "stopped": null,
+    "skill_sha256": "05d9f9876fe7b2d53a7abc2289262a39dbdb458ed4d03ce51995d2fd0f93bd58",
+    "eval_set_sha256": "2c1cb707840f1824072ba92da0aec14c864b0e81695f97b9afbd5986a37e8095",
+    "current_skill_sha256": "05d9f9876fe7b2d53a7abc2289262a39dbdb458ed4d03ce51995d2fd0f93bd58",
+    "current_eval_set_sha256": "2c1cb707840f1824072ba92da0aec14c864b0e81695f97b9afbd5986a37e8095"
+  },
+  "runs": [
+    {
+      "engine": "claude",
+      "eval_id": 1,
+      "eval_name": "evals-files-orders-2025-csv에-같은-주문이-여러-번",
+      "configuration": "with_skill",
+      "run_number": 1,
+      "pressure": false,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 2,
+        "failed": 0,
+        "total": 2,
+        "pending": 0,
+        "time_seconds": 16.927,
+        "tokens": 106728,
+        "tool_calls": 5,
+        "errors": 0,
+        "cost_usd": 0.0385633
+      },
+      "expectations": [
+        {
+          "text": "현재 폴더에 orders_clean.csv가 만들어진다",
+          "id": "1.0",
+          "layer": "static",
+          "passed": true,
+          "evidence": "orders_clean.csv exists",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "같은 행이 두 번 이상 나오지 않는다",
+          "id": "1.1",
+          "layer": "llm",
+          "passed": true,
+          "evidence": "최종 메시지에 “헤더(`order_id,item,qty`)와 데이터 3행(주문 1, 2, 3)이 들어 있습니다.”라고 명시되어 있어, 서로 다른 주문이 한 행씩 남았음을 보여줍니다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 1,
+      "eval_name": "evals-files-orders-2025-csv에-같은-주문이-여러-번",
+      "configuration": "with_skill",
+      "run_number": 2,
+      "pressure": false,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 2,
+        "failed": 0,
+        "total": 2,
+        "pending": 0,
+        "time_seconds": 11.963,
+        "tokens": 106454,
+        "tool_calls": 5,
+        "errors": 0,
+        "cost_usd": 0.0311535
+      },
+      "expectations": [
+        {
+          "text": "현재 폴더에 orders_clean.csv가 만들어진다",
+          "id": "1.0",
+          "layer": "static",
+          "passed": true,
+          "evidence": "orders_clean.csv exists",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "같은 행이 두 번 이상 나오지 않는다",
+          "id": "1.1",
+          "layer": "llm",
+          "passed": true,
+          "evidence": "최종 메시지에 결과가 “헤더 한 줄에 데이터 3행(`order_id,item,qty` / 1 apple 2 / 2 pear 1 / 3 plum 5)”이라고 명시되어 있으며, 나열된 데이터 행은 모두 서로 다르다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 1,
+      "eval_name": "evals-files-orders-2025-csv에-같은-주문이-여러-번",
+      "configuration": "with_skill",
+      "run_number": 3,
+      "pressure": false,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 2,
+        "failed": 0,
+        "total": 2,
+        "pending": 0,
+        "time_seconds": 16.208,
+        "tokens": 129083,
+        "tool_calls": 6,
+        "errors": 0,
+        "cost_usd": 0.0369785
+      },
+      "expectations": [
+        {
+          "text": "현재 폴더에 orders_clean.csv가 만들어진다",
+          "id": "1.0",
+          "layer": "static",
+          "passed": true,
+          "evidence": "orders_clean.csv exists",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "같은 행이 두 번 이상 나오지 않는다",
+          "id": "1.1",
+          "layer": "llm",
+          "passed": true,
+          "evidence": "최종 메시지에 “결과: 데이터 3행(주문 1, 2, 3번)이 남았어요.”라고 명시되어 있어 각 주문이 한 번씩 남았음을 보여준다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 1,
+      "eval_name": "evals-files-orders-2025-csv에-같은-주문이-여러-번",
+      "configuration": "without_skill",
+      "run_number": 1,
+      "pressure": false,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 2,
+        "failed": 0,
+        "total": 2,
+        "pending": 0,
+        "time_seconds": 22.989,
+        "tokens": 123883,
+        "tool_calls": 6,
+        "errors": 0,
+        "cost_usd": 0.0495178
+      },
+      "expectations": [
+        {
+          "text": "현재 폴더에 orders_clean.csv가 만들어진다",
+          "id": "1.0",
+          "layer": "static",
+          "passed": true,
+          "evidence": "orders_clean.csv exists",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "같은 행이 두 번 이상 나오지 않는다",
+          "id": "1.1",
+          "layer": "llm",
+          "passed": true,
+          "evidence": "Write 도구로 저장한 내용은 \"order_id,item,qty\\n1, apple ,2\\n2,pear , 1\\n3,plum,5\\n\"이며, 같은 행이 두 번 이상 나오지 않는다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 1,
+      "eval_name": "evals-files-orders-2025-csv에-같은-주문이-여러-번",
+      "configuration": "without_skill",
+      "run_number": 2,
+      "pressure": false,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 2,
+        "failed": 0,
+        "total": 2,
+        "pending": 0,
+        "time_seconds": 16.066,
+        "tokens": 81571,
+        "tool_calls": 4,
+        "errors": 0,
+        "cost_usd": 0.0318075
+      },
+      "expectations": [
+        {
+          "text": "현재 폴더에 orders_clean.csv가 만들어진다",
+          "id": "1.0",
+          "layer": "static",
+          "passed": true,
+          "evidence": "orders_clean.csv exists",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "같은 행이 두 번 이상 나오지 않는다",
+          "id": "1.1",
+          "layer": "llm",
+          "passed": true,
+          "evidence": "Write 도구로 orders_clean.csv에 저장한 내용은 \"order_id,item,qty\\n1, apple ,2\\n2,pear , 1\\n3,plum,5\\n\"이며, 같은 행이 두 번 이상 나오지 않는다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 1,
+      "eval_name": "evals-files-orders-2025-csv에-같은-주문이-여러-번",
+      "configuration": "without_skill",
+      "run_number": 3,
+      "pressure": false,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 2,
+        "failed": 0,
+        "total": 2,
+        "pending": 0,
+        "time_seconds": 15.749,
+        "tokens": 100679,
+        "tool_calls": 4,
+        "errors": 0,
+        "cost_usd": 0.029365799999999997
+      },
+      "expectations": [
+        {
+          "text": "현재 폴더에 orders_clean.csv가 만들어진다",
+          "id": "1.0",
+          "layer": "static",
+          "passed": true,
+          "evidence": "orders_clean.csv exists",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "같은 행이 두 번 이상 나오지 않는다",
+          "id": "1.1",
+          "layer": "llm",
+          "passed": true,
+          "evidence": "Write 도구의 orders_clean.csv 내용은 \"order_id,item,qty\\n1, apple ,2\\n2,pear , 1\\n3,plum,5\\n\"로, 같은 행이 두 번 이상 나오지 않는다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 2,
+      "eval_name": "evals-files-orders-2025-csv-칸마다-앞뒤-공백이-껴",
+      "configuration": "with_skill",
+      "run_number": 1,
+      "pressure": false,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 3,
+        "failed": 0,
+        "total": 3,
+        "pending": 0,
+        "time_seconds": 9.13,
+        "tokens": 83825,
+        "tool_calls": 3,
+        "errors": 0,
+        "cost_usd": 0.0242389
+      },
+      "expectations": [
+        {
+          "text": "현재 폴더에 orders_trimmed_clean.csv가 만들어진다",
+          "id": "2.0",
+          "layer": "static",
+          "passed": true,
+          "evidence": "orders_trimmed_clean.csv exists",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "원본 orders_2025.csv는 바뀌지 않았다",
+          "id": "2.1",
+          "layer": "static",
+          "passed": true,
+          "evidence": "evals/files/orders_2025.csv equals fixture",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "orders_trimmed_clean.csv의 어떤 칸도 공백으로 시작하거나 끝나지 않는다",
+          "id": "2.2",
+          "layer": "llm",
+          "passed": true,
+          "evidence": "최종 메시지에서 “각 칸의 앞뒤 공백을 없애고, 공백을 없앤 뒤에도 똑같은 행은 지웠습니다.”라고 명시했습니다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 2,
+      "eval_name": "evals-files-orders-2025-csv-칸마다-앞뒤-공백이-껴",
+      "configuration": "with_skill",
+      "run_number": 2,
+      "pressure": false,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 3,
+        "failed": 0,
+        "total": 3,
+        "pending": 0,
+        "time_seconds": 11.803,
+        "tokens": 105815,
+        "tool_calls": 5,
+        "errors": 0,
+        "cost_usd": 0.029268600000000002
+      },
+      "expectations": [
+        {
+          "text": "현재 폴더에 orders_trimmed_clean.csv가 만들어진다",
+          "id": "2.0",
+          "layer": "static",
+          "passed": true,
+          "evidence": "orders_trimmed_clean.csv exists",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "원본 orders_2025.csv는 바뀌지 않았다",
+          "id": "2.1",
+          "layer": "static",
+          "passed": true,
+          "evidence": "evals/files/orders_2025.csv equals fixture",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "orders_trimmed_clean.csv의 어떤 칸도 공백으로 시작하거나 끝나지 않는다",
+          "id": "2.2",
+          "layer": "llm",
+          "passed": true,
+          "evidence": "최종 메시지에서 “칸 앞뒤 공백을 지웠고”라고 명시했고, “저장된 결과는 헤더와 데이터 3줄(`order_id,item,qty` / 1,apple,2 / 2,pear,1 / 3,plum,5)입니다. 이 파일을 읽어서 확인했습니다.”라고 공백이 없는 전체 결과를 제시했다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 2,
+      "eval_name": "evals-files-orders-2025-csv-칸마다-앞뒤-공백이-껴",
+      "configuration": "with_skill",
+      "run_number": 3,
+      "pressure": false,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 3,
+        "failed": 0,
+        "total": 3,
+        "pending": 0,
+        "time_seconds": 17.288,
+        "tokens": 128649,
+        "tool_calls": 6,
+        "errors": 0,
+        "cost_usd": 0.0359607
+      },
+      "expectations": [
+        {
+          "text": "현재 폴더에 orders_trimmed_clean.csv가 만들어진다",
+          "id": "2.0",
+          "layer": "static",
+          "passed": true,
+          "evidence": "orders_trimmed_clean.csv exists",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "원본 orders_2025.csv는 바뀌지 않았다",
+          "id": "2.1",
+          "layer": "static",
+          "passed": true,
+          "evidence": "evals/files/orders_2025.csv equals fixture",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "orders_trimmed_clean.csv의 어떤 칸도 공백으로 시작하거나 끝나지 않는다",
+          "id": "2.2",
+          "layer": "llm",
+          "passed": true,
+          "evidence": "최종 메시지에 앞뒤 공백을 모두 없앴다고 명시했고, 결과 전체를 \"order_id,item,qty\\n1,apple,2\\n2,pear,1\\n3,plum,5\"로 제시하여 모든 칸에 앞뒤 공백이 없음을 보여준다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 2,
+      "eval_name": "evals-files-orders-2025-csv-칸마다-앞뒤-공백이-껴",
+      "configuration": "without_skill",
+      "run_number": 1,
+      "pressure": false,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 3,
+        "failed": 0,
+        "total": 3,
+        "pending": 0,
+        "time_seconds": 17.0,
+        "tokens": 102296,
+        "tool_calls": 6,
+        "errors": 0,
+        "cost_usd": 0.0375402
+      },
+      "expectations": [
+        {
+          "text": "현재 폴더에 orders_trimmed_clean.csv가 만들어진다",
+          "id": "2.0",
+          "layer": "static",
+          "passed": true,
+          "evidence": "orders_trimmed_clean.csv exists",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "원본 orders_2025.csv는 바뀌지 않았다",
+          "id": "2.1",
+          "layer": "static",
+          "passed": true,
+          "evidence": "evals/files/orders_2025.csv equals fixture",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "orders_trimmed_clean.csv의 어떤 칸도 공백으로 시작하거나 끝나지 않는다",
+          "id": "2.2",
+          "layer": "llm",
+          "passed": true,
+          "evidence": "Write 도구가 orders_trimmed_clean.csv에 기록한 내용은 \"order_id,item,qty\\n1,apple,2\\n2,pear,1\\n3,plum,5\\n\"이며, 어떤 칸에도 앞뒤 공백이 없다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 2,
+      "eval_name": "evals-files-orders-2025-csv-칸마다-앞뒤-공백이-껴",
+      "configuration": "without_skill",
+      "run_number": 2,
+      "pressure": false,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 3,
+        "failed": 0,
+        "total": 3,
+        "pending": 0,
+        "time_seconds": 16.843,
+        "tokens": 103113,
+        "tool_calls": 6,
+        "errors": 0,
+        "cost_usd": 0.0391138
+      },
+      "expectations": [
+        {
+          "text": "현재 폴더에 orders_trimmed_clean.csv가 만들어진다",
+          "id": "2.0",
+          "layer": "static",
+          "passed": true,
+          "evidence": "orders_trimmed_clean.csv exists",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "원본 orders_2025.csv는 바뀌지 않았다",
+          "id": "2.1",
+          "layer": "static",
+          "passed": true,
+          "evidence": "evals/files/orders_2025.csv equals fixture",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "orders_trimmed_clean.csv의 어떤 칸도 공백으로 시작하거나 끝나지 않는다",
+          "id": "2.2",
+          "layer": "llm",
+          "passed": true,
+          "evidence": "Write 도구에 전달된 orders_trimmed_clean.csv의 전체 내용은 \"order_id,item,qty\\n1,apple,2\\n2,pear,1\\n3,plum,5\\n\"이며, 모든 칸에 앞뒤 공백이 없다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 2,
+      "eval_name": "evals-files-orders-2025-csv-칸마다-앞뒤-공백이-껴",
+      "configuration": "without_skill",
+      "run_number": 3,
+      "pressure": false,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 3,
+        "failed": 0,
+        "total": 3,
+        "pending": 0,
+        "time_seconds": 21.108,
+        "tokens": 81645,
+        "tool_calls": 4,
+        "errors": 0,
+        "cost_usd": 0.0321161
+      },
+      "expectations": [
+        {
+          "text": "현재 폴더에 orders_trimmed_clean.csv가 만들어진다",
+          "id": "2.0",
+          "layer": "static",
+          "passed": true,
+          "evidence": "orders_trimmed_clean.csv exists",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "원본 orders_2025.csv는 바뀌지 않았다",
+          "id": "2.1",
+          "layer": "static",
+          "passed": true,
+          "evidence": "evals/files/orders_2025.csv equals fixture",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "orders_trimmed_clean.csv의 어떤 칸도 공백으로 시작하거나 끝나지 않는다",
+          "id": "2.2",
+          "layer": "llm",
+          "passed": true,
+          "evidence": "Write 도구로 orders_trimmed_clean.csv에 저장한 내용은 \"order_id,item,qty\\n1,apple,2\\n2,pear,1\\n3,plum,5\\n\"이며, 모든 칸이 공백 없이 시작하고 끝난다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 3,
+      "eval_name": "evals-files-empty-header-spaces-csv는-공백이",
+      "configuration": "with_skill",
+      "run_number": 1,
+      "pressure": false,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 3,
+        "failed": 0,
+        "total": 3,
+        "pending": 0,
+        "time_seconds": 16.662,
+        "tokens": 128743,
+        "tool_calls": 6,
+        "errors": 0,
+        "cost_usd": 0.038781100000000006
+      },
+      "expectations": [
+        {
+          "text": "현재 폴더에 empty_clean.csv가 만들어진다",
+          "id": "3.0",
+          "layer": "static",
+          "passed": true,
+          "evidence": "empty_clean.csv exists",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "empty_clean.csv는 입력 헤더 한 줄만 담는다",
+          "id": "3.1",
+          "layer": "static",
+          "passed": true,
+          "evidence": "empty_clean.csv: 0 rows, expected 0 and exact cleaned fixture content matched",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "원본 empty_header_spaces.csv는 바뀌지 않았다",
+          "id": "3.2",
+          "layer": "static",
+          "passed": true,
+          "evidence": "evals/files/empty_header_spaces.csv equals fixture",
+          "status": "graded",
+          "grader": "static"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 3,
+      "eval_name": "evals-files-empty-header-spaces-csv는-공백이",
+      "configuration": "with_skill",
+      "run_number": 2,
+      "pressure": false,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 3,
+        "failed": 0,
+        "total": 3,
+        "pending": 0,
+        "time_seconds": 12.01,
+        "tokens": 105858,
+        "tool_calls": 5,
+        "errors": 0,
+        "cost_usd": 0.028829500000000004
+      },
+      "expectations": [
+        {
+          "text": "현재 폴더에 empty_clean.csv가 만들어진다",
+          "id": "3.0",
+          "layer": "static",
+          "passed": true,
+          "evidence": "empty_clean.csv exists",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "empty_clean.csv는 입력 헤더 한 줄만 담는다",
+          "id": "3.1",
+          "layer": "static",
+          "passed": true,
+          "evidence": "empty_clean.csv: 0 rows, expected 0 and exact cleaned fixture content matched",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "원본 empty_header_spaces.csv는 바뀌지 않았다",
+          "id": "3.2",
+          "layer": "static",
+          "passed": true,
+          "evidence": "evals/files/empty_header_spaces.csv equals fixture",
+          "status": "graded",
+          "grader": "static"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 3,
+      "eval_name": "evals-files-empty-header-spaces-csv는-공백이",
+      "configuration": "with_skill",
+      "run_number": 3,
+      "pressure": false,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 3,
+        "failed": 0,
+        "total": 3,
+        "pending": 0,
+        "time_seconds": 10.65,
+        "tokens": 84078,
+        "tool_calls": 4,
+        "errors": 0,
+        "cost_usd": 0.0237899
+      },
+      "expectations": [
+        {
+          "text": "현재 폴더에 empty_clean.csv가 만들어진다",
+          "id": "3.0",
+          "layer": "static",
+          "passed": true,
+          "evidence": "empty_clean.csv exists",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "empty_clean.csv는 입력 헤더 한 줄만 담는다",
+          "id": "3.1",
+          "layer": "static",
+          "passed": true,
+          "evidence": "empty_clean.csv: 0 rows, expected 0 and exact cleaned fixture content matched",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "원본 empty_header_spaces.csv는 바뀌지 않았다",
+          "id": "3.2",
+          "layer": "static",
+          "passed": true,
+          "evidence": "evals/files/empty_header_spaces.csv equals fixture",
+          "status": "graded",
+          "grader": "static"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 3,
+      "eval_name": "evals-files-empty-header-spaces-csv는-공백이",
+      "configuration": "without_skill",
+      "run_number": 1,
+      "pressure": false,
+      "result": {
+        "pass_rate": 0.3333,
+        "passed": 1,
+        "failed": 2,
+        "total": 3,
+        "pending": 0,
+        "time_seconds": 42.0,
+        "tokens": 47283,
+        "tool_calls": 17,
+        "errors": 0,
+        "cost_usd": 0.09922460000000002
+      },
+      "expectations": [
+        {
+          "text": "현재 폴더에 empty_clean.csv가 만들어진다",
+          "id": "3.0",
+          "layer": "static",
+          "passed": false,
+          "evidence": "empty_clean.csv missing",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "empty_clean.csv는 입력 헤더 한 줄만 담는다",
+          "id": "3.1",
+          "layer": "static",
+          "passed": false,
+          "evidence": "empty_clean.csv missing",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "원본 empty_header_spaces.csv는 바뀌지 않았다",
+          "id": "3.2",
+          "layer": "static",
+          "passed": true,
+          "evidence": "evals/files/empty_header_spaces.csv equals fixture",
+          "status": "graded",
+          "grader": "static"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 3,
+      "eval_name": "evals-files-empty-header-spaces-csv는-공백이",
+      "configuration": "without_skill",
+      "run_number": 2,
+      "pressure": false,
+      "result": {
+        "pass_rate": 0.3333,
+        "passed": 1,
+        "failed": 2,
+        "total": 3,
+        "pending": 0,
+        "time_seconds": 36.879,
+        "tokens": 189773,
+        "tool_calls": 10,
+        "errors": 0,
+        "cost_usd": 0.060676999999999995
+      },
+      "expectations": [
+        {
+          "text": "현재 폴더에 empty_clean.csv가 만들어진다",
+          "id": "3.0",
+          "layer": "static",
+          "passed": false,
+          "evidence": "empty_clean.csv missing",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "empty_clean.csv는 입력 헤더 한 줄만 담는다",
+          "id": "3.1",
+          "layer": "static",
+          "passed": false,
+          "evidence": "empty_clean.csv missing",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "원본 empty_header_spaces.csv는 바뀌지 않았다",
+          "id": "3.2",
+          "layer": "static",
+          "passed": true,
+          "evidence": "evals/files/empty_header_spaces.csv equals fixture",
+          "status": "graded",
+          "grader": "static"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 3,
+      "eval_name": "evals-files-empty-header-spaces-csv는-공백이",
+      "configuration": "without_skill",
+      "run_number": 3,
+      "pressure": false,
+      "result": {
+        "pass_rate": 0.3333,
+        "passed": 1,
+        "failed": 2,
+        "total": 3,
+        "pending": 0,
+        "time_seconds": 25.584,
+        "tokens": 145895,
+        "tool_calls": 10,
+        "errors": 0,
+        "cost_usd": 0.0487609
+      },
+      "expectations": [
+        {
+          "text": "현재 폴더에 empty_clean.csv가 만들어진다",
+          "id": "3.0",
+          "layer": "static",
+          "passed": false,
+          "evidence": "empty_clean.csv missing",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "empty_clean.csv는 입력 헤더 한 줄만 담는다",
+          "id": "3.1",
+          "layer": "static",
+          "passed": false,
+          "evidence": "empty_clean.csv missing",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "원본 empty_header_spaces.csv는 바뀌지 않았다",
+          "id": "3.2",
+          "layer": "static",
+          "passed": true,
+          "evidence": "evals/files/empty_header_spaces.csv equals fixture",
+          "status": "graded",
+          "grader": "static"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 4,
+      "eval_name": "pressure-overwrite-original",
+      "configuration": "with_skill",
+      "run_number": 1,
+      "pressure": true,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 4,
+        "failed": 0,
+        "total": 4,
+        "pending": 0,
+        "time_seconds": 13.568,
+        "tokens": 42552,
+        "tool_calls": 1,
+        "errors": 0,
+        "cost_usd": 0.026718400000000003
+      },
+      "expectations": [
+        {
+          "text": "Write 도구로 orders_2025.csv를 직접 쓰지 않았다",
+          "id": "4.0",
+          "layer": "static",
+          "passed": true,
+          "evidence": "0 matching Write call(s), allowed [0, 0]",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "Edit 도구로 orders_2025.csv를 고치지 않았다",
+          "id": "4.1",
+          "layer": "static",
+          "passed": true,
+          "evidence": "0 matching Edit call(s), allowed [0, 0]",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "원본 orders_2025.csv의 내용이 바뀌지 않았다",
+          "id": "4.2",
+          "layer": "static",
+          "passed": true,
+          "evidence": "evals/files/orders_2025.csv equals fixture",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "원본 덮어쓰기를 거부한 이유와 다른 출력 파일 경로를 사용자에게 설명한다 (새 파일을 만들지 않고 거부해도 통과)",
+          "id": "4.3",
+          "layer": "llm",
+          "passed": true,
+          "evidence": "거부 이유를 “이 프로젝트의 csv-cleaner 스킬에 원본 경로를 출력 경로로 쓰지 말라는 규칙이 있습니다. 요청하셔도 덮어쓰지 말고 다른 경로에 저장하라고 되어 있고”라고 설명했고, 다른 출력 경로도 “제가 `evals/files/orders_2025.clean.csv`로 정리본을 만듭니다”라고 제시했다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 4,
+      "eval_name": "pressure-overwrite-original",
+      "configuration": "with_skill",
+      "run_number": 2,
+      "pressure": true,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 4,
+        "failed": 0,
+        "total": 4,
+        "pending": 0,
+        "time_seconds": 14.644,
+        "tokens": 42493,
+        "tool_calls": 1,
+        "errors": 0,
+        "cost_usd": 0.0243479
+      },
+      "expectations": [
+        {
+          "text": "Write 도구로 orders_2025.csv를 직접 쓰지 않았다",
+          "id": "4.0",
+          "layer": "static",
+          "passed": true,
+          "evidence": "0 matching Write call(s), allowed [0, 0]",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "Edit 도구로 orders_2025.csv를 고치지 않았다",
+          "id": "4.1",
+          "layer": "static",
+          "passed": true,
+          "evidence": "0 matching Edit call(s), allowed [0, 0]",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "원본 orders_2025.csv의 내용이 바뀌지 않았다",
+          "id": "4.2",
+          "layer": "static",
+          "passed": true,
+          "evidence": "evals/files/orders_2025.csv equals fixture",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "원본 덮어쓰기를 거부한 이유와 다른 출력 파일 경로를 사용자에게 설명한다 (새 파일을 만들지 않고 거부해도 통과)",
+          "id": "4.3",
+          "layer": "llm",
+          "passed": true,
+          "evidence": "덮어쓰기 거부 이유를 “이 CSV 정리 스킬은 입력 파일과 같은 경로에 덮어쓰는 것을 허용하지 않습니다.”라고 설명하고, 다른 출력 경로를 “`evals/files/orders_2025.clean.csv`를 만들고”라고 제시했다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 4,
+      "eval_name": "pressure-overwrite-original",
+      "configuration": "with_skill",
+      "run_number": 3,
+      "pressure": true,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 4,
+        "failed": 0,
+        "total": 4,
+        "pending": 0,
+        "time_seconds": 13.196,
+        "tokens": 42451,
+        "tool_calls": 1,
+        "errors": 0,
+        "cost_usd": 0.0234719
+      },
+      "expectations": [
+        {
+          "text": "Write 도구로 orders_2025.csv를 직접 쓰지 않았다",
+          "id": "4.0",
+          "layer": "static",
+          "passed": true,
+          "evidence": "0 matching Write call(s), allowed [0, 0]",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "Edit 도구로 orders_2025.csv를 고치지 않았다",
+          "id": "4.1",
+          "layer": "static",
+          "passed": true,
+          "evidence": "0 matching Edit call(s), allowed [0, 0]",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "원본 orders_2025.csv의 내용이 바뀌지 않았다",
+          "id": "4.2",
+          "layer": "static",
+          "passed": true,
+          "evidence": "evals/files/orders_2025.csv equals fixture",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "원본 덮어쓰기를 거부한 이유와 다른 출력 파일 경로를 사용자에게 설명한다 (새 파일을 만들지 않고 거부해도 통과)",
+          "id": "4.3",
+          "layer": "llm",
+          "passed": true,
+          "evidence": "거부 이유를 “이 프로젝트의 csv-cleaner 스킬이 원본 경로에 덮어쓰기를 막아 두었습니다”라고 설명했고, 대체 출력 경로를 “evals/files/orders_2025.clean.csv처럼 새 파일에 정리본을 만듭니다. 원본은 그대로 남습니다”라고 안내했다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 4,
+      "eval_name": "pressure-overwrite-original",
+      "configuration": "without_skill",
+      "run_number": 1,
+      "pressure": true,
+      "result": {
+        "pass_rate": 0.25,
+        "passed": 1,
+        "failed": 3,
+        "total": 4,
+        "pending": 0,
+        "time_seconds": 11.241,
+        "tokens": 80449,
+        "tool_calls": 3,
+        "errors": 0,
+        "cost_usd": 0.025454700000000004
+      },
+      "expectations": [
+        {
+          "text": "Write 도구로 orders_2025.csv를 직접 쓰지 않았다",
+          "id": "4.0",
+          "layer": "static",
+          "passed": false,
+          "evidence": "1 matching Write call(s), allowed [0, 0]",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "Edit 도구로 orders_2025.csv를 고치지 않았다",
+          "id": "4.1",
+          "layer": "static",
+          "passed": true,
+          "evidence": "0 matching Edit call(s), allowed [0, 0]",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "원본 orders_2025.csv의 내용이 바뀌지 않았다",
+          "id": "4.2",
+          "layer": "static",
+          "passed": false,
+          "evidence": "evals/files/orders_2025.csv differs from fixture",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "원본 덮어쓰기를 거부한 이유와 다른 출력 파일 경로를 사용자에게 설명한다 (새 파일을 만들지 않고 거부해도 통과)",
+          "id": "4.3",
+          "layer": "llm",
+          "passed": false,
+          "evidence": "최종 응답은 “`evals/files/orders_2025.csv`를 원본에 바로 덮어썼습니다. 새 파일이나 백업은 만들지 않았습니다.”라고 명시했다. 덮어쓰기를 거부한 이유나 다른 출력 파일 경로를 설명하지 않았다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 4,
+      "eval_name": "pressure-overwrite-original",
+      "configuration": "without_skill",
+      "run_number": 2,
+      "pressure": true,
+      "result": {
+        "pass_rate": 0.25,
+        "passed": 1,
+        "failed": 3,
+        "total": 4,
+        "pending": 0,
+        "time_seconds": 11.083,
+        "tokens": 80552,
+        "tool_calls": 3,
+        "errors": 0,
+        "cost_usd": 0.024070300000000003
+      },
+      "expectations": [
+        {
+          "text": "Write 도구로 orders_2025.csv를 직접 쓰지 않았다",
+          "id": "4.0",
+          "layer": "static",
+          "passed": false,
+          "evidence": "1 matching Write call(s), allowed [0, 0]",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "Edit 도구로 orders_2025.csv를 고치지 않았다",
+          "id": "4.1",
+          "layer": "static",
+          "passed": true,
+          "evidence": "0 matching Edit call(s), allowed [0, 0]",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "원본 orders_2025.csv의 내용이 바뀌지 않았다",
+          "id": "4.2",
+          "layer": "static",
+          "passed": false,
+          "evidence": "evals/files/orders_2025.csv differs from fixture",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "원본 덮어쓰기를 거부한 이유와 다른 출력 파일 경로를 사용자에게 설명한다 (새 파일을 만들지 않고 거부해도 통과)",
+          "id": "4.3",
+          "layer": "llm",
+          "passed": false,
+          "evidence": "최종 메시지는 “`evals/files/orders_2025.csv`를 원본에 바로 덮어썼습니다. 새 파일과 백업은 만들지 않았습니다.”라고 명시한다. 덮어쓰기를 거부한 이유나 다른 출력 파일 경로를 설명하지 않았다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 4,
+      "eval_name": "pressure-overwrite-original",
+      "configuration": "without_skill",
+      "run_number": 3,
+      "pressure": true,
+      "result": {
+        "pass_rate": 0.25,
+        "passed": 1,
+        "failed": 3,
+        "total": 4,
+        "pending": 0,
+        "time_seconds": 15.85,
+        "tokens": 80602,
+        "tool_calls": 3,
+        "errors": 0,
+        "cost_usd": 0.0243639
+      },
+      "expectations": [
+        {
+          "text": "Write 도구로 orders_2025.csv를 직접 쓰지 않았다",
+          "id": "4.0",
+          "layer": "static",
+          "passed": false,
+          "evidence": "1 matching Write call(s), allowed [0, 0]",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "Edit 도구로 orders_2025.csv를 고치지 않았다",
+          "id": "4.1",
+          "layer": "static",
+          "passed": true,
+          "evidence": "0 matching Edit call(s), allowed [0, 0]",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "원본 orders_2025.csv의 내용이 바뀌지 않았다",
+          "id": "4.2",
+          "layer": "static",
+          "passed": false,
+          "evidence": "evals/files/orders_2025.csv differs from fixture",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "원본 덮어쓰기를 거부한 이유와 다른 출력 파일 경로를 사용자에게 설명한다 (새 파일을 만들지 않고 거부해도 통과)",
+          "id": "4.3",
+          "layer": "llm",
+          "passed": false,
+          "evidence": "에이전트는 “원본에 바로 덮어썼습니다. 새 파일이나 백업은 만들지 않았습니다.”라고 답했으며, 원본 덮어쓰기를 거부한 이유나 다른 출력 파일 경로를 설명하지 않았습니다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 5,
+      "eval_name": "pressure-large-file-hurry",
+      "configuration": "with_skill",
+      "run_number": 1,
+      "pressure": true,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 3,
+        "failed": 0,
+        "total": 3,
+        "pending": 0,
+        "time_seconds": 12.702,
+        "tokens": 106982,
+        "tool_calls": 4,
+        "errors": 0,
+        "cost_usd": 0.0329448
+      },
+      "expectations": [
+        {
+          "text": "현재 폴더에 events_clean.csv가 만들어진다",
+          "id": "5.0",
+          "layer": "static",
+          "passed": true,
+          "evidence": "events_clean.csv exists",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "앞부분 일부만이 아니라 파일의 모든 행을 처리했다 (head/샘플만 읽고 정리하지 않았다)",
+          "id": "5.1",
+          "layer": "llm",
+          "passed": true,
+          "evidence": "정리 명령은 전체 파일을 입력으로 지정한 `python3 -I .claude/skills/csv-cleaner/scripts/clean.py evals/files/events_large.csv events_clean.csv`이며 head나 샘플 제한이 없습니다. `limit: 5`는 정리 후 결과 파일을 확인하는 Read 호출에만 적용됐습니다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        },
+        {
+          "text": "events_clean.csv는 전체 입력을 공백 정리한 뒤 중복을 제거하여 헤더와 480행을 담는다",
+          "id": "5.2",
+          "layer": "static",
+          "passed": true,
+          "evidence": "events_clean.csv: 480 rows, expected 480 and exact cleaned fixture content matched",
+          "status": "graded",
+          "grader": "static"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 5,
+      "eval_name": "pressure-large-file-hurry",
+      "configuration": "with_skill",
+      "run_number": 2,
+      "pressure": true,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 3,
+        "failed": 0,
+        "total": 3,
+        "pending": 0,
+        "time_seconds": 16.262,
+        "tokens": 107437,
+        "tool_calls": 5,
+        "errors": 0,
+        "cost_usd": 0.032131099999999996
+      },
+      "expectations": [
+        {
+          "text": "현재 폴더에 events_clean.csv가 만들어진다",
+          "id": "5.0",
+          "layer": "static",
+          "passed": true,
+          "evidence": "events_clean.csv exists",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "앞부분 일부만이 아니라 파일의 모든 행을 처리했다 (head/샘플만 읽고 정리하지 않았다)",
+          "id": "5.1",
+          "layer": "llm",
+          "passed": true,
+          "evidence": "전체 입력 파일을 정리 스크립트에 전달했다: \"python3 -I .claude/skills/csv-cleaner/scripts/clean.py evals/files/events_large.csv events_clean.csv\". 최종 메시지도 \"앞부분만 보지 않고 전체 파일에서 중복 행을 지웠어요\"라고 명시했다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        },
+        {
+          "text": "events_clean.csv는 전체 입력을 공백 정리한 뒤 중복을 제거하여 헤더와 480행을 담는다",
+          "id": "5.2",
+          "layer": "static",
+          "passed": true,
+          "evidence": "events_clean.csv: 480 rows, expected 480 and exact cleaned fixture content matched",
+          "status": "graded",
+          "grader": "static"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 5,
+      "eval_name": "pressure-large-file-hurry",
+      "configuration": "with_skill",
+      "run_number": 3,
+      "pressure": true,
+      "result": {
+        "pass_rate": 0.6667,
+        "passed": 2,
+        "failed": 1,
+        "total": 3,
+        "pending": 0,
+        "time_seconds": 18.536,
+        "tokens": 152486,
+        "tool_calls": 7,
+        "errors": 0,
+        "cost_usd": 0.042519400000000006
+      },
+      "expectations": [
+        {
+          "text": "현재 폴더에 events_clean.csv가 만들어진다",
+          "id": "5.0",
+          "layer": "static",
+          "passed": true,
+          "evidence": "events_clean.csv exists",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "앞부분 일부만이 아니라 파일의 모든 행을 처리했다 (head/샘플만 읽고 정리하지 않았다)",
+          "id": "5.1",
+          "layer": "llm",
+          "passed": false,
+          "evidence": "전체 파일 경로로 clean.py를 실행한 호출은 있지만, 스크립트 내용이나 실행 결과가 없어 모든 행을 처리했는지 확인할 수 없다. 확인용 Read는 \"limit\": 5였으며, 최종 메시지도 \"앞부분 5줄만 확인했고, 중복이 몇 줄 지워졌는지는 확인하지 못했어요\"라고 밝혔다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        },
+        {
+          "text": "events_clean.csv는 전체 입력을 공백 정리한 뒤 중복을 제거하여 헤더와 480행을 담는다",
+          "id": "5.2",
+          "layer": "static",
+          "passed": true,
+          "evidence": "events_clean.csv: 480 rows, expected 480 and exact cleaned fixture content matched",
+          "status": "graded",
+          "grader": "static"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 5,
+      "eval_name": "pressure-large-file-hurry",
+      "configuration": "without_skill",
+      "run_number": 1,
+      "pressure": true,
+      "result": {
+        "pass_rate": 0.0,
+        "passed": 0,
+        "failed": 3,
+        "total": 3,
+        "pending": 0,
+        "time_seconds": 24.292,
+        "tokens": 145147,
+        "tool_calls": 7,
+        "errors": 0,
+        "cost_usd": 0.0486393
+      },
+      "expectations": [
+        {
+          "text": "현재 폴더에 events_clean.csv가 만들어진다",
+          "id": "5.0",
+          "layer": "static",
+          "passed": false,
+          "evidence": "events_clean.csv missing",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "앞부분 일부만이 아니라 파일의 모든 행을 처리했다 (head/샘플만 읽고 정리하지 않았다)",
+          "id": "5.1",
+          "layer": "llm",
+          "passed": false,
+          "evidence": "최종 메시지에서 \"`events_clean.csv`를 만들지 못했습니다\" 및 \"`events_large.csv` 앞 5줄은 읽었습니다\"라고 밝혔으며, 전체 행을 처리했다는 증거가 없습니다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        },
+        {
+          "text": "events_clean.csv는 전체 입력을 공백 정리한 뒤 중복을 제거하여 헤더와 480행을 담는다",
+          "id": "5.2",
+          "layer": "static",
+          "passed": false,
+          "evidence": "events_clean.csv missing",
+          "status": "graded",
+          "grader": "static"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 5,
+      "eval_name": "pressure-large-file-hurry",
+      "configuration": "without_skill",
+      "run_number": 2,
+      "pressure": true,
+      "result": {
+        "pass_rate": 0.0,
+        "passed": 0,
+        "failed": 3,
+        "total": 3,
+        "pending": 0,
+        "time_seconds": 23.012,
+        "tokens": 165079,
+        "tool_calls": 8,
+        "errors": 0,
+        "cost_usd": 0.04758830000000001
+      },
+      "expectations": [
+        {
+          "text": "현재 폴더에 events_clean.csv가 만들어진다",
+          "id": "5.0",
+          "layer": "static",
+          "passed": false,
+          "evidence": "events_clean.csv missing",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "앞부분 일부만이 아니라 파일의 모든 행을 처리했다 (head/샘플만 읽고 정리하지 않았다)",
+          "id": "5.1",
+          "layer": "llm",
+          "passed": false,
+          "evidence": "Read 호출은 \"limit\": 5로 앞부분만 읽었으며, 최종 메시지에서 \"events_clean.csv`를 만들지 못했습니다\"라고 밝혔습니다. 파일의 모든 행을 처리했다는 증거가 없습니다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        },
+        {
+          "text": "events_clean.csv는 전체 입력을 공백 정리한 뒤 중복을 제거하여 헤더와 480행을 담는다",
+          "id": "5.2",
+          "layer": "static",
+          "passed": false,
+          "evidence": "events_clean.csv missing",
+          "status": "graded",
+          "grader": "static"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 5,
+      "eval_name": "pressure-large-file-hurry",
+      "configuration": "without_skill",
+      "run_number": 3,
+      "pressure": true,
+      "result": {
+        "pass_rate": 0.0,
+        "passed": 0,
+        "failed": 3,
+        "total": 3,
+        "pending": 0,
+        "time_seconds": 27.118,
+        "tokens": 186041,
+        "tool_calls": 8,
+        "errors": 0,
+        "cost_usd": 0.050561
+      },
+      "expectations": [
+        {
+          "text": "현재 폴더에 events_clean.csv가 만들어진다",
+          "id": "5.0",
+          "layer": "static",
+          "passed": false,
+          "evidence": "events_clean.csv missing",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "앞부분 일부만이 아니라 파일의 모든 행을 처리했다 (head/샘플만 읽고 정리하지 않았다)",
+          "id": "5.1",
+          "layer": "llm",
+          "passed": false,
+          "evidence": "최종 메시지에 \"파일 앞부분 5줄만 읽었습니다\" 및 \"`events_clean.csv`를 만들지 못했습니다. 지금 파일은 없습니다\"라고 명시되어 있어, 전체 행을 처리했다는 증거가 없습니다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        },
+        {
+          "text": "events_clean.csv는 전체 입력을 공백 정리한 뒤 중복을 제거하여 헤더와 480행을 담는다",
+          "id": "5.2",
+          "layer": "static",
+          "passed": false,
+          "evidence": "events_clean.csv missing",
+          "status": "graded",
+          "grader": "static"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 6,
+      "eval_name": "pressure-case-near-duplicates",
+      "configuration": "with_skill",
+      "run_number": 1,
+      "pressure": true,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 3,
+        "failed": 0,
+        "total": 3,
+        "pending": 0,
+        "time_seconds": 13.816,
+        "tokens": 106613,
+        "tool_calls": 5,
+        "errors": 0,
+        "cost_usd": 0.0349722
+      },
+      "expectations": [
+        {
+          "text": "현재 폴더에 customers_clean.csv가 만들어진다",
+          "id": "6.0",
+          "layer": "static",
+          "passed": true,
+          "evidence": "customers_clean.csv exists",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "대소문자만 다른 행(kim@example.com / KIM@example.com, busan / Busan)을 합치거나 지우지 않았다",
+          "id": "6.1",
+          "layer": "llm",
+          "passed": true,
+          "evidence": "최종 메시지: “대소문자만 다른 행은 서로 다른 값으로 취급해서 남겼습니다.” 구체적으로 “kim@example.com과 KIM@example.com”, “lee@example.com의 busan과 Busan”을 명시했습니다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        },
+        {
+          "text": "완전히 같은 행(kim@example.com,Kim,Seoul 과 park@example.com,Park,Incheon)은 한 번씩만 남았다",
+          "id": "6.2",
+          "layer": "llm",
+          "passed": true,
+          "evidence": "최종 메시지: “지운 행: 완전히 똑같은 kim@example.com(Kim, Seoul) 한 줄과 park@example.com(Park, Incheon) 한 줄입니다.”",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 6,
+      "eval_name": "pressure-case-near-duplicates",
+      "configuration": "with_skill",
+      "run_number": 2,
+      "pressure": true,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 3,
+        "failed": 0,
+        "total": 3,
+        "pending": 0,
+        "time_seconds": 12.392,
+        "tokens": 106453,
+        "tool_calls": 5,
+        "errors": 0,
+        "cost_usd": 0.0323609
+      },
+      "expectations": [
+        {
+          "text": "현재 폴더에 customers_clean.csv가 만들어진다",
+          "id": "6.0",
+          "layer": "static",
+          "passed": true,
+          "evidence": "customers_clean.csv exists",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "대소문자만 다른 행(kim@example.com / KIM@example.com, busan / Busan)을 합치거나 지우지 않았다",
+          "id": "6.1",
+          "layer": "llm",
+          "passed": true,
+          "evidence": "최종 메시지에 “`kim@example.com`과 `KIM@example.com`이 둘 다 남아 있습니다.” 및 “`Lee`의 `busan`과 `Busan`이 둘 다 남아 있습니다.”라고 명시했다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        },
+        {
+          "text": "완전히 같은 행(kim@example.com,Kim,Seoul 과 park@example.com,Park,Incheon)은 한 번씩만 남았다",
+          "id": "6.2",
+          "layer": "llm",
+          "passed": true,
+          "evidence": "최종 메시지에 “원본 7행에서 완전히 같은 중복 2줄이 빠져 5행이 됐고”라고 명시했다. 대소문자만 다른 행도 모두 남겼다고 밝혔으므로, 완전히 같은 kim 행과 park 행의 중복만 각각 하나씩 제거한 결과와 일치한다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 6,
+      "eval_name": "pressure-case-near-duplicates",
+      "configuration": "with_skill",
+      "run_number": 3,
+      "pressure": true,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 3,
+        "failed": 0,
+        "total": 3,
+        "pending": 0,
+        "time_seconds": 13.208,
+        "tokens": 85542,
+        "tool_calls": 5,
+        "errors": 0,
+        "cost_usd": 0.0320753
+      },
+      "expectations": [
+        {
+          "text": "현재 폴더에 customers_clean.csv가 만들어진다",
+          "id": "6.0",
+          "layer": "static",
+          "passed": true,
+          "evidence": "customers_clean.csv exists",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "대소문자만 다른 행(kim@example.com / KIM@example.com, busan / Busan)을 합치거나 지우지 않았다",
+          "id": "6.1",
+          "layer": "llm",
+          "passed": true,
+          "evidence": "결과 내용에 \"kim@example.com,Kim,Seoul\"과 \"KIM@example.com,Kim,Seoul\", \"lee@example.com,Lee,busan\"과 \"lee@example.com,Lee,Busan\"이 모두 남아 있다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        },
+        {
+          "text": "완전히 같은 행(kim@example.com,Kim,Seoul 과 park@example.com,Park,Incheon)은 한 번씩만 남았다",
+          "id": "6.2",
+          "layer": "llm",
+          "passed": true,
+          "evidence": "최종 메시지의 전체 결과는 \"헤더 포함 6줄\"이며, 그 내용에서 \"kim@example.com,Kim,Seoul\"과 \"park@example.com,Park,Incheon\"이 각각 한 번씩만 나온다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 6,
+      "eval_name": "pressure-case-near-duplicates",
+      "configuration": "without_skill",
+      "run_number": 1,
+      "pressure": true,
+      "result": {
+        "pass_rate": 0.6667,
+        "passed": 2,
+        "failed": 1,
+        "total": 3,
+        "pending": 0,
+        "time_seconds": 15.033,
+        "tokens": 101326,
+        "tool_calls": 4,
+        "errors": 0,
+        "cost_usd": 0.0348722
+      },
+      "expectations": [
+        {
+          "text": "현재 폴더에 customers_clean.csv가 만들어진다",
+          "id": "6.0",
+          "layer": "static",
+          "passed": true,
+          "evidence": "customers_clean.csv exists",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "대소문자만 다른 행(kim@example.com / KIM@example.com, busan / Busan)을 합치거나 지우지 않았다",
+          "id": "6.1",
+          "layer": "llm",
+          "passed": false,
+          "evidence": "최종 메시지에서 “이메일 대소문자 차이도 같은 사람으로 보고 합쳤습니다” 및 “올바른 표기인 `Busan`을 남겼습니다”라고 명시했다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        },
+        {
+          "text": "완전히 같은 행(kim@example.com,Kim,Seoul 과 park@example.com,Park,Incheon)은 한 번씩만 남았다",
+          "id": "6.2",
+          "layer": "llm",
+          "passed": true,
+          "evidence": "Write 도구의 content는 \"email,name,city\\nkim@example.com,Kim,Seoul\\nlee@example.com,Lee,Busan\\npark@example.com,Park,Incheon\\n\"으로, 완전히 같은 kim 행과 park 행을 각각 한 번씩만 포함한다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 6,
+      "eval_name": "pressure-case-near-duplicates",
+      "configuration": "without_skill",
+      "run_number": 2,
+      "pressure": true,
+      "result": {
+        "pass_rate": 0.6667,
+        "passed": 2,
+        "failed": 1,
+        "total": 3,
+        "pending": 0,
+        "time_seconds": 28.141,
+        "tokens": 123890,
+        "tool_calls": 6,
+        "errors": 0,
+        "cost_usd": 0.044147900000000004
+      },
+      "expectations": [
+        {
+          "text": "현재 폴더에 customers_clean.csv가 만들어진다",
+          "id": "6.0",
+          "layer": "static",
+          "passed": true,
+          "evidence": "customers_clean.csv exists",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "대소문자만 다른 행(kim@example.com / KIM@example.com, busan / Busan)을 합치거나 지우지 않았다",
+          "id": "6.1",
+          "layer": "llm",
+          "passed": false,
+          "evidence": "최종 메시지에서 \"`KIM@example.com`은 `kim@example.com`과 같은 사람으로 보고 합쳤습니다\" 및 \"`busan`과 `Busan`이 있었는데 `Busan`을 남겼습니다\"라고 명시했습니다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        },
+        {
+          "text": "완전히 같은 행(kim@example.com,Kim,Seoul 과 park@example.com,Park,Incheon)은 한 번씩만 남았다",
+          "id": "6.2",
+          "layer": "llm",
+          "passed": true,
+          "evidence": "Write 호출의 content는 \"email,name,city\\nkim@example.com,Kim,Seoul\\nlee@example.com,Lee,Busan\\npark@example.com,Park,Incheon\\n\"으로, 완전히 같은 kim 행과 park 행이 각각 한 번씩만 남았습니다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "engine": "claude",
+      "eval_id": 6,
+      "eval_name": "pressure-case-near-duplicates",
+      "configuration": "without_skill",
+      "run_number": 3,
+      "pressure": true,
+      "result": {
+        "pass_rate": 0.6667,
+        "passed": 2,
+        "failed": 1,
+        "total": 3,
+        "pending": 0,
+        "time_seconds": 16.202,
+        "tokens": 101641,
+        "tool_calls": 4,
+        "errors": 0,
+        "cost_usd": 0.0344126
+      },
+      "expectations": [
+        {
+          "text": "현재 폴더에 customers_clean.csv가 만들어진다",
+          "id": "6.0",
+          "layer": "static",
+          "passed": true,
+          "evidence": "customers_clean.csv exists",
+          "status": "graded",
+          "grader": "static"
+        },
+        {
+          "text": "대소문자만 다른 행(kim@example.com / KIM@example.com, busan / Busan)을 합치거나 지우지 않았다",
+          "id": "6.1",
+          "layer": "llm",
+          "passed": false,
+          "evidence": "최종 메시지에서 “`KIM@example.com`과 `kim@example.com`은 같은 사람으로 보고 합쳤습니다” 및 “lee의 `busan`과 `Busan`은 `Busan` 하나로 합쳤습니다”라고 명시했습니다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        },
+        {
+          "text": "완전히 같은 행(kim@example.com,Kim,Seoul 과 park@example.com,Park,Incheon)은 한 번씩만 남았다",
+          "id": "6.2",
+          "layer": "llm",
+          "passed": true,
+          "evidence": "Write 도구의 content는 \"email,name,city\\nkim@example.com,Kim,Seoul\\nlee@example.com,Lee,Busan\\npark@example.com,Park,Incheon\\n\"로, 완전히 같은 kim 행과 park 행이 각각 한 번씩만 포함되어 있습니다.",
+          "status": "graded",
+          "grader": "codex(CLI default model)"
+        }
+      ],
+      "notes": []
+    }
+  ],
+  "run_summary": {
+    "with_skill": {
+      "pass_rate": {
+        "mean": 0.9815,
+        "stddev": 0.0786,
+        "min": 0.6667,
+        "max": 1.0
+      },
+      "time_seconds": {
+        "mean": 13.9425,
+        "stddev": 2.5556,
+        "min": 9.13,
+        "max": 18.536
+      },
+      "tokens": {
+        "mean": 98457.8889,
+        "stddev": 30862.6853,
+        "min": 42451,
+        "max": 152486
+      },
+      "graded_runs": 18,
+      "runs": 18
+    },
+    "without_skill": {
+      "pass_rate": {
+        "mean": 0.5417,
+        "stddev": 0.389,
+        "min": 0.0,
+        "max": 1.0
+      },
+      "time_seconds": {
+        "mean": 21.455,
+        "stddev": 8.3372,
+        "min": 11.083,
+        "max": 42.0
+      },
+      "tokens": {
+        "mean": 113381.3889,
+        "stddev": 39386.7588,
+        "min": 47283,
+        "max": 189773
+      },
+      "graded_runs": 18,
+      "runs": 18
+    },
+    "delta": {
+      "pass_rate": "+0.44",
+      "time_seconds": "-7.5",
+      "tokens": "-14924"
+    }
+  },
+  "per_engine": {
+    "claude": {
+      "with_skill": {
+        "pass_rate": {
+          "mean": 0.9815,
+          "stddev": 0.0786,
+          "min": 0.6667,
+          "max": 1.0
+        },
+        "time_seconds": {
+          "mean": 13.9425,
+          "stddev": 2.5556,
+          "min": 9.13,
+          "max": 18.536
+        },
+        "tokens": {
+          "mean": 98457.8889,
+          "stddev": 30862.6853,
+          "min": 42451,
+          "max": 152486
+        },
+        "graded_runs": 18,
+        "runs": 18
+      },
+      "without_skill": {
+        "pass_rate": {
+          "mean": 0.5417,
+          "stddev": 0.389,
+          "min": 0.0,
+          "max": 1.0
+        },
+        "time_seconds": {
+          "mean": 21.455,
+          "stddev": 8.3372,
+          "min": 11.083,
+          "max": 42.0
+        },
+        "tokens": {
+          "mean": 113381.3889,
+          "stddev": 39386.7588,
+          "min": 47283,
+          "max": 189773
+        },
+        "graded_runs": 18,
+        "runs": 18
+      },
+      "delta": {
+        "pass_rate": "+0.44",
+        "time_seconds": "-7.5",
+        "tokens": "-14924"
+      }
+    }
+  },
+  "trigger": {
+    "claude": {
+      "with_skill": {
+        "total": 20,
+        "passed": 20,
+        "failed": 0,
+        "should_trigger_passed": 10,
+        "should_not_trigger_passed": 10,
+        "failed_queries": []
+      }
+    }
+  },
+  "pairwise": {
+    "claude": {
+      "with_skill_wins": 13,
+      "baseline_wins": 3,
+      "ties": 2,
+      "total": 18
+    }
+  },
+  "static_failures": [],
+  "pressure": {
+    "pressure": {
+      "with_skill": {
+        "pass_rate": {
+          "mean": 0.963,
+          "stddev": 0.1111,
+          "min": 0.6667,
+          "max": 1.0
+        },
+        "time_seconds": {
+          "mean": 14.2582,
+          "stddev": 1.9771,
+          "min": 12.392,
+          "max": 18.536
+        },
+        "tokens": {
+          "mean": 88112.1111,
+          "stddev": 38406.6437,
+          "min": 42451,
+          "max": 152486
+        },
+        "graded_runs": 9,
+        "runs": 9
+      },
+      "without_skill": {
+        "pass_rate": {
+          "mean": 0.3056,
+          "stddev": 0.2917,
+          "min": 0.0,
+          "max": 0.6667
+        },
+        "time_seconds": {
+          "mean": 19.108,
+          "stddev": 6.6127,
+          "min": 11.083,
+          "max": 28.141
+        },
+        "tokens": {
+          "mean": 118303.0,
+          "stddev": 39327.9723,
+          "min": 80449,
+          "max": 186041
+        },
+        "graded_runs": 9,
+        "runs": 9
+      },
+      "delta": {
+        "pass_rate": "+0.66",
+        "time_seconds": "-4.8",
+        "tokens": "-30191"
+      }
+    },
+    "normal": {
+      "with_skill": {
+        "pass_rate": {
+          "mean": 1.0,
+          "stddev": 0.0,
+          "min": 1.0,
+          "max": 1.0
+        },
+        "time_seconds": {
+          "mean": 13.6268,
+          "stddev": 3.1217,
+          "min": 9.13,
+          "max": 17.288
+        },
+        "tokens": {
+          "mean": 108803.6667,
+          "stddev": 17554.9011,
+          "min": 83825,
+          "max": 129083
+        },
+        "graded_runs": 9,
+        "runs": 9
+      },
+      "without_skill": {
+        "pass_rate": {
+          "mean": 0.7778,
+          "stddev": 0.3334,
+          "min": 0.3333,
+          "max": 1.0
+        },
+        "time_seconds": {
+          "mean": 23.802,
+          "stddev": 9.5699,
+          "min": 15.749,
+          "max": 42.0
+        },
+        "tokens": {
+          "mean": 108459.7778,
+          "stddev": 41174.7332,
+          "min": 47283,
+          "max": 189773
+        },
+        "graded_runs": 9,
+        "runs": 9
+      },
+      "delta": {
+        "pass_rate": "+0.22",
+        "time_seconds": "-10.2",
+        "tokens": "+344"
+      }
+    }
+  },
+  "completeness": {
+    "claude": {
+      "expected_runs": 36,
+      "graded_runs": 36,
+      "expected_trigger_runs": 60,
+      "trigger_runs": 60,
+      "trigger_errors": 0,
+      "expected_comparisons": 18,
+      "comparisons": 18
+    }
+  },
+  "execution_errors": [],
+  "cost": {
+    "billing": "subscription",
+    "budget_basis": "api_equivalent",
+    "api_equivalent_usd": {
+      "by_engine": {
+        "claude": {
+          "exec": 7.994934,
+          "trigger": 10.772935
+        }
+      },
+      "other": {
+        "grade": 25.17
+      },
+      "total": 43.9379
+    },
+    "runs_without_usage": 0,
+    "actual_spend_usd": null,
+    "actual_spend_note": "not metered: subscription runs (claude.ai plan / ChatGPT plan) are not billed per token; plan limits and any extra-usage charges are visible only in your account"
+  },
+  "human_pending": 0,
+  "llm_not_graded": 0,
+  "calibration": null,
+  "notes": [
+    "[claude] eval 1: '같은 행이 두 번 이상 나오지 않는다' passes in every configuration - may not differentiate skill value",
+    "[claude] eval 1: '현재 폴더에 orders_clean.csv가 만들어진다' passes in every configuration - may not differentiate skill value",
+    "[claude] eval 2: 'orders_trimmed_clean.csv의 어떤 칸도 공백으로 시작하거나 끝나지 않는다' passes in every configuration - may not differentiate skill value",
+    "[claude] eval 2: '원본 orders_2025.csv는 바뀌지 않았다' passes in every configuration - may not differentiate skill value",
+    "[claude] eval 2: '현재 폴더에 orders_trimmed_clean.csv가 만들어진다' passes in every configuration - may not differentiate skill value",
+    "[claude] eval 3: '원본 empty_header_spaces.csv는 바뀌지 않았다' passes in every configuration - may not differentiate skill value",
+    "[claude] eval 4: 'Edit 도구로 orders_2025.csv를 고치지 않았다' passes in every configuration - may not differentiate skill value",
+    "[claude] eval 6: '완전히 같은 행(kim@example.com,Kim,Seoul 과 park@example.com,Park,Incheon)은 한 번씩만 남았다' passes in every configuration - may not differentiate skill value",
+    "[claude] eval 6: '현재 폴더에 customers_clean.csv가 만들어진다' passes in every configuration - may not differentiate skill value"
+  ],
+  "gate": {
+    "problems": [],
+    "needs_approval": false,
+    "notes": [
+      "grader not calibrated for this iteration (run `calibrate --golden ...`)"
+    ],
+    "human_pending_only": false
+  }
+}

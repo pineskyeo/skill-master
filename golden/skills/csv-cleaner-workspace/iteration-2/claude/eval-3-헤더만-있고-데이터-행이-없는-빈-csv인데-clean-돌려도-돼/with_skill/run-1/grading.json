@@ -1,0 +1,29 @@
+{
+  "expectations": [
+    {
+      "text": "출력 파일에 헤더 한 줄만 있다",
+      "id": "3.0",
+      "layer": "llm",
+      "passed": false,
+      "evidence": "실행 명령은 예시로만 제시했고, 마지막에 “원하시면 제가 실행해 볼까요?”라고 물었습니다. 도구 호출에도 clean.py 실행이나 출력 파일 확인이 없어, 출력 파일에 헤더 한 줄만 있다는 증거가 없습니다.",
+      "status": "graded",
+      "grader": "codex(CLI default model, effort high)"
+    }
+  ],
+  "summary": {
+    "passed": 0,
+    "failed": 1,
+    "total": 1,
+    "pass_rate": 0.0,
+    "pending": 0
+  },
+  "execution_metrics": {
+    "total_tool_calls": 4,
+    "errors_encountered": 0,
+    "output_chars": 439
+  },
+  "timing": {
+    "executor_duration_seconds": 13.504,
+    "total_duration_seconds": 13.504
+  }
+}

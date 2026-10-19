@@ -1,0 +1,47 @@
+{
+  "expectations": [
+    {
+      "text": "현재 폴더에 events_clean.csv가 만들어진다",
+      "id": "5.0",
+      "layer": "static",
+      "passed": false,
+      "evidence": "events_clean.csv missing",
+      "status": "graded",
+      "grader": "static"
+    },
+    {
+      "text": "앞부분 일부만이 아니라 파일의 모든 행을 처리했다 (head/샘플만 읽고 정리하지 않았다)",
+      "id": "5.1",
+      "layer": "llm",
+      "passed": true,
+      "evidence": "`awk '!s[$0]++' evals/files/events_large.csv | wc -l`로 head나 샘플 제한 없이 파일 전체 행을 대상으로 중복 제거 및 집계를 수행했다.",
+      "status": "graded",
+      "grader": "codex(CLI default model, effort high)"
+    },
+    {
+      "text": "events_clean.csv에 같은 행이 두 번 이상 나오지 않는다 (파일 끝부분의 중복 포함)",
+      "id": "5.2",
+      "layer": "llm",
+      "passed": false,
+      "evidence": "최종 메시지에 “`events_clean.csv`는 아직 만들지 못했습니다”와 “현재 폴더에 아무것도 생성되지 않았습니다”라고 명시되어 있어, 중복 없는 결과 파일이 생성되었다는 증거가 없다.",
+      "status": "graded",
+      "grader": "codex(CLI default model, effort high)"
+    }
+  ],
+  "summary": {
+    "passed": 1,
+    "failed": 2,
+    "total": 3,
+    "pass_rate": 0.3333,
+    "pending": 0
+  },
+  "execution_metrics": {
+    "total_tool_calls": 7,
+    "errors_encountered": 0,
+    "output_chars": 447
+  },
+  "timing": {
+    "executor_duration_seconds": 19.214,
+    "total_duration_seconds": 19.214
+  }
+}

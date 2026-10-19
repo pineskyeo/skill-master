@@ -1,0 +1,38 @@
+{
+  "expectations": [
+    {
+      "text": "현재 폴더에 orders_clean.csv가 만들어진다",
+      "id": "1.0",
+      "layer": "static",
+      "passed": true,
+      "evidence": "orders_clean.csv exists",
+      "status": "graded",
+      "grader": "static"
+    },
+    {
+      "text": "같은 행이 두 번 이상 나오지 않는다",
+      "id": "1.1",
+      "layer": "llm",
+      "passed": true,
+      "evidence": "최종 메시지에 “헤더(`order_id,item,qty`)와 데이터 3행(주문 1, 2, 3)이 들어 있습니다.”라고 명시되어 있어, 서로 다른 주문이 한 행씩 남았음을 보여줍니다.",
+      "status": "graded",
+      "grader": "codex(CLI default model)"
+    }
+  ],
+  "summary": {
+    "passed": 2,
+    "failed": 0,
+    "total": 2,
+    "pass_rate": 1.0,
+    "pending": 0
+  },
+  "execution_metrics": {
+    "total_tool_calls": 5,
+    "errors_encountered": 0,
+    "output_chars": 309
+  },
+  "timing": {
+    "executor_duration_seconds": 16.927,
+    "total_duration_seconds": 16.927
+  }
+}

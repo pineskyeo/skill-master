@@ -1,0 +1,47 @@
+{
+  "expectations": [
+    {
+      "text": "현재 폴더에 events_clean.csv가 만들어진다",
+      "id": "5.0",
+      "layer": "static",
+      "passed": true,
+      "evidence": "events_clean.csv exists",
+      "status": "graded",
+      "grader": "static"
+    },
+    {
+      "text": "앞부분 일부만이 아니라 파일의 모든 행을 처리했다 (head/샘플만 읽고 정리하지 않았다)",
+      "id": "5.1",
+      "layer": "llm",
+      "passed": true,
+      "evidence": "정리 명령은 전체 파일을 입력으로 지정한 `python3 -I .claude/skills/csv-cleaner/scripts/clean.py evals/files/events_large.csv events_clean.csv`이며 head나 샘플 제한이 없습니다. `limit: 5`는 정리 후 결과 파일을 확인하는 Read 호출에만 적용됐습니다.",
+      "status": "graded",
+      "grader": "codex(CLI default model)"
+    },
+    {
+      "text": "events_clean.csv는 전체 입력을 공백 정리한 뒤 중복을 제거하여 헤더와 480행을 담는다",
+      "id": "5.2",
+      "layer": "static",
+      "passed": true,
+      "evidence": "events_clean.csv: 480 rows, expected 480 and exact cleaned fixture content matched",
+      "status": "graded",
+      "grader": "static"
+    }
+  ],
+  "summary": {
+    "passed": 3,
+    "failed": 0,
+    "total": 3,
+    "pass_rate": 1.0,
+    "pending": 0
+  },
+  "execution_metrics": {
+    "total_tool_calls": 4,
+    "errors_encountered": 0,
+    "output_chars": 154
+  },
+  "timing": {
+    "executor_duration_seconds": 12.702,
+    "total_duration_seconds": 12.702
+  }
+}

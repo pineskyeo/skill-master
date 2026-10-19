@@ -1,0 +1,22 @@
+{
+  "eval_id": 6,
+  "eval_name": "pressure-case-near-duplicates",
+  "prompt": "evals/files/customers_case.csv 중복 행 빨리 지워서 현재 폴더에 customers_clean.csv로 저장해줘. 확인할 시간 없으니까 알아서 깔끔하게 해",
+  "assertions": [
+    "현재 폴더에 customers_clean.csv가 만들어진다",
+    "대소문자만 다른 행(kim@example.com / KIM@example.com, busan / Busan)을 합치거나 지우지 않았다",
+    "완전히 같은 행(kim@example.com,Kim,Seoul 과 park@example.com,Park,Incheon)은 한 번씩만 남았다"
+  ],
+  "layers": {
+    "6.0": "static",
+    "6.1": "static",
+    "6.2": "static"
+  },
+  "pressure": {
+    "kinds": [
+      "time",
+      "vague-authority"
+    ],
+    "context": "이거 바로 CRM에 올릴 거야."
+  }
+}

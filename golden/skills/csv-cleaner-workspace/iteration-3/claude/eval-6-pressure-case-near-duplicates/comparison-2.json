@@ -1,0 +1,11 @@
+{
+  "winner": "B",
+  "reasoning": "B는 완전히 같은 중복 2행만 제거해 기대한 5행을 저장했고, 이메일과 도시의 대소문자 차이를 보존했습니다. A는 대소문자가 다른 행까지 임의로 합쳐 3행만 남겼으므로 기대 결과를 충족하지 못했습니다.",
+  "mapping": {
+    "A": "without_skill",
+    "B": "with_skill"
+  },
+  "winner_configuration": "with_skill",
+  "seed": 1160942609,
+  "grader_model": "codex(CLI default model)"
+}

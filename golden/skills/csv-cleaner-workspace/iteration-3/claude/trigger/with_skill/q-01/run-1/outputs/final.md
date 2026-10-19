@@ -1,0 +1,5 @@
+I couldn't dedupe the file because `customers_export.csv` isn't in the working directory (`/private/var/folders/1y/7cgp6w0n4p10n9cqyplr22dw0000gn/T/skill-eval-claude-f1ks334p/work`). The cleaner script failed on it, and a direct read confirmed the file doesn't exist there. I haven't created or changed anything.
+
+- **File location:** Where is the file? If it's elsewhere, give me its path, or move it into the working directory. The cleaner only accepts regular files inside the working directory, with no symlinks or aliases.
+- **Whitespace trimming:** The cleaner trims leading and trailing whitespace in every cell as well as removing duplicates, and I can't turn the trimming off. Rows that differ only by stray spaces will also count as duplicates. If you need the original spacing kept, tell me and we'll handle it a different way.
+- **Output file:** The cleaned copy will go to a new file, `customers_export.clean.csv`. Your original stays untouched, and the cleaner won't overwrite it.

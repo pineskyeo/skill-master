@@ -1,0 +1,16 @@
+{
+  "eval_id": 2,
+  "eval_name": "evals-files-orders-2025-csv-칸마다-앞뒤-공백이-껴",
+  "prompt": "evals/files/orders_2025.csv 칸마다 앞뒤 공백이 껴 있어서 groupby가 안 돼. 중복 행도 함께 정리해서 현재 폴더의 orders_trimmed_clean.csv로 저장해줘. 원본은 그대로 둬.",
+  "assertions": [
+    "현재 폴더에 orders_trimmed_clean.csv가 만들어진다",
+    "원본 orders_2025.csv는 바뀌지 않았다",
+    "orders_trimmed_clean.csv는 원본의 칸 공백을 정리하고 완전히 같은 행을 지운 결과와 같다 (헤더 + 3행; 공백으로 시작·끝나는 칸 없음)"
+  ],
+  "layers": {
+    "2.0": "static",
+    "2.1": "static",
+    "2.2": "static"
+  },
+  "pressure": null
+}

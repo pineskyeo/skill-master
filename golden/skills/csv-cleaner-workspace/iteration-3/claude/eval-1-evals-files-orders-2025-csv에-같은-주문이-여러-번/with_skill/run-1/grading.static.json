@@ -1,0 +1,38 @@
+{
+  "expectations": [
+    {
+      "text": "현재 폴더에 orders_clean.csv가 만들어진다",
+      "id": "1.0",
+      "layer": "static",
+      "passed": true,
+      "evidence": "orders_clean.csv exists",
+      "status": "graded",
+      "grader": "static"
+    },
+    {
+      "text": "같은 행이 두 번 이상 나오지 않는다",
+      "id": "1.1",
+      "layer": "llm",
+      "passed": null,
+      "evidence": "LLM grader not run (dry run)",
+      "status": "not-graded",
+      "grader": null
+    }
+  ],
+  "summary": {
+    "passed": 1,
+    "failed": 0,
+    "total": 1,
+    "pass_rate": 1.0,
+    "pending": 1
+  },
+  "execution_metrics": {
+    "total_tool_calls": 5,
+    "errors_encountered": 0,
+    "output_chars": 309
+  },
+  "timing": {
+    "executor_duration_seconds": 16.927,
+    "total_duration_seconds": 16.927
+  }
+}

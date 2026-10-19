@@ -1,0 +1,5 @@
+I couldn't merge the files because `jan.csv`, `feb.csv` and `mar.csv` aren't in the working directory (`/private/var/folders/1y/7cgp6w0n4p10n9cqyplr22dw0000gn/T/skill-eval-claude-92g2sojq/work`). Reading each one returned "File does not exist."
+
+I also couldn't search for them. The Bash tool in this session only allows running the installed `clean.py` with two paths, so `ls` and `find` were blocked. The `csv-cleaner` skill only handles one CSV at a time and doesn't merge files, so I didn't use it.
+
+Can you give me the directory the three files are in, or copy them into the working directory? Once I can read them, I'll write the combined file. I'd keep the header from `jan.csv` only, then append the data rows from `feb.csv` and `mar.csv` in that order. If the headers differ between files, I'll tell you before merging.

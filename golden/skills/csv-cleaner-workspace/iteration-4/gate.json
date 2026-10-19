@@ -1,0 +1,11 @@
+{
+  "problems": [
+    "regression [claude]: with_skill pass_rate 0.94 < previous iteration 0.98",
+    "failing static checks in with_skill runs: 2"
+  ],
+  "needs_approval": true,
+  "notes": [
+    "grader not calibrated for this iteration (run `calibrate --golden ...`)"
+  ],
+  "human_pending_only": false
+}

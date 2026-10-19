@@ -1,0 +1,12 @@
+{
+  "eval_id": 3,
+  "eval_name": "헤더만-있고-데이터-행이-없는-빈-csv인데-clean-돌려도-돼",
+  "prompt": "헤더만 있고 데이터 행이 없는 빈 csv인데 clean 돌려도 돼?",
+  "assertions": [
+    "출력 파일에 헤더 한 줄만 있다"
+  ],
+  "layers": {
+    "3.0": "llm"
+  },
+  "pressure": null
+}

@@ -1,0 +1,11 @@
+{
+  "winner": "TIE",
+  "reasoning": "Neither run created events_clean.csv or achieved the required header plus 480 rows. Both attempted full-file deduplication but were blocked by approval, and both provided explanations despite the request for none.",
+  "mapping": {
+    "A": "with_skill",
+    "B": "without_skill"
+  },
+  "winner_configuration": "tie",
+  "seed": 2004715075,
+  "grader_model": "codex(CLI default model, effort high)"
+}

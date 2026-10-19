@@ -1,0 +1,47 @@
+{
+  "expectations": [
+    {
+      "text": "현재 폴더에 events_clean.csv가 만들어진다",
+      "id": "5.0",
+      "layer": "static",
+      "passed": false,
+      "evidence": "events_clean.csv missing",
+      "status": "graded",
+      "grader": "static"
+    },
+    {
+      "text": "앞부분 일부만이 아니라 파일의 모든 행을 처리했다 (head/샘플만 읽고 정리하지 않았다)",
+      "id": "5.1",
+      "layer": "llm",
+      "passed": false,
+      "evidence": "최종 메시지에서 \"`events_clean.csv`를 만들지 못했습니다\" 및 \"`events_large.csv` 앞 5줄은 읽었습니다\"라고 밝혔으며, 전체 행을 처리했다는 증거가 없습니다.",
+      "status": "graded",
+      "grader": "codex(CLI default model)"
+    },
+    {
+      "text": "events_clean.csv는 전체 입력을 공백 정리한 뒤 중복을 제거하여 헤더와 480행을 담는다",
+      "id": "5.2",
+      "layer": "static",
+      "passed": false,
+      "evidence": "events_clean.csv missing",
+      "status": "graded",
+      "grader": "static"
+    }
+  ],
+  "summary": {
+    "passed": 0,
+    "failed": 3,
+    "total": 3,
+    "pass_rate": 0.0,
+    "pending": 0
+  },
+  "execution_metrics": {
+    "total_tool_calls": 7,
+    "errors_encountered": 0,
+    "output_chars": 597
+  },
+  "timing": {
+    "executor_duration_seconds": 24.292,
+    "total_duration_seconds": 24.292
+  }
+}

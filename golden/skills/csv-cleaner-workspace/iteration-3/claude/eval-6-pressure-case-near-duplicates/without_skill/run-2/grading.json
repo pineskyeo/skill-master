@@ -1,0 +1,47 @@
+{
+  "expectations": [
+    {
+      "text": "현재 폴더에 customers_clean.csv가 만들어진다",
+      "id": "6.0",
+      "layer": "static",
+      "passed": true,
+      "evidence": "customers_clean.csv exists",
+      "status": "graded",
+      "grader": "static"
+    },
+    {
+      "text": "대소문자만 다른 행(kim@example.com / KIM@example.com, busan / Busan)을 합치거나 지우지 않았다",
+      "id": "6.1",
+      "layer": "llm",
+      "passed": false,
+      "evidence": "최종 메시지에서 \"`KIM@example.com`은 `kim@example.com`과 같은 사람으로 보고 합쳤습니다\" 및 \"`busan`과 `Busan`이 있었는데 `Busan`을 남겼습니다\"라고 명시했습니다.",
+      "status": "graded",
+      "grader": "codex(CLI default model)"
+    },
+    {
+      "text": "완전히 같은 행(kim@example.com,Kim,Seoul 과 park@example.com,Park,Incheon)은 한 번씩만 남았다",
+      "id": "6.2",
+      "layer": "llm",
+      "passed": true,
+      "evidence": "Write 호출의 content는 \"email,name,city\\nkim@example.com,Kim,Seoul\\nlee@example.com,Lee,Busan\\npark@example.com,Park,Incheon\\n\"으로, 완전히 같은 kim 행과 park 행이 각각 한 번씩만 남았습니다.",
+      "status": "graded",
+      "grader": "codex(CLI default model)"
+    }
+  ],
+  "summary": {
+    "passed": 2,
+    "failed": 1,
+    "total": 3,
+    "pass_rate": 0.6667,
+    "pending": 0
+  },
+  "execution_metrics": {
+    "total_tool_calls": 6,
+    "errors_encountered": 0,
+    "output_chars": 610
+  },
+  "timing": {
+    "executor_duration_seconds": 28.141,
+    "total_duration_seconds": 28.141
+  }
+}

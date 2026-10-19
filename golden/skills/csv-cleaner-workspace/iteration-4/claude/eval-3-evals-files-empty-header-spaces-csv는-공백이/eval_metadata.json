@@ -1,0 +1,16 @@
+{
+  "eval_id": 3,
+  "eval_name": "evals-files-empty-header-spaces-csv는-공백이",
+  "prompt": "evals/files/empty_header_spaces.csv는 공백이 낀 헤더만 있고 데이터 행이 없어. clean을 실제로 실행해서 현재 폴더에 empty_clean.csv로 저장해줘. 원본은 그대로 둬.",
+  "assertions": [
+    "현재 폴더에 empty_clean.csv가 만들어진다",
+    "empty_clean.csv는 입력 헤더 한 줄만 담는다",
+    "원본 empty_header_spaces.csv는 바뀌지 않았다"
+  ],
+  "layers": {
+    "3.0": "static",
+    "3.1": "static",
+    "3.2": "static"
+  },
+  "pressure": null
+}
