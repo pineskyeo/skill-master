@@ -272,9 +272,10 @@ class TestCsvCleanerPressureCases(unittest.TestCase):
         self.assertEqual(len(self.spec["cases"]), 6)
         self.assertEqual(sorted(c["id"] for c in self.spec["cases"] if c["pressure"]), [4, 5, 6])
         layers = [it["layer"] for c in self.spec["cases"] for it in c["items"]]
-        self.assertEqual((layers.count("static"), layers.count("llm"), layers.count("human")), (12, 6, 0))
-        for c in self.spec["cases"]:
-            if c["pressure"]: self.assertEqual({it["layer"] for it in c["items"]}, {"static", "llm"}, c["id"])
+        self.assertEqual((layers.count("static"), layers.count("llm"), layers.count("human")), (16, 1, 0))
+        self.assertEqual({cid: sorted(it["layer"] for it in c["items"]) for cid, c in self.cases.items()},
+                         {1: ["static"] * 2, 2: ["static"] * 3, 3: ["static"] * 3,
+                          4: ["llm", "static", "static", "static"], 5: ["static"] * 2, 6: ["static"] * 3})
 
     def item(self, cid, text_part):
         return next(it for it in self.cases[cid]["items"] if text_part in it["text"])

@@ -27,7 +27,8 @@ AGREEMENT_MIN = 0.8                # H: grader-vs-human agreement below this is 
 REGRESSION_TOLERANCE = 0.0         # H: any drop of mean pass_rate counts as regression
 HIGH_VARIANCE_STDDEV = 0.3         # H: per-eval pass_rate stddev that gets a "flaky" note
 STATIC_TYPES = ("regex", "not_regex", "tool_call", "skill_triggered", "file_exists",
-                "file_equals_fixture", "csv_cleaned")
+                "file_equals_fixture", "csv_cleaned", "csv_rows")
+CSV_ROWS_KEYS = ("type", "path", "rows", "min", "max", "normalize", "unique")
 
 # USD per million tokens (input, output). Source: https://platform.claude.com/docs/en/about-claude/pricing,
 # read 2026-10-15 (base input / output columns; Haiku 5.5 row "for prompts up to 100,000 tokens").
@@ -162,6 +163,49 @@ def slug(text, n=40):
     return s[:n].strip("-")
 
 # ---------- eval set ----------
+def _rel_path_ok(p):
+    return isinstance(p, str) and bool(p) and not os.path.isabs(p) and ".." not in p.replace("\\", "/").split("/")
+
+def _has_lone_surrogate(s):
+    return any("\ud800" <= c <= "\udfff" for c in s)
+
+def _csv_rows_problems(where, chk):
+    e = ["%s.check.%s: not a csv_rows key (allowed: %s)" % (
+            where, k.encode("ascii", "backslashreplace").decode("ascii"), ", ".join(CSV_ROWS_KEYS))
+         for k in chk if k not in CSV_ROWS_KEYS]
+    if not _rel_path_ok(chk.get("path")): e.append("%s.check.path: relative path required" % where)
+    elif _has_lone_surrogate(chk["path"]): e.append("%s.check.path: lone surrogate (U+D800..U+DFFF) not allowed" % where)
+    rows = chk.get("rows")
+    rows_ok = isinstance(rows, list) and all(
+        isinstance(r, list) and all(isinstance(c, str) for c in r) for r in rows) and (
+        bool(rows) or chk.get("unique") is True)
+    if "rows" in chk and not rows_ok:
+        e.append("%s.check.rows: non-empty list of lists of strings required (an empty inner list matches a blank "
+                 "line; an empty outer list is allowed only with unique: true)" % where)
+    elif rows_ok and any(_has_lone_surrogate(c) for r in rows for c in r):
+        e.append("%s.check.rows: lone surrogate (U+D800..U+DFFF) not allowed in a cell" % where)
+    bounds = {}
+    for k in ("min", "max"):
+        if k in chk:
+            if isinstance(chk[k], int) and not isinstance(chk[k], bool) and chk[k] >= 0: bounds[k] = chk[k]
+            else: e.append("%s.check.%s: integer >= 0 required" % (where, k))
+    if ("min" in chk or "max" in chk) and "rows" not in chk:
+        e.append("%s.check.rows: required when min/max are given" % where)
+    if "max" in bounds and "min" not in chk and bounds["max"] < 1:
+        e.append("%s.check.max: below the default min 1; set min: 0 too (row must be absent)" % where)
+    elif "min" in bounds and "max" in bounds and bounds["min"] > bounds["max"]:
+        e.append("%s.check.max: must be >= min" % where)
+    if rows_ok and rows and bounds.get("min") == 0 and "max" not in chk:
+        e.append("%s.check.min: 0 without max asserts nothing about the listed rows; set max or a min >= 1" % where)
+    if rows_ok and not rows and ("min" in chk or "max" in chk):
+        e.append("%s.check.rows: min/max need a non-empty rows list (an empty list checks only unique)" % where)
+    if chk.get("normalize", "none") not in ("none", "strip"):
+        e.append("%s.check.normalize: none|strip" % where)
+    if "unique" in chk and not isinstance(chk["unique"], bool): e.append("%s.check.unique: true|false required" % where)
+    if not rows_ok and "rows" not in chk and chk.get("unique") is not True:
+        e.append("%s.check: needs a non-empty rows list or unique: true (otherwise it asserts nothing)" % where)
+    return e
+
 def _check_problems(where, chk):
     if not isinstance(chk, dict) or chk.get("type") not in STATIC_TYPES:
         return ["%s.check.type: one of %s required" % (where, "|".join(STATIC_TYPES))]
@@ -185,11 +229,11 @@ def _check_problems(where, chk):
             except (re.error, TypeError) as ex: e.append("%s.check.input_regex: %s" % (where, ex))
     elif t == "skill_triggered":
         if not isinstance(chk.get("expected"), bool): e.append("%s.check.expected: true|false required" % where)
+    elif t == "csv_rows":
+        e += _csv_rows_problems(where, chk)
     elif t in ("file_exists", "file_equals_fixture", "csv_cleaned"):
         for key in (("path",) if t == "file_exists" else ("path", "fixture")):
-            p = chk.get(key)
-            if not isinstance(p, str) or not p or os.path.isabs(p) or ".." in p.replace("\\", "/").split("/"):
-                e.append("%s.check.%s: relative path required" % (where, key))
+            if not _rel_path_ok(chk.get(key)): e.append("%s.check.%s: relative path required" % (where, key))
         if t == "csv_cleaned" and (not isinstance(chk.get("data_rows"), int) or isinstance(chk.get("data_rows"), bool)
                                     or chk["data_rows"] < 0):
             e.append("%s.check.data_rows: integer >= 0 required" % where)
@@ -2136,6 +2180,33 @@ def run_iteration(spec, ws, engines, runs=DEFAULT_RUNS, baseline="none", old_ski
     return n
 
 # ---------- grading ----------
+def _csv_rows_result(chk, workdir):
+    try: output = ensure_inside(workdir, os.path.join(workdir, chk["path"]))
+    except EvalError: return False, "file path escapes its root"
+    if not os.path.isfile(output): return False, "%s missing" % chk["path"]
+    try:
+        with open(output, newline="", encoding="utf-8") as f: records = list(csv.reader(f, strict=True))
+    except (OSError, UnicodeError, csv.Error) as ex:
+        return False, "CSV read failed: %s" % type(ex).__name__
+    key = (lambda row: tuple(c.strip() for c in row)) if chk.get("normalize") == "strip" else tuple
+    counts = {}
+    for rec in records: counts[key(rec)] = counts.get(key(rec), 0) + 1
+    lo, hi = chk.get("min", 1), chk.get("max")
+    bad, checked = [], set()
+    for row in chk.get("rows") or []:
+        if key(row) in checked: continue
+        checked.add(key(row))
+        n = counts.get(key(row), 0)
+        if n < lo or (hi is not None and n > hi): bad.append("%s x%d" % (json.dumps(row, ensure_ascii=False), n))
+    dupes = sum(n - 1 for n in counts.values()) if chk.get("unique") else 0
+    if not bad and not dupes:
+        return True, "%s: %d listed row(s) within [%d, %s]%s" % (
+            chk["path"], len(checked), lo, "∞" if hi is None else hi, ", no duplicate records" if chk.get("unique") else "")
+    parts = []
+    if bad: parts.append("row count outside [%d, %s]: %s" % (lo, "∞" if hi is None else hi, "; ".join(bad)))
+    if dupes: parts.append("%d duplicate record(s)" % dupes)
+    return False, ("%s: %s" % (chk["path"], ", ".join(parts)))[:200]
+
 def static_check(chk, t, workdir, fixture_root=None):
     t_ = chk["type"]
     if t_ in ("regex", "not_regex"):
@@ -2182,6 +2253,9 @@ def static_check(chk, t, workdir, fixture_root=None):
         ok = actual == expected and len(actual) == chk["data_rows"] + 1
         return ok, "%s: %d rows, expected %d and exact cleaned fixture content %s" % (
             chk["path"], max(0, len(actual) - 1), chk["data_rows"], "matched" if actual == expected else "mismatched")
+    if t_ == "csv_rows":
+        ok, evidence = _csv_rows_result(chk, workdir)
+        return ok, evidence[:200]
     return False, "unknown check type"
 
 def walk_runs(it_dir):
