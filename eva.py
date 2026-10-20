@@ -887,6 +887,8 @@ def unit_tree(path, ignore=None):
 
 LINK_OUT = "%s (link) resolves outside the unit folder, so its content cannot be verified English-only"
 LINK_CYCLE = "%s (link) points back at a folder on its own path (a cycle), so a copy of the unit would never end"
+LINK_DANGLING = "%s (link) points at a path that does not exist (dangling), so a copy of the unit would fail"
+LINK_LOOP = "%s (link) resolves in a loop of links that never reaches a target (a resolution loop), so a copy of the unit would fail"
 WRAPPER_OUT = "%s resolves outside the agent folder, so it is not read"
 
 def _tree_view(tree, top=""):

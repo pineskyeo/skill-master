@@ -14,7 +14,7 @@ variables are refused and scrubbed from every child, and costs are API-equivalen
 Usage: python3 skill_eval.py <validate|estimate|plan|run|grade|calibrate|report|approve|register|snapshot|loop> <skill> ...
        (also reachable as: python3 eva.py eval <subcommand> ...)
 """
-import argparse, csv, datetime, hashlib, json, math, mmap, os, platform, random, re, shlex, shutil, subprocess, sys, tempfile, time
+import argparse, csv, datetime, errno, hashlib, json, math, mmap, os, platform, random, re, shlex, shutil, subprocess, sys, tempfile, time
 
 LAYERS = ("static", "llm", "human")
 BASELINES = {"none": "without_skill", "old": "old_skill"}  # skill-creator configuration names
@@ -932,19 +932,17 @@ class Engine:
         return "%s(%s%s)" % (self.name, self.model or "CLI default", ", effort %s" % self.effort if self.effort else "")
     def install_skill(self, workdir, skill_dir, name):
         """Copy exactly the eva.unit_tree files of the skill, so the run holds what the English scan read (eva.SKILL_IGNORE
-        is left out, evals/ among them: the eval set must not leak into the run). A link that leaves the folder or
-        dangles, and a cycle, refuse the install. The name (SKILL.md frontmatter) must be one safe path component and the
-        destination must stay inside the skills folder of the sandbox."""
+        is left out, evals/ among them: the eval set must not leak into the run). A link that leaves the folder, dangles
+        or resolves in a loop of links, and a cycle, refuse the install. The name (SKILL.md frontmatter) must be one safe
+        path component and the destination must stay inside the skills folder of the sandbox."""
         import eva
         if not safe_name(name):
             raise EvalError("skill name %r is not a safe path component; refusing to install it" % (name,))
         tree = eva.unit_tree(skill_dir)
-        bad = escaping_links(skill_dir, tree)
-        if bad: raise EvalError("skill folder %s has symlinks that leave it (or dangle): %s; refusing to copy them "
-                                "into the run" % (skill_dir, ", ".join(bad[:5])))
-        if tree.cycles: raise EvalError("skill folder %s has folder links that point back at a folder on their own path: "
-                                        "%s; a copy would never end, refusing to install it"
-                                        % (skill_dir, ", ".join(tree.cycles[:5])))
+        links = link_refusals(skill_dir, tree)
+        if links: raise EvalError("skill folder %s has symlinks that leave it, dangle, loop or point back at a folder on "
+                                  "their own path: %s; refusing to install it, nothing was copied"
+                                  % (skill_dir, "; ".join(links)))
         dst = ensure_inside(os.path.join(workdir, self.skills_rel), os.path.join(workdir, self.skills_rel, name))
         os.makedirs(dst)
         for rel in tree.files:
@@ -1397,6 +1395,20 @@ def escaping_links(root, tree=None):
     import eva
     tree = tree or eva.unit_tree(root)
     return sorted(set(tree.outside) | {r for r in tree.files if not os.path.exists(os.path.join(root, *r.split("/")))})
+
+def _resolves_in_loop(path):
+    try: os.stat(path)
+    except OSError as e: return e.errno == errno.ELOOP
+    return False
+
+def link_refusals(root, tree):
+    """One eva reason per link of tree (the eva.unit_tree of root) that a copy cannot hold: outside links (LINK_OUT),
+    dangling links (LINK_DANGLING), links that resolve in a loop (LINK_LOOP), then cycles (LINK_CYCLE)."""
+    import eva
+    broken = [r for r in escaping_links(root, tree) if r not in tree.outside]
+    loops = [r for r in broken if _resolves_in_loop(os.path.join(root, *r.split("/")))]
+    return ([eva.LINK_OUT % r for r in tree.outside] + [eva.LINK_DANGLING % r for r in broken if r not in loops]
+            + [eva.LINK_LOOP % r for r in loops] + [eva.LINK_CYCLE % r for r in tree.cycles])
 
 RMTREE_ATTEMPTS = 3
 
@@ -3336,7 +3348,7 @@ def _dispatch(a):
         if os.path.exists(dst): raise EvalError("%s exists" % dst)
         import eva
         tree = eva.unit_tree(spec["skill_dir"], shutil.ignore_patterns())
-        links = [eva.LINK_OUT % r for r in tree.outside] + [eva.LINK_CYCLE % r for r in tree.cycles]
+        links = link_refusals(spec["skill_dir"], tree)
         if links: raise EvalError("skill folder %s: %s; refusing to snapshot it, nothing was copied"
                                   % (spec["skill_dir"], "; ".join(links)))
         shutil.copytree(spec["skill_dir"], dst); print("snapshot -> %s (use --baseline old --old-skill %s)" % (dst, dst)); return 0
