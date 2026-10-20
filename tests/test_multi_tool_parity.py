@@ -1,0 +1,780 @@
+"""Multi-tool parity rule (owner decision 2026-10-19 18:43): static checks in eva.py, validate/plan/loop/report in
+skill_eval.py. Design: notes/multi-tool-parity-plan.md. Everything is mocked: subprocess is patched to fail for the whole
+module, builders and engines are fakes, no claude/codex/opencode/hermes call, no network. ASCII only: Hangul is built
+from escapes."""
+import contextlib, io, json, os, re, shutil, subprocess, sys, unittest
+from unittest import mock
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import eva, skill_eval as se
+import test_eva as E
+import test_skill_eval as T
+
+KO = "\ud55c\uad6d\uc5b4 \ud14d\uc2a4\ud2b8"
+_patches = []
+
+def setUpModule():
+    for name in ("run", "Popen", "call", "check_call", "check_output"):
+        pt = mock.patch.object(subprocess, name, T._forbidden); pt.start(); _patches.append(pt)
+
+def tearDownModule():
+    for pt in _patches: pt.stop()
+
+CLAUDE_TOOL_NAMES = {"read": "Read, Grep, Glob", "write": "Write, Edit", "shell": "Bash", "web_fetch": "WebFetch",
+                     "web_search": "WebSearch", "delegate": "Task", "skill": "Skill"}
+
+CLAUDE_NAME_OF = {"read_file": "Read", "write_file": "Write", "edit_file": "Edit", "web_fetch": "WebFetch",
+                  "web_search": "WebSearch", "bash": "Bash", "grep": "Grep", "glob": "Glob"}
+
+# The OpenCode permission keys recorded on 2026-10-19 (notes/multi-tool-parity-plan.md section 2.4) and the class each
+# grants per plan C3. None: no class covers the key, so a wrapper must deny it.
+OPENCODE_KEYS = (("read", "read"), ("edit", "write"), ("glob", "read"), ("grep", "read"), ("list", "read"), ("bash", "shell"),
+                 ("task", "delegate"), ("external_directory", None), ("webfetch", "web_fetch"), ("websearch", "web_search"),
+                 ("lsp", "read"), ("skill", "skill"))
+
+def wrapper_texts(agent_dir, caps=None):
+    """{relative path: text} of a complete, consistent wrapper set generated from the AGENT.md in agent_dir. caps: the
+    capability set the Claude and OpenCode wrappers grant (default: exactly what AGENT.md tools need). The Codex wrapper
+    sets no sandbox_mode: a custom agent file cannot restrict the parent session (tests/test_codex_permissions.py). The
+    OpenCode wrapper sets every recorded permission key (tests/test_opencode_permissions.py)."""
+    with open(os.path.join(agent_dir, "AGENT.md"), encoding="utf-8") as f: meta, _ = eva.parse_frontmatter(f.read())
+    name, desc = meta["name"], " ".join(meta["description"].split())
+    names = [str(t) for t in eva.as_list(meta.get("tools"))]
+    forced = caps is not None
+    if caps is None: caps = eva.capabilities(names)[0]
+    claude_tools = ", ".join(v for c, v in CLAUDE_TOOL_NAMES.items() if c in caps or c == "read") if forced \
+        else ", ".join(CLAUDE_NAME_OF.get(n.lower(), n) for n in names)
+    permission = "".join("  %s: %s\n" % (k, "allow" if c in caps else "deny") for k, c in OPENCODE_KEYS)
+    return {
+        "wrappers/claude/%s.md" % name: "---\nname: %s\ndescription: %s\ntools: %s\n---\nYou are %s. Load the skill and use the engine.\n"
+                                        % (name, json.dumps(desc), claude_tools, name),
+        "wrappers/codex/%s.toml" % name: 'name = "%s"\ndescription = %s\n'
+                                         'developer_instructions = """\nYou are %s.\nLoad the skill and use the engine.\n"""\n'
+                                         % (name, json.dumps(desc), name),
+        "wrappers/opencode/%s.md" % name: "---\ndescription: %s\nmode: subagent\npermission:\n%s---\n"
+                                          "You are %s. Load the skill and use the engine.\n" % (json.dumps(desc), permission, name),
+        "wrappers/hermes/SOUL.md": "# %s\n\n%s\n\nLoad the skill and use the engine.\n" % (name, desc)}
+
+def write_wrappers(agent_dir, caps=None, skip=(), replace=None):
+    """Writes wrapper_texts into agent_dir. skip: tools to leave out; replace: {relative path: text or callable(text)}."""
+    for rel, text in wrapper_texts(agent_dir, caps).items():
+        if any(rel.startswith("wrappers/%s/" % t) for t in skip): continue
+        r = (replace or {}).get(rel)
+        text = r(text) if callable(r) else (r if r is not None else text)
+        fp = os.path.join(agent_dir, *rel.split("/")); os.makedirs(os.path.dirname(fp), exist_ok=True)
+        E.wtext(fp, text)
+
+AGENT_MD = ("---\nname: code-scout\ndescription: Reads a repository read-only and explains it. Use when the user asks for an overview.\n"
+            "goal: Explain the repository structure with file and line evidence.\ntools: [glob, grep, read_file]\n"
+            "success_criteria:\n  - at least 2 file:line citations\n  - no file changes (read-only)\n---\n# Code Scout\n"
+            "## Tools\n- glob: map the structure / grep: find places / read_file: confirm lines\n"
+            "## Memory & Handoff\nRemember the topic of earlier turns and hand open questions to the next agent.\n")
+S1 = {"id": "overview", "turns": [{"user": "Give me an overview of this repo"}], "expected_tools": ["glob"],
+      "must_include": ["tests"], "expected_outcome": "an overview with file:line evidence"}
+S2 = {"id": "drill", "turns": [{"user": "Give me an overview"}, {"user": "Explain the test folder you just mentioned"}],
+      "expected_tools": ["grep", "read_file"], "must_include": ["test"],
+      "expected_outcome": ["explains the test folder from the earlier turn", "no file changes"]}
+
+HERMES_ROW = "parity-permissions-hermes"
+
+def ids(r, attr="failed"):
+    return {c["id"] for c in getattr(r, attr)}
+
+def row(r, cid):
+    return next(c for c in r.checks if c["id"] == cid)
+
+def tool_status(path):
+    return {t: s["status"] for t, s in eva.parity_status(path).items()}
+
+class TestTomlReader(unittest.TestCase):
+    def ok(self, text, want):
+        self.assertEqual(eva.parse_flat_toml(text), want, text)
+    def bad(self, text, frag=""):
+        with self.assertRaises(eva.TomlError) as cm: eva.parse_flat_toml(text)
+        self.assertIn(frag, str(cm.exception), text)
+
+    def test_empty_and_comments(self):
+        self.ok("", {}); self.ok("\n\n", {}); self.ok("# only a comment\n", {}); self.ok("  # indented comment", {})
+        self.ok('a = "x" # trailing comment\n# next\nb = 1', {"a": "x", "b": 1})
+
+    def test_scalars(self):
+        self.ok('s = "hi"\nl = \'lit\\n\'\ni = -42\nf = 1.5\ne = 1e3\nu = 1_000\nt = true\nn = false\n',
+                {"s": "hi", "l": "lit\\n", "i": -42, "f": 1.5, "e": 1000.0, "u": 1000, "t": True, "n": False})
+
+    def test_basic_string_escapes(self):
+        self.ok(r's = "a\tb\n\"q\" \\ \u00e9 \U0001F600 \b\f\r"', {"s": 'a\tb\n"q" \\ \u00e9 \U0001F600 \b\f\r'})
+        self.ok(r's = "\uAC00"', {"s": chr(0xAC00)})
+
+    def test_multiline_basic_string(self):
+        self.ok('d = """\nline one\nline two\n"""\n', {"d": "line one\nline two\n"})
+        self.ok('d = """a\\\n    b"""', {"d": "ab"})  # line-ending backslash trims the next line's indentation
+        self.ok('d = """say ""hi"""""', {"d": 'say ""hi""'})
+        self.ok('d = """\r\na\r\nb"""', {"d": "a\nb"})
+        self.ok('d = """a \\"""b"""', {"d": 'a """b'})
+
+    def test_literal_strings(self):
+        self.ok("p = 'C:\\path\\x'", {"p": "C:\\path\\x"})
+        self.ok("d = '''\nraw \\n text\n'''", {"d": "raw \\n text\n"})
+
+    def test_arrays(self):
+        self.ok('a = [1, 2, 3]\nb = ["x", \'y\']\nc = []\nd = [\n  "m", # c\n  "n",\n]\n',
+                {"a": [1, 2, 3], "b": ["x", "y"], "c": [], "d": ["m", "n"]})
+
+    def test_rejects_tables_and_keys(self):
+        self.bad("[table]\na = 1", "tables are not supported"); self.bad("[[x]]\na = 1", "tables")
+        self.bad("a.b = 1", "dotted key"); self.bad('"a" = 1', "quoted keys"); self.bad("a = {x = 1}", "inline tables")
+        self.bad("a = 1\na = 2", "duplicate key 'a'")
+        self.bad("= 1", "expected a bare key"); self.bad("a 1", "expected '='")
+
+    def test_rejects_bad_values(self):
+        self.bad("a =", "missing value"); self.bad("a = bare", "unsupported value")
+        self.bad("a = 2020-01-01", "unsupported value"); self.bad("a = 0x1F", "unsupported value")
+        self.bad("a = inf", "unsupported value"); self.bad("a = 01", "unsupported value")
+        self.bad('a = "x" y', "unexpected text after the value")
+        self.bad('a = [1 2]', "expected ',' or ']'"); self.bad("a = [1, 2", "unterminated array")
+
+    def test_rejects_bad_strings(self):
+        self.bad('a = "open', "unterminated string"); self.bad("a = 'open", "unterminated literal")
+        self.bad('a = """open', "unterminated multi-line"); self.bad("a = '''open", "unterminated multi-line")
+        self.bad('a = "bad \\q"', "invalid escape"); self.bad('a = "\\u12"', "invalid \\u escape")
+        self.bad('a = "\\uD800"', "not a Unicode scalar"); self.bad('a = "\\U00110000"', "not a Unicode scalar")
+        self.bad('a = "tab\x01"', "control character"); self.bad('a = "x\ny"', "unterminated string")
+        self.bad('a = """\\\n"""x', "unexpected text")
+
+    def test_rejects_bom_and_lone_cr(self):
+        self.bad("\ufeffa = 1", "byte order mark"); self.bad('a = """x\ry"""', "lone carriage return")
+        self.bad("a = 1 # c\x01ommen", "control character in comment")
+
+    def test_error_names_the_line(self):
+        self.bad('a = 1\nb = 2\nc = bare', "line 3")
+        self.bad('d = """\nx\n"""\ne = bare', "line 4")
+
+class TestSkillParity(E.SkillMixin, unittest.TestCase):
+    def skill_dir(self, name="word-count"):
+        return os.path.join(self.tmp, name)
+
+    def failed_rows(self, r):
+        return {i for i in ids(r) if i.startswith("parity-")}
+
+    def test_base_skill_passes_every_parity_row_for_all_four_tools(self):
+        r = self.skill()
+        self.assertEqual(r.verdict, "PASS", r.failed)
+        rows = {c["id"]: c["status"] for c in r.checks if c["category"] == "parity"}
+        self.assertEqual(rows, {"parity-skill-claude": "pass", "parity-skill-codex": "pass", "parity-skill-opencode": "pass",
+                                "parity-skill-hermes": "pass", "parity-invocation-control": "n/a", "parity-invocation-hermes": "n/a"})
+        self.assertEqual(tool_status(self.skill_dir()), {t: "pass" for t in eva.TOOLS})
+        for t in eva.TOOLS: self.assertIn("[%s]" % t, row(r, "parity-skill-" + t)["reason"])
+
+    def test_every_parity_row_is_required(self):
+        r = self.skill(extra="disable-model-invocation: true\n")
+        for c in r.checks:
+            if c["id"].startswith("parity-") and c["id"] != "parity-invocation-hermes": self.assertTrue(c["must"], c["id"])
+
+    def test_claude_rejects_missing_description_reserved_word_xml_and_length(self):
+        r = self.skill(raw="---\nname: word-count\n---\n# x\n")
+        self.assertIn("parity-skill-claude", ids(r)); self.assertIn("description: non-empty string required", row(r, "parity-skill-claude")["reason"])
+        self.assertIn("parity-skill-claude", ids(self.skill(name="claude-helper")))
+        raw = E.GOOD_FM.format(name="word-count", extra="", body="").replace("one text file", "one <file> tag")
+        self.assertIn("parity-skill-claude", ids(self.skill(raw=raw)))
+        raw = E.GOOD_FM.format(name="word-count", extra="", body="").replace("Counts words", "Counts words " + "x" * 1100)
+        self.assertIn("parity-skill-claude", ids(self.skill(raw=raw)))
+
+    def openai_yaml(self, text, **kw):
+        return self.skill(files={"agents/openai.yaml": text}, **kw)
+
+    def test_codex_openai_yaml_valid_forms_pass(self):
+        for text in ("policy:\n  allow_implicit_invocation: false\n", "policy:\n  allow_implicit_invocation: true\n",
+                     "# only a comment\n", ""):
+            r = self.openai_yaml(text); self.assertEqual(r.verdict, "PASS", (text, r.failed))
+            self.assertIn("agents/openai.yaml", row(r, "parity-skill-codex")["reason"])
+            self.assertTrue(row(r, "english-tool-files")["passed"])
+            shutil.rmtree(self.skill_dir())
+
+    def test_codex_openai_yaml_invalid_forms_fail_only_codex(self):
+        for text, frag in (("policy:\n  allow_implicit_invocation: \"false\"\n", "unquoted boolean"),
+                           ("policy:\n  allow_implicit_invocation: maybe\n", "unquoted boolean"),
+                           ("policy: strict\n", "policy must be a mapping"),
+                           ("policy:\n  deep:\n    x: 1\n", "cannot be parsed"),
+                           ("just text\n", "cannot be parsed"), ("a: 1\n---\nb: 2\n", "document markers")):
+            r = self.openai_yaml(text)
+            self.assertEqual(self.failed_rows(r), {"parity-skill-codex"}, text)
+            self.assertIn(frag, row(r, "parity-skill-codex")["reason"], text)
+            self.assertEqual(tool_status(self.skill_dir()), {"claude": "pass", "codex": "fail", "opencode": "pass", "hermes": "pass"})
+            shutil.rmtree(self.skill_dir())
+
+    def test_codex_parse_error_lines_are_relative_to_the_file(self):
+        r = self.openai_yaml("a: 1\nb: 2\nc d\n")
+        self.assertIn("line 3:", row(r, "parity-skill-codex")["reason"]); self.assertNotIn("line 4", row(r, "parity-skill-codex")["reason"])
+
+    def test_codex_directory_named_openai_yaml_is_not_a_file(self):
+        r = self.skill(files={"agents/openai.yaml/x.txt": "x"})
+        self.assertIn("parity-skill-codex", ids(r))
+
+    def test_opencode_name_regex_is_stricter_than_the_skill_name_rule(self):
+        for name in ("word--count", "word_count", "Word-Count", "word-count-", "-word"):
+            raw = E.GOOD_FM.format(name=name, extra="", body="")
+            r = self.skill(raw=raw, name="word-count")
+            self.assertIn("parity-skill-opencode", ids(r), name); shutil.rmtree(self.skill_dir())
+        self.assertNotIn("parity-skill-opencode", ids(self.skill(name="a1-b2")))
+
+    def test_opencode_folder_name_is_exact_not_nfkc(self):
+        # eva's name rule folds NFKC (fullwidth passes name-matches-folder); OpenCode needs the exact folder name
+        r = self.skill(raw=E.GOOD_FM.format(name="\uff57\uff4f\uff52\uff44-\uff43\uff4f\uff55\uff4e\uff54", extra="", body=""), name="word-count")
+        self.assertTrue(row(r, "name-matches-folder")["passed"])
+        self.assertIn("parity-skill-opencode", ids(r))
+        r = self.skill(raw=E.GOOD_FM.format(name="other-name", extra="", body=""), name="word-count")
+        self.assertIn("must equal the folder name", row(r, "parity-skill-opencode")["reason"])
+
+    def test_opencode_metadata_values_must_be_real_strings(self):
+        for extra in ("metadata:\n  version: 1.0\n", "metadata:\n  beta: yes\n", "metadata:\n  released: 2025-01-01\n"):
+            r = self.skill(extra=extra)
+            self.assertTrue(row(r, "field-types")["passed"], extra)  # the spec reader (strictyaml) accepts it
+            self.assertIn("parity-skill-opencode", ids(r), extra); self.assertIn("quote it", row(r, "parity-skill-opencode")["reason"])
+            shutil.rmtree(self.skill_dir())
+        for extra in ("metadata:\n  version: \"1.0.0\"\n", "metadata:\n  version: 1.0.0\n", "metadata:\n  author: org\n"):
+            self.assertEqual(self.skill(extra=extra).verdict, "PASS", extra); shutil.rmtree(self.skill_dir())
+
+    def test_opencode_autoinvoke_value_must_be_a_string_true_or_false(self):
+        for val, good in (('"false"', True), ('"true"', True), ("false", False), ('"no"', False)):
+            r = self.skill(extra="metadata:\n  opencode/autoinvoke: %s\n" % val)
+            self.assertEqual("parity-skill-opencode" not in ids(r), good, val); shutil.rmtree(self.skill_dir())
+
+    def test_hermes_metadata_mapping_is_refused_with_a_clear_reason(self):
+        for extra in ("metadata:\n  hermes:\n    tags: [a]\n", "metadata:\n  hermes: {tags: [a]}\n", "metadata:\n  hermes: [a, b]\n"):
+            r = self.skill(extra=extra)
+            self.assertIn("parity-skill-hermes", ids(r), extra)
+            self.assertIn("metadata.hermes", row(r, "parity-skill-hermes")["reason"]); self.assertEqual(r.verdict, "FAIL")
+            shutil.rmtree(self.skill_dir())
+        r = self.skill(extra="metadata:\n  hermes: terminal\n")
+        self.assertEqual(r.verdict, "PASS", r.failed)
+
+    def test_hermes_needs_name_and_description(self):
+        r = self.skill(raw="---\nname: word-count\n---\n# x\n")
+        self.assertIn("parity-skill-hermes", ids(r))
+
+    def disabled(self, metadata="", yaml_text=None, value="true"):
+        extra = "disable-model-invocation: %s\n%s" % (value, ("metadata:\n" + metadata) if metadata else "")
+        return self.skill(extra=extra, files={"agents/openai.yaml": yaml_text} if yaml_text else None)
+
+    def test_disable_model_invocation_alone_fails_naming_both_missing_controls(self):
+        r = self.disabled()
+        self.assertEqual(r.verdict, "FAIL"); self.assertEqual(self.failed_rows(r), {"parity-invocation-control"})
+        why = row(r, "parity-invocation-control")["reason"]
+        self.assertIn("opencode/autoinvoke", why); self.assertIn("allow_implicit_invocation", why)
+        self.assertEqual(tool_status(self.skill_dir())["opencode"], "fail"); self.assertEqual(tool_status(self.skill_dir())["claude"], "fail")
+
+    def test_one_missing_equivalent_still_fails(self):
+        r = self.disabled(metadata='  opencode/autoinvoke: "false"\n')
+        why = row(r, "parity-invocation-control")["reason"]
+        self.assertIn("[codex]", why); self.assertNotIn("[opencode] metadata", why); shutil.rmtree(self.skill_dir())
+        r = self.disabled(yaml_text="policy:\n  allow_implicit_invocation: false\n")
+        why = row(r, "parity-invocation-control")["reason"]
+        self.assertIn("[opencode]", why); self.assertNotIn("[codex] agents", why); shutil.rmtree(self.skill_dir())
+        r = self.disabled(metadata='  opencode/autoinvoke: "false"\n', yaml_text="policy:\n  allow_implicit_invocation: true\n")
+        self.assertIn("parity-invocation-control", ids(r))
+
+    def test_both_equivalents_pass_and_hermes_needs_a_human(self):
+        r = self.disabled(metadata='  opencode/autoinvoke: "false"\n', yaml_text="policy:\n  allow_implicit_invocation: false\n")
+        self.assertEqual(r.failed, []); self.assertEqual(r.verdict, "REVIEW")
+        self.assertEqual([c["id"] for c in r.needs_review], ["parity-invocation-hermes"])
+        self.assertIn("Hermes", row(r, "parity-invocation-hermes")["reason"])
+        self.assertEqual(tool_status(self.skill_dir()), {"claude": "pass", "codex": "pass", "opencode": "pass", "hermes": "review"})
+
+    def test_disable_model_invocation_false_is_not_a_reliance(self):
+        r = self.disabled(value="false")
+        self.assertEqual(r.verdict, "PASS", r.failed); self.assertEqual(row(r, "parity-invocation-control")["status"], "n/a")
+
+    def test_unquoted_autoinvoke_false_does_not_count_as_the_string(self):
+        r = self.disabled(metadata="  opencode/autoinvoke: false\n", yaml_text="policy:\n  allow_implicit_invocation: false\n")
+        self.assertIn("parity-skill-opencode", ids(r))
+
+    def test_english_rule_covers_openai_yaml_and_its_escapes(self):
+        r = self.openai_yaml("interface:\n  display_name: %s\n" % KO)
+        self.assertIn("english-tool-files", ids(r)); self.assertIn("agents/openai.yaml:2", row(r, "english-tool-files")["reason"])
+        self.assertIn("english-tool-files", ids(self.skill(files={"agents/openai.yaml": 'interface:\n  display_name: "\\uAC00"\n'}, name="word-count2")))
+        self.assertTrue(eva.english_violations(os.path.join(self.tmp, "word-count2")))
+
+    def test_status_line_and_violations(self):
+        self.skill(name="word-count", raw=E.GOOD_FM.format(name="other", extra="", body=""))
+        d = self.skill_dir()
+        self.assertEqual(eva.parity_line(eva.parity_status(d)), "claude=pass codex=pass opencode=fail hermes=pass")
+        self.assertEqual(len(eva.parity_violations(d)), 1); self.assertTrue(eva.parity_violations(d)[0].startswith("[opencode]"))
+
+    def test_unusable_skill_md_fails_every_tool(self):
+        d = os.path.join(self.tmp, "broken"); os.makedirs(d); E.wtext(os.path.join(d, "SKILL.md"), "no frontmatter\n")
+        self.assertEqual(tool_status(d), {t: "fail" for t in eva.TOOLS})
+        self.assertEqual(eva.parity_report(os.path.join(self.tmp, "nothing-here")).checks, [])
+
+class AgentBase(E.TmpMixin):
+    def agent(self, wrappers=True, md=None, caps=None, skip=(), replace=None):
+        d = os.path.join(self.tmp, "code-scout"); os.makedirs(os.path.join(d, "scenarios"), exist_ok=True)
+        E.wtext(os.path.join(d, "AGENT.md"), md or AGENT_MD)
+        E.wtext(os.path.join(d, "scenarios", "01.json"), json.dumps(S1, indent=1))
+        E.wtext(os.path.join(d, "scenarios", "02.json"), json.dumps(S2, indent=1))
+        if wrappers: write_wrappers(d, caps=caps, skip=skip, replace=replace)
+        return d, eva.check(d)
+
+    def only(self, r, *want):
+        """The failing parity/english rows are exactly want. parity-permissions-hermes always fails (fail closed, no verified
+        Hermes permission format) and is checked by test_hermes_permissions_always_fail_closed."""
+        self.assertEqual({i for i in ids(r) if i.startswith(("parity-", "english-"))} - {HERMES_ROW}, set(want),
+                         [c["reason"] for c in r.failed])
+
+    def consistent(self, r):
+        """Everything is consistent except the Hermes permission row, which always fails: the verdict is FAIL because of it."""
+        self.only(r)
+        self.assertIn(HERMES_ROW, ids(r)); self.assertEqual(r.verdict, "FAIL")
+
+class TestAgentParity(AgentBase, unittest.TestCase):
+    def test_complete_wrappers_are_consistent_and_codex_and_opencode_review_a_read_only_agent(self):
+        d, r = self.agent()
+        self.consistent(r); self.assertEqual(r.kind, "agent")
+        self.assertEqual(tool_status(d), {"claude": "pass", "codex": "review", "opencode": "review", "hermes": "fail"})
+        self.assertEqual(row(r, HERMES_ROW)["status"], "fail")
+        self.assertIn("UNVERIFIED", row(r, HERMES_ROW)["reason"])
+        self.assertEqual(eva.parity_line(eva.parity_status(d)), "claude=pass codex=review opencode=review hermes=fail")
+        for t in eva.TOOLS: self.assertIn("[%s]" % t, row(r, "parity-wrapper-" + t)["reason"])
+
+    def test_missing_wrapper_fails_only_that_tool(self):
+        for tool in eva.TOOLS:
+            d, r = self.agent(skip=(tool,))
+            self.only(r, "parity-wrapper-" + tool); self.assertEqual(r.verdict, "FAIL")
+            self.assertIn("missing wrapper file wrappers/", row(r, "parity-wrapper-" + tool)["reason"])
+            self.assertEqual({t: s for t, s in tool_status(d).items() if s == "fail"}, {tool: "fail", "hermes": "fail"})
+            shutil.rmtree(d)
+
+    def test_no_wrappers_at_all_fails_all_four(self):
+        d, r = self.agent(wrappers=False)
+        self.only(r, *["parity-wrapper-" + t for t in eva.TOOLS]); self.assertEqual(r.verdict, "FAIL")
+
+    def test_opencode_wrapper_file_name_must_be_the_agent_name(self):
+        d, r = self.agent()
+        os.rename(os.path.join(d, "wrappers/opencode/code-scout.md"), os.path.join(d, "wrappers/opencode/scout.md"))
+        self.only(eva.check(d), "parity-wrapper-opencode")
+
+    def test_unparsable_wrappers_fail(self):
+        cases = {"wrappers/claude/code-scout.md": ("no frontmatter at all\n", "frontmatter unusable"),
+                 "wrappers/opencode/code-scout.md": ("---\ndescription: x\n", "frontmatter unusable"),
+                 "wrappers/codex/code-scout.toml": ("[agent]\nname = 'x'\n", "strict flat-TOML reader"),
+                 "wrappers/hermes/SOUL.md": ("   \n", "is empty")}
+        for rel, (text, frag) in cases.items():
+            d, r = self.agent(replace={rel: text})
+            tool = rel.split("/")[1]
+            self.only(r, "parity-wrapper-" + tool); self.assertIn(frag, row(r, "parity-wrapper-" + tool)["reason"], rel)
+            shutil.rmtree(d)
+
+    def test_toml_edge_cases_are_failures_not_guesses(self):
+        for text, frag in (('name = "code-scout"\nname = "x"\n', "duplicate key"), ('name = code-scout\n', "unsupported value"),
+                           ('[mcp_servers.x]\ncommand = "y"\n', "tables are not supported"),
+                           ('name = "code-scout"\ndescription = "x"\ndeveloper_instructions = "a\nb"\n', "unterminated string")):
+            d, r = self.agent(replace={"wrappers/codex/code-scout.toml": text})
+            self.only(r, "parity-wrapper-codex"); self.assertIn(frag, row(r, "parity-wrapper-codex")["reason"], text)
+            shutil.rmtree(d)
+
+    def test_missing_required_keys_fail(self):
+        d, r = self.agent(replace={"wrappers/codex/code-scout.toml": 'name = "code-scout"\ndescription = "x"\n'})
+        self.assertIn("developer_instructions: non-empty string required", row(r, "parity-wrapper-codex")["reason"]); shutil.rmtree(d)
+        d, r = self.agent(replace={"wrappers/claude/code-scout.md": lambda t: t.replace("tools: Glob, Grep, Read\n", "")})
+        self.assertIn("tools:", row(r, "parity-wrapper-claude")["reason"]); shutil.rmtree(d)
+        d, r = self.agent(replace={"wrappers/opencode/code-scout.md": lambda t: re.sub(r"permission:\n(  .*\n)+", "", t)})
+        self.assertIn("permission:", row(r, "parity-wrapper-opencode")["reason"]); shutil.rmtree(d)
+        d, r = self.agent(replace={"wrappers/claude/code-scout.md": lambda t: t.split("---\n")[0] + "---\n" + t.split("---\n")[1] + "---\n"})
+        self.assertIn("prompt body is empty", row(r, "parity-wrapper-claude")["reason"])
+
+    def test_name_and_description_must_match_agent_md(self):
+        edits = {"claude": ("wrappers/claude/code-scout.md", lambda t: t.replace("name: code-scout", "name: other")),
+                 "codex": ("wrappers/codex/code-scout.toml", lambda t: t.replace('name = "code-scout"', 'name = "other"')),
+                 "hermes": ("wrappers/hermes/SOUL.md", lambda t: t.replace("code-scout", "other"))}
+        for tool, (rel, fn) in edits.items():
+            d, r = self.agent(replace={rel: fn})
+            self.only(r, "parity-wrapper-" + tool); shutil.rmtree(d)
+        for tool, rel in (("claude", "wrappers/claude/code-scout.md"), ("codex", "wrappers/codex/code-scout.toml"),
+                          ("opencode", "wrappers/opencode/code-scout.md"), ("hermes", "wrappers/hermes/SOUL.md")):
+            d, r = self.agent(replace={rel: lambda t: t.replace("Reads a repository", "Scans a repository")})
+            self.only(r, "parity-wrapper-" + tool); self.assertIn("description", row(r, "parity-wrapper-" + tool)["reason"])
+            shutil.rmtree(d)
+        d, r = self.agent(replace={"wrappers/opencode/code-scout.md": lambda t: t.replace("mode: subagent", "name: other\nmode: subagent")})
+        self.only(r, "parity-wrapper-opencode")
+
+    def test_description_comparison_ignores_whitespace_layout(self):
+        block = "description: >\n  Reads a repository read-only\n  and explains   it. Use when the user\n  asks for an overview.\n"
+        d, r = self.agent(replace={"wrappers/claude/code-scout.md": lambda t: re.sub(r'description: ".*"\n', block, t)})
+        self.consistent(r)
+
+    def test_invalid_optional_fields_fail(self):
+        for rel, fn, tool in (("wrappers/opencode/code-scout.md", lambda t: t.replace("subagent", "sidekick"), "opencode"),
+                              ("wrappers/claude/code-scout.md", lambda t: t.replace("---\nYou", "model:\n---\nYou"), "claude"),
+                              ("wrappers/codex/code-scout.toml", lambda t: t + 'model = ""\n', "codex")):
+            d, r = self.agent(replace={rel: fn}); self.only(r, "parity-wrapper-" + tool); shutil.rmtree(d)
+
+    def test_hermes_config_yaml_is_optional_and_empty_is_refused(self):
+        d, r = self.agent(); E.wtext(os.path.join(d, "wrappers/hermes/config.yaml"), "# Hermes profile settings\nskills:\n  x: y\n")
+        self.consistent(eva.check(d))
+        E.wtext(os.path.join(d, "wrappers/hermes/config.yaml"), "\n")
+        self.only(eva.check(d), "parity-wrapper-hermes")
+
+    def test_agent_name_must_be_a_portable_file_stem(self):
+        d, r = self.agent(md=AGENT_MD.replace("name: code-scout", "name: Code_Scout"))
+        self.assertIn("parity-agent-name", ids(r)); self.assertIn("[claude/codex/opencode/hermes]", row(r, "parity-agent-name")["reason"])
+
+class TestAgentPermissions(AgentBase, unittest.TestCase):
+    WRITE_MD = AGENT_MD.replace("tools: [glob, grep, read_file]", "tools: [read_file, write_file, web_fetch]").replace(
+        "name: code-scout", "name: code-scout")
+
+    def test_capability_table(self):
+        self.assertEqual(eva.capabilities(["read_file", "Grep", "WebFetch", "websearch", "Bash", "Edit", "Task", "Skill"]),
+                         ({"read", "web_fetch", "web_search", "shell", "write", "delegate", "skill"}, []))
+        self.assertEqual(eva.capabilities(["read_file", "mcp__x__tool", "TodoWrite"]), ({"read"}, ["mcp__x__tool"]))
+        self.assertEqual(eva.capabilities([]), (set(), []))
+
+    def test_matching_write_web_agent_passes(self):
+        d, r = self.agent(md=self.WRITE_MD)
+        self.consistent(r)
+        self.assertEqual(row(r, "parity-permissions-codex")["status"], "needs-review")
+        self.assertIn("edit: allow", open(os.path.join(d, "wrappers/opencode/code-scout.md")).read())
+
+    def test_wrapper_grants_more_than_agent_md_fails_per_tool(self):
+        more = {"read", "write", "shell", "web_fetch", "web_search"}
+        for tool in ("claude", "opencode"):
+            d, r = self.agent(caps=more, skip=tuple(t for t in eva.TOOLS if t != tool))
+            self.assertIn("parity-permissions-" + tool, ids(r), tool)
+            self.assertIn("AGENT.md tools need" if tool != "claude" else "differ from the AGENT.md tools",
+                          row(r, "parity-permissions-" + tool)["reason"]); shutil.rmtree(d)
+
+    def test_wrapper_grants_less_than_agent_md_fails(self):
+        d, r = self.agent(md=self.WRITE_MD, caps={"read"})
+        self.assertTrue({"parity-permissions-claude", "parity-permissions-opencode"} <= ids(r))
+
+    def test_codex_reviews_what_agent_md_lacks_whatever_the_other_wrappers_grant(self):
+        d, r = self.agent(md=self.WRITE_MD.replace("web_fetch", "bash"), caps={"read", "write", "web_fetch"})
+        self.assertNotIn("parity-permissions-codex", ids(r)); self.assertIn("parity-permissions-claude", ids(r))
+        self.assertEqual(row(r, "parity-permissions-codex")["reason"],
+                         "needs-review: [codex] Codex cannot restrict web_fetch, web_search, delegate, skill per agent; the agent "
+                         "runs with the parent session's sandbox")
+
+    def test_opencode_permission_values_and_extras(self):
+        for old, new, frag in (("edit: deny", "edit: sometimes", "permission.edit must be one of allow/ask/deny"),
+                               ("webfetch: deny", "webfetch: deny\n  foo: deny", "['foo']")):
+            d, r = self.agent(replace={"wrappers/opencode/code-scout.md": lambda t: t.replace(old, new)})
+            self.assertIn("parity-wrapper-opencode", ids(r), new); self.assertIn(frag, row(r, "parity-wrapper-opencode")["reason"])
+            shutil.rmtree(d)
+        d, r = self.agent(replace={"wrappers/opencode/code-scout.md": lambda t: t.replace("bash: deny", "bash: ask")})
+        self.assertIn("parity-permissions-opencode", ids(r))  # ask means the agent may run shell commands
+
+    def test_unmapped_agent_tool_fails_every_permission_row_with_the_name(self):
+        d, r = self.agent(md=AGENT_MD.replace("[glob, grep, read_file]", "[read_file, crm_lookup]"))
+        for t in ("claude", "codex", "opencode"):
+            self.assertIn("parity-permissions-" + t, ids(r)); self.assertIn("crm_lookup", row(r, "parity-permissions-" + t)["reason"])
+        self.assertEqual(row(r, HERMES_ROW)["status"], "fail")
+
+    def test_unmapped_claude_wrapper_tool_fails_the_wrapper(self):
+        d, r = self.agent(replace={"wrappers/claude/code-scout.md": lambda t: t.replace("Glob, Grep, Read", "Read, CrmLookup")})
+        self.assertIn("capability table", row(r, "parity-wrapper-claude")["reason"]); self.assertIn("parity-wrapper-claude", ids(r))
+
+    def test_tools_as_yaml_list_are_accepted(self):
+        d, r = self.agent(md=AGENT_MD.replace("[glob, grep, read_file]", "[grep, read_file]"),
+                          replace={"wrappers/claude/code-scout.md": lambda t: t.replace("tools: Grep, Read", "tools:\n  - Read\n  - Grep")})
+        self.consistent(r)
+
+class TestWrapperEnglish(AgentBase, unittest.TestCase):
+    def test_hangul_in_each_wrapper_fails_english_wrappers(self):
+        for rel in ("wrappers/claude/code-scout.md", "wrappers/codex/code-scout.toml", "wrappers/opencode/code-scout.md",
+                    "wrappers/hermes/SOUL.md"):
+            d, r = self.agent(replace={rel: lambda t: t + "\n%s\n" % KO})
+            self.assertIn("english-wrappers", ids(r), rel); self.assertIn(rel + ":", row(r, "english-wrappers")["reason"])
+            self.assertIn("[Hangul]", row(r, "english-wrappers")["reason"]); self.assertEqual(r.verdict, "FAIL")
+            shutil.rmtree(d)
+
+    def test_escaped_hangul_in_toml_and_yaml_is_decoded(self):
+        d, r = self.agent(replace={"wrappers/codex/code-scout.toml": lambda t: t + 'model = "\\uAC00"\n'})
+        self.assertIn("english-wrappers", ids(r)); shutil.rmtree(d)
+        d, r = self.agent(); E.wtext(os.path.join(d, "wrappers/hermes/config.yaml"), 'name: "\\uAC00"\n')
+        self.assertIn("english-wrappers", ids(eva.check(d)))
+
+    def test_hangul_file_name_fails(self):
+        d, r = self.agent(); E.wtext(os.path.join(d, "wrappers", "hermes", KO + ".md"), "x\n")
+        self.assertIn("(file name) [Hangul]", row(eva.check(d), "english-wrappers")["reason"])
+
+    def test_english_wrappers_pass_and_missing_wrappers_are_not_applicable(self):
+        d, r = self.agent(); self.assertTrue(row(r, "english-wrappers")["passed"])
+
+    def test_no_wrappers_folder_means_english_wrappers_is_not_applicable(self):
+        d, r = self.agent(wrappers=False)
+        self.assertEqual(row(r, "english-wrappers")["status"], "n/a")
+
+class TestIndexAndGoldenParity(E.SkillMixin, unittest.TestCase):
+    def test_index_records_english_and_parity_per_unit(self):
+        self.skill()
+        self.skill(name="odd", raw=E.GOOD_FM.format(name="other", extra="", body=""))
+        a = os.path.join(self.tmp, "agents", "code-scout"); os.makedirs(os.path.join(a, "scenarios"))
+        E.wtext(os.path.join(a, "AGENT.md"), AGENT_MD)
+        for n, s in (("01", S1), ("02", S2)): E.wtext(os.path.join(a, "scenarios", n + ".json"), json.dumps(s))
+        write_wrappers(a, skip=("hermes",))
+        reg, md = eva.build_index(self.tmp)
+        by = {e["name"]: e for e in reg}
+        self.assertEqual(by["word-count"]["parity"], {t: "pass" for t in eva.TOOLS}); self.assertEqual(by["word-count"]["english"], "pass")
+        self.assertEqual(by["other"]["parity"]["opencode"], "fail")
+        self.assertEqual(by["code-scout"]["parity"], {"claude": "pass", "codex": "review", "opencode": "review", "hermes": "fail"})
+        self.assertEqual(by["code-scout"]["english"], "pass")
+        self.assertIn("| english | parity |", md); self.assertIn("claude=pass codex=review opencode=review hermes=fail", md)
+
+    def test_golden_skills_pass_every_parity_row_and_golden_agents_fail_only_on_missing_wrappers(self):
+        for rel in ("skills/csv-cleaner", "skills/korean-proofreader", "skills/pdf-summarizer"):
+            r = eva.check(E.p("golden", *rel.split("/")))
+            self.assertEqual({c["id"] for c in r.checks if c["category"] == "parity" and c["status"] == "fail"}, set(), rel)
+            self.assertEqual(tool_status(E.p("golden", *rel.split("/"))), {t: "pass" for t in eva.TOOLS}, rel)
+        for rel in ("agents/code-reviewer", "agents/research-assistant"):
+            r = eva.check(E.p("golden", *rel.split("/")))
+            self.assertEqual({c["id"] for c in r.failed if c["category"] == "parity"},
+                             {"parity-wrapper-" + t for t in eva.TOOLS} | {HERMES_ROW}, rel)
+            self.assertEqual(tool_status(E.p("golden", *rel.split("/"))), {t: "fail" for t in eva.TOOLS}, rel)
+
+class CliBase(T.Base):
+    def cli(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = se.main(list(argv))
+        return rc, out.getvalue(), err.getvalue()
+
+class TestValidateAndPlan(CliBase):
+    def test_validate_prints_the_per_tool_parity_line(self):
+        rc, out, _ = self.cli("validate", T.make_skill(self.tmp))
+        self.assertEqual(rc, 0, out); self.assertIn("multi-tool parity: claude=pass codex=pass opencode=pass hermes=pass", out)
+
+    def test_parity_failure_is_a_validation_problem_and_names_the_tool(self):
+        d = T.make_skill(self.tmp)
+        with open(os.path.join(d, "SKILL.md"), encoding="utf-8") as f: text = f.read()
+        with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as f: f.write(text.replace("name: branch-setup", "name: branch_setup"))
+        rc, out, _ = self.cli("validate", d)
+        self.assertEqual(rc, 1); self.assertIn("multi-tool parity rule: [opencode]", out)
+        self.assertIn("multi-tool parity: claude=pass codex=pass opencode=fail hermes=pass", out)
+
+    def test_live_gate_refuses_a_parity_failure(self):
+        d = T.make_skill(self.tmp, extra_files={"agents/openai.yaml": "policy: strict\n"})
+        spec, problems = se.load_eval_set(d)
+        self.assertTrue(any(p.startswith("multi-tool parity rule: [codex]") for p in problems), problems)
+        with self.assertRaises(se.EvalError) as cm:
+            se.check_live_gates(mock.Mock(cmd="run", strict_budget=True), spec, problems, self.ws, None, [], se.DEFAULT_TOKENS, {}, 100.0)
+        self.assertIn("validation problem", str(cm.exception))
+
+    def test_validate_prints_the_hermes_review_item(self):
+        d = T.make_skill(self.tmp, extra_files={"agents/openai.yaml": "policy:\n  allow_implicit_invocation: false\n"})
+        with open(os.path.join(d, "SKILL.md"), encoding="utf-8") as f: text = f.read()
+        with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write(text.replace("---\n# Branch", 'disable-model-invocation: true\nmetadata:\n  opencode/autoinvoke: "false"\n---\n# Branch', 1))
+        rc, out, _ = self.cli("validate", d)
+        self.assertEqual(rc, 3, out); self.assertIn("review: needs-review: [hermes] disable-model-invocation: true has no verified Hermes equivalent", out)
+        self.assertIn("hermes=review", out); self.assertIn("RULE REVIEW NOT RECORDED", out)
+
+    def test_validate_reuses_the_eva_functions(self):
+        with mock.patch.object(eva, "parity_violations", return_value=["[codex] stub problem"]) as m:
+            rc, out, _ = self.cli("validate", T.make_skill(self.tmp))
+        self.assertEqual(rc, 1); self.assertTrue(m.called); self.assertIn("multi-tool parity rule: [codex] stub problem", out)
+        import inspect
+        for fn in (se.load_eval_set, se.plan_text, se.build_benchmark):
+            src = inspect.getsource(fn)
+            self.assertNotIn("PORTABLE_NAME_RE", src); self.assertNotIn("parse_flat_toml", src)
+
+    def test_plan_shows_parity_and_tool_coverage_for_the_four_tools(self):
+        rc, out, _ = self.cli("plan", T.make_skill(self.tmp), "--workspace", self.ws)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("multi-tool parity (static, eva.py): claude=pass codex=pass opencode=pass hermes=pass", out)
+        self.assertIn("tool coverage (dynamic): claude=planned, codex=planned, opencode=not-run: engine not available, "
+                      "hermes=not-run: engine not available", out)
+
+    def test_plan_with_one_engine_marks_the_other_not_selected(self):
+        rc, out, _ = self.cli("plan", T.make_skill(self.tmp), "--workspace", self.ws, "--engines", "claude")
+        self.assertIn("claude=planned, codex=not-run: engine not selected, opencode=not-run: engine not available", out)
+
+class TestEnginesFailClosed(CliBase):
+    def test_engine_table_is_unchanged(self):
+        self.assertEqual(sorted(se.ENGINES), ["claude", "codex"])
+        self.assertEqual(se.TOOL_ENGINES, {"claude": "claude", "codex": "codex", "opencode": None, "hermes": None})
+
+    def test_opencode_and_hermes_are_refused_with_a_clear_message(self):
+        for name, label in (("opencode", "OpenCode"), ("hermes", "Hermes Agent")):
+            for cmd in ("plan", "estimate", "run"):
+                rc, out, err = self.cli(cmd, T.make_skill(self.tmp), "--engines", name)
+                self.assertEqual(rc, 2, (cmd, name)); self.assertIn("not available", err); self.assertIn(label, err)
+                self.assertIn("never faked", err); self.assertIn("claude|codex", err)
+                shutil.rmtree(os.path.join(self.tmp, "branch-setup"))
+
+    def test_a_mixed_list_is_refused_as_a_whole(self):
+        rc, out, err = self.cli("plan", T.make_skill(self.tmp), "--engines", "claude,opencode")
+        self.assertEqual(rc, 2); self.assertEqual(out, ""); self.assertIn("engine 'opencode'", err)
+
+    def test_live_and_loop_refuse_before_any_gate_or_call(self):
+        for argv in (("run", "--live", "--budget-usd", "5"), ("loop", "--live", "--budget-usd", "5"),
+                     ("run", "--live", "--dry-run", "--budget-usd", "5")):
+            rc, out, err = self.cli(argv[0], T.make_skill(self.tmp), "--engines", "hermes", *argv[1:])
+            self.assertEqual(rc, 2, argv); self.assertIn("not available", err)
+            shutil.rmtree(os.path.join(self.tmp, "branch-setup"))
+        self.assertEqual(self.status_calls, [])
+
+    def test_unknown_engines_are_still_unknown(self):
+        rc, _, err = self.cli("plan", T.make_skill(self.tmp), "--engines", "gemini")
+        self.assertEqual(rc, 2); self.assertIn("unknown engine 'gemini'", err); self.assertNotIn("not available", err)
+
+class TestBuilderParityGate(T.Base):
+    def spec(self, **kw):
+        kw.setdefault("evals", T.evals_doc(human=False))
+        return T.Base.spec(self, **kw)
+
+    def loop(self, builder, spec, **kw):
+        kw.setdefault("max_iterations", 3)
+        return se.loop(spec, self.ws, self.engines(regress=True)[:1], self.grader(), builder, runs=1, log=T.quiet, **kw)
+
+    def rewrite(self, spec, fn, rel="SKILL.md"):
+        fp = os.path.join(spec["skill_dir"], rel); os.makedirs(os.path.dirname(fp), exist_ok=True)
+        old = open(fp, encoding="utf-8").read() if os.path.exists(fp) else ""
+        with open(fp, "w", encoding="utf-8") as f: f.write(fn(old))
+
+    def test_builder_that_breaks_the_name_stops_the_loop_before_anything_else_is_spent(self):
+        spec, _ = self.spec(); calls = []
+        def builder(it, sd):
+            calls.append(it); self.rewrite(spec, lambda t: t.replace("name: branch-setup", "name: Branch_Setup")); return 0
+        r = self.loop(builder, spec)
+        self.assertEqual(r["status"], "builder-parity-missing"); self.assertEqual(r["iteration"], 1)
+        self.assertTrue(r["problems"] and r["problems"][0].startswith("[opencode]"), r["problems"])
+        self.assertEqual(len(calls), 1); self.assertEqual(se.iterations(self.ws), [1])
+
+    def test_each_tool_can_trip_the_gate(self):
+        cases = {"claude": ("SKILL.md", lambda t: t.replace("Creates a git", "Creates a <git>")),
+                 "codex": ("agents/openai.yaml", lambda t: "policy: strict\n"),
+                 "opencode": ("SKILL.md", lambda t: t.replace("---\n# Branch", "metadata:\n  v: 1.0\n---\n# Branch", 1)),
+                 "hermes": ("SKILL.md", lambda t: t.replace("---\n# Branch", "metadata:\n  hermes: [a]\n---\n# Branch", 1))}
+        for tool, (rel, fn) in cases.items():
+            spec, _ = self.spec()
+            r = self.loop(lambda it, sd, rel=rel, fn=fn: self.rewrite(spec, fn, rel) or 0, spec)
+            self.assertEqual(r["status"], "builder-parity-missing", tool)
+            self.assertTrue(any(p.startswith("[%s]" % tool) for p in r["problems"]), (tool, r["problems"]))
+            shutil.rmtree(self.ws, ignore_errors=True); shutil.rmtree(spec["skill_dir"])
+
+    def test_disable_model_invocation_without_equivalents_trips_the_gate(self):
+        spec, _ = self.spec()
+        r = self.loop(lambda it, sd: self.rewrite(spec, lambda t: t.replace("---\n# Branch", "disable-model-invocation: true\n---\n# Branch", 1)) or 0, spec)
+        self.assertEqual(r["status"], "builder-parity-missing"); self.assertIn("disable-model-invocation: true is only honored by Claude Code", r["problems"][0])
+
+    def test_parity_preserving_builder_continues_the_loop(self):
+        spec, _ = self.spec(); seen = []
+        def builder(it, sd):
+            seen.append(it); self.rewrite(spec, lambda t: t + "\nMore detail.\n"); return 0
+        r = self.loop(builder, spec, max_iterations=2)
+        self.assertEqual(r, {"status": "needs-approval", "iteration": 2}); self.assertEqual(len(seen), 1)
+
+    def test_english_gate_runs_first_then_parity(self):
+        spec, _ = self.spec()
+        def builder(it, sd):
+            self.rewrite(spec, lambda t: t.replace("name: branch-setup", "name: Branch_Setup") + "\n%s\n" % KO); return 0
+        self.assertEqual(self.loop(builder, spec)["status"], "builder-non-english")
+
+    def test_gate_is_code_not_prompt_and_failed_builder_keeps_its_status(self):
+        spec, _ = self.spec()
+        r = self.loop(lambda it, sd: self.rewrite(spec, lambda t: t.replace("name: branch-setup", "name: x_y")) or 7, spec)
+        self.assertEqual((r["status"], r["returncode"]), ("builder-parity-missing", 7))
+        import inspect
+        self.assertIn("eva.parity_violations", inspect.getsource(se.loop))
+
+    def test_builder_prompt_requires_all_four_tools(self):
+        seen = []
+        def fx(cmd, cwd, timeout, env=None):
+            seen.append(cmd[2]); return 0, json.dumps({"type": "result", "total_cost_usd": 0.5}), ""
+        it = os.path.join(self.tmp, "it"); os.makedirs(it)
+        self.assertEqual(se.ClaudeBuilder("Improve it.", "claude-opus-5-5", se.Budget(10.0), exec_fn=fx)(it, "/skill"), 0)
+        self.assertIn(eva.PARITY_BUILDER_RULE, seen[0]); self.assertIn(eva.ENGLISH_BUILDER_RULE, seen[0])
+        for word in ("Claude Code", "Codex CLI", "OpenCode", "Hermes Agent", "agents/openai.yaml", "opencode/autoinvoke",
+                     "disable-model-invocation", "^[a-z0-9]+(-[a-z0-9]+)*$"):
+            self.assertIn(word, seen[0], word)
+
+class TestToolCoverage(T.Base):
+    def run_report(self, engines=None, runs=1):
+        spec, problems = self.spec(); self.assertEqual(problems, [])
+        n = se.run_iteration(spec, self.ws, engines or self.engines(), runs=runs, log=T.quiet)
+        se.grade_iteration(spec, self.ws, n, self.grader(), seed=1, log=T.quiet)
+        bench, gate = se.report_iteration(spec, self.ws, n)
+        return spec, n, bench, gate
+
+    def test_tool_coverage_function(self):
+        c = se.tool_coverage(["claude", "codex"])
+        self.assertEqual({t: v["status"] for t, v in c.items()}, {"claude": "planned", "codex": "planned",
+                         "opencode": "not-run: engine not available", "hermes": "not-run: engine not available"})
+        self.assertEqual(se.tool_coverage(["claude"])["codex"]["status"], "not-run: engine not selected")
+        c = se.tool_coverage(["claude", "codex"], {"claude": 4, "codex": 0})
+        self.assertEqual((c["claude"]["status"], c["claude"]["graded_runs"]), ("run", 4))
+        self.assertEqual(c["codex"]["status"], "not-run: no graded runs")
+        self.assertEqual(se.tool_coverage(None, {"claude": 1})["codex"]["status"], "not-run: no graded runs")
+        self.assertNotIn("pass", " ".join(v["status"] for v in c.values()))
+
+    def test_plan_json_records_coverage_at_run_start(self):
+        spec, n, bench, gate = self.run_report()
+        plan = T.rjson(os.path.join(self.ws, "iteration-%d" % n, "plan.json"))
+        self.assertEqual({t: v["status"] for t, v in plan["tool_coverage"].items()},
+                         {"claude": "planned", "codex": "planned", "opencode": "not-run: engine not available",
+                          "hermes": "not-run: engine not available"})
+
+    def test_benchmark_records_which_tools_ran_and_never_marks_missing_engines_as_passed(self):
+        spec, n, bench, gate = self.run_report()
+        cov = bench["tool_coverage"]
+        self.assertEqual((cov["claude"]["status"], cov["codex"]["status"]), ("run", "run"))
+        self.assertGreater(cov["claude"]["graded_runs"], 0)
+        for t in ("opencode", "hermes"):
+            self.assertEqual(cov[t], {"status": "not-run: engine not available", "engine": None, "graded_runs": 0, "pending_runs": 0})
+        self.assertEqual(bench["parity"], {t: "pass" for t in eva.TOOLS})
+        on_disk = T.rjson(os.path.join(self.ws, "iteration-%d" % n, "benchmark.json"))
+        self.assertEqual(on_disk["tool_coverage"], cov)
+
+    def test_one_engine_run_marks_the_other_not_selected(self):
+        spec, n, bench, gate = self.run_report(engines=self.engines()[:1])
+        self.assertEqual(bench["tool_coverage"]["codex"]["status"], "not-run: engine not selected")
+        self.assertEqual(bench["tool_coverage"]["claude"]["status"], "run")
+
+    def test_comparison_md_has_a_tool_coverage_table(self):
+        spec, n, bench, gate = self.run_report()
+        md = open(os.path.join(self.ws, "iteration-%d" % n, "comparison.md"), encoding="utf-8").read()
+        self.assertIn("## Tool coverage (multi-tool parity)", md)
+        self.assertIn("| opencode | pass | not-run: engine not available | 0 |", md)
+        self.assertIn("| claude | pass | run |", md)
+
+    def test_gate_note_names_the_missing_tools_but_adds_no_problem(self):
+        spec, n, bench, gate = self.run_report()
+        notes = [x for x in gate["notes"] if x.startswith("per-tool dynamic coverage")]
+        self.assertEqual(len(notes), 1)
+        self.assertIn("run on claude, codex; NOT run on opencode (engine not available), hermes (engine not available)", notes[0])
+        self.assertFalse(any("coverage" in p or "opencode" in p or "hermes" in p for p in gate["problems"]))
+
+    def test_gate_problems_and_approval_need_do_not_depend_on_coverage(self):
+        spec, n, bench, gate = self.run_report()
+        a, b = dict(bench), dict(bench)
+        a["tool_coverage"] = se.tool_coverage(["claude", "codex"], {"claude": 1, "codex": 1})
+        b.pop("tool_coverage"); b["gate"] = None
+        ga, gb = se.compute_gate(a), se.compute_gate(b)
+        self.assertEqual(ga["problems"], gb["problems"]); self.assertEqual(ga["needs_approval"], gb["needs_approval"])
+        self.assertEqual(ga["human_pending_only"], gb["human_pending_only"])
+        self.assertEqual(len(ga["notes"]), len(gb["notes"]) + 1)
+        full = dict(a); full["tool_coverage"] = {t: {"status": "run", "engine": t, "graded_runs": 1} for t in eva.TOOLS}
+        self.assertEqual(se.compute_gate(full)["notes"], gb["notes"])
+
+    def test_benchmark_of_an_old_plan_without_coverage_still_builds(self):
+        spec, problems = self.spec()
+        n = se.run_iteration(spec, self.ws, self.engines(), runs=1, log=T.quiet)
+        pp = os.path.join(self.ws, "iteration-%d" % n, "plan.json"); plan = T.rjson(pp); plan.pop("tool_coverage"); T.wjson(pp, plan)
+        se.grade_iteration(spec, self.ws, n, self.grader(), seed=1, log=T.quiet)
+        bench, gate = se.report_iteration(spec, self.ws, n)
+        self.assertEqual(bench["tool_coverage"]["claude"]["status"], "run")
+        self.assertEqual(bench["tool_coverage"]["hermes"]["status"], "not-run: engine not available")
+
+    def test_registration_does_not_know_about_coverage(self):
+        import inspect
+        for fn in (se.register, se.approve, se.approval_ok, se.gate_hash):
+            src = inspect.getsource(fn)
+            for word in ("tool_coverage", "coverage", "parity", "opencode", "hermes"):
+                self.assertNotIn(word, src, (fn.__name__, word))
+
+    def test_registered_golden_registration_files_are_not_rewritten_by_loading(self):
+        base = E.p("golden", "skills", "csv-cleaner-workspace")
+        before = {f: open(os.path.join(base, f), "rb").read() for f in ("registration.json", "approvals.json")}
+        se.load_eval_set(E.p("golden", "skills", "csv-cleaner"))
+        after = {f: open(os.path.join(base, f), "rb").read() for f in before}
+        self.assertEqual(before, after)
+
+if __name__ == "__main__":
+    unittest.main()

@@ -16,6 +16,19 @@ def run_of(calls=(), results=(), workspace=None):
              {"tool": c["tool"], "input": c.get("input"), "result": c.get("result")} for c in calls]
     return {"calls": calls, "results": [c["result"] for c in calls if c["result"]] + list(results), "workspace": workspace}
 
+def minus_language(r):
+    """r without the English-only rows (category 'language'). Legacy tests that deliberately use Korean fixture text
+    (descriptions, bad/ units) assert on the other checks through this; the English rule itself is covered by
+    tests/test_english_rule.py, whose test_golden_units_fail_exactly_on_these_checks pins every golden unit's failing rows."""
+    out = eva.Report(r.path, r.kind); out.checks = [c for c in r.checks if c["category"] != "language"]
+    return out
+
+def minus_parity(r):
+    """r without the multi-tool parity rows (category 'parity'). Legacy fixtures that have no wrappers/ (the golden and
+    bad/ agents) read the other checks through this; the parity rule itself is covered by tests/test_multi_tool_parity.py."""
+    out = eva.Report(r.path, r.kind); out.checks = [c for c in r.checks if c["category"] != "parity"]
+    return out
+
 PYYAML_OPT_OUT = "EVA_ALLOW_NO_PYYAML"
 
 def require_yaml(tc):
@@ -42,12 +55,6 @@ class TestParser(unittest.TestCase):
         self.assertEqual(m["metadata"]["version"], "1.2.0")
     def test_no_frontmatter(self):
         self.assertIsNone(eva.parse_frontmatter("# x")[0])
-
-class TestGolden(unittest.TestCase):
-    def test_all_golden_pass(self):
-        for u in eva.find_units(p("golden")):
-            r = eva.check(u)
-            self.assertEqual(r.verdict, "PASS", (u, r.failed, r.category_failed))
 
 class TestBad(unittest.TestCase):
     def failed(self, path):
@@ -150,7 +157,7 @@ class TestOptionalChecks(unittest.TestCase):
         self.assertEqual(r.score, round(sum(c["passed"] for c in app) / len(app), 3))
         self.assertLess(len(app), len(r.checks))
     def test_present_bad_version_fails_despite_score(self):
-        r = eva.check(p("bad/skills/bad-version-skill"))
+        r = minus_language(eva.check(p("bad/skills/bad-version-skill")))
         self.assertGreaterEqual(r.score, eva.PASS_THRESHOLD)
         self.assertEqual(r.verdict, "FAIL")
         self.assertEqual([c["id"] for c in r.failed], ["version-format"])
@@ -171,7 +178,7 @@ class TestCategoryFloor(unittest.TestCase):
     def test_floor_constant(self):
         self.assertTrue(0 < eva.CATEGORY_FLOOR <= 1)
     def test_zero_pass_category_fails_unit(self):
-        r = eva.check(p("bad/agents/no-context-agent"))
+        r = minus_parity(minus_language(eva.check(p("bad/agents/no-context-agent"))))
         self.assertGreaterEqual(r.score, eva.PASS_THRESHOLD)
         self.assertFalse(r.critical_failed)
         self.assertEqual(r.category_failed, ["context"])
@@ -193,7 +200,7 @@ class TestExitCodes(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             return eva.main(argv)
     def test_check_all_exit(self):
-        self.assertEqual(self.run_main(["check-all", p("golden")]), 0)
+        self.assertEqual(self.run_main(["check-all", p("golden")]), 1)  # golden is Korean: english-* checks FAIL (exit 1)
         self.assertEqual(self.run_main(["check-all", p("bad")]), 1)
 
 class TestLoop(unittest.TestCase):
@@ -261,6 +268,11 @@ class TestCodeReviewer(TmpMixin, unittest.TestCase):
         return rjson(p("transcripts/code-reviewer-drill.json"))
     def test_static_criteria(self):
         r = eva.check(CR)
+        self.assertEqual(r.verdict, "FAIL")  # Korean AGENT.md and scenarios: only the english-* checks fail
+        self.assertEqual(self.ids(r), {"english-agent-md", "english-scenarios", "parity-wrapper-claude",
+                                       "parity-wrapper-codex", "parity-wrapper-opencode", "parity-wrapper-hermes",
+                                       "parity-permissions-hermes"})
+        r = minus_parity(minus_language(r))
         self.assertEqual(r.verdict, "PASS", r.failed)
         self.assertNotIn("success-measurable", self.ids(r))
         meta, _ = eva.parse_frontmatter(open(os.path.join(CR, "AGENT.md"), encoding="utf-8").read())
@@ -522,7 +534,7 @@ class TestDocs(unittest.TestCase):
             self.assertIn("`%s`" % c["id"], readme, c["id"])
 
 GOOD_FM = ("---\nname: {name}\ndescription: Counts words in one text file. Use when the user wants a word count.\n"
-           "{extra}---\n# Word Count\n## Inputs\n- text_path\n## Outputs\n- word_count\n## Example\n입력: `a.txt` → 출력: `42`\n{body}")
+           "{extra}---\n# Word Count\n## Inputs\n- text_path\n## Outputs\n- word_count\n## Example\nInput: `a.txt` -> Output: `42`\n{body}")
 GOOD_EVALS = [{"id": i, "prompt": "p%d" % i, "expected_output": "o%d" % i} for i in (1, 2, 3)]
 
 class SkillMixin(TmpMixin):
@@ -612,10 +624,11 @@ class TestSkillSpecFrontmatter(SkillMixin, unittest.TestCase):
     def test_reserved_name_words(self):
         for name in ("claude-helper", "my-anthropic-tools"):
             r = self.skill(name=name)
-            self.assertEqual(self.ids(r, "critical_failed"), {"name-reserved"}, name)
+            # the Claude Code parity row projects the same rule (it protects one tool, name-reserved all)
+            self.assertEqual(self.ids(r, "critical_failed"), {"name-reserved", "parity-skill-claude"}, name)
     def test_description_no_xml(self):
         raw = GOOD_FM.format(name="word-count", extra="", body="").replace("one text file", "one <file> tag")
-        self.assertEqual(self.ids(self.skill(raw=raw), "critical_failed"), {"description-no-xml"})
+        self.assertEqual(self.ids(self.skill(raw=raw), "critical_failed"), {"description-no-xml", "parity-skill-claude"})
     def test_compatibility_length(self):
         self.assertIsNone(self.status(self.skill(), "compatibility-length"))
         self.assertTrue(self.status(self.skill(extra="compatibility: %s\n" % ("x" * 500)), "compatibility-length"))
@@ -979,7 +992,7 @@ class TestDescriptionChecks(SkillMixin, unittest.TestCase):
     def desc(self, d):
         raw = GOOD_FM.format(name="word-count", extra="", body="").replace(
             "description: Counts words in one text file. Use when the user wants a word count.", "description: %s" % d)
-        return self.skill(raw=raw)
+        return minus_language(self.skill(raw=raw))  # Korean descriptions here are test data for the other checks
     def test_verb_forms_free(self):
         for d in ("Counts words in one text file. Use when the user wants a word count.",
                   "Count words in one text file. Use this skill when the user wants a word count.",
@@ -1209,7 +1222,7 @@ class TestRound4Description(SkillMixin, unittest.TestCase):
     def desc(self, d):
         raw = GOOD_FM.format(name="word-count", extra="", body="").replace(
             "description: Counts words in one text file. Use when the user wants a word count.", "description: %s" % d)
-        return self.skill(raw=raw)
+        return minus_language(self.skill(raw=raw))  # Korean descriptions here are test data for the other checks
     def test_when_requires_trigger_clause(self):
         for d in ("Counts words in a text file. Use this.", "Counts words in a text file when files change.",
                   "Counts words in a text file. Use when needed.", "Counts words in a text file. Use when asked.",
@@ -1352,7 +1365,7 @@ class TestRound5DescriptionWhen(SkillMixin, unittest.TestCase):
     def desc(self, d):
         raw = GOOD_FM.format(name="word-count", extra="", body="").replace(
             "description: Counts words in one text file. Use when the user wants a word count.", "description: %s" % d)
-        return self.skill(raw=raw)
+        return minus_language(self.skill(raw=raw))  # Korean descriptions here are test data for the other checks
     def test_quoted_trigger_ignored(self):
         for d in ('Counts words. Replies "Use when the user wants a word count" to greetings.',
                   "Counts words. Prints `Use when the user wants a word count` as help text.",
@@ -1460,8 +1473,11 @@ class TestRound7HostFields(SkillMixin, unittest.TestCase):
     """Claude Code documented fields argument-hint / disable-model-invocation are a host-specific allowance."""
     def test_host_fields_allowed(self):
         r = self.skill(extra="argument-hint: \"[file]\"\ndisable-model-invocation: true\n")
-        self.assertEqual(r.verdict, "PASS", r.failed)
+        # the field itself is an allowed host field; relying on it alone now fails the multi-tool parity rule (OpenCode
+        # and Codex need their own controls, tests/test_multi_tool_parity.py), and Hermes has none (review)
+        self.assertEqual(self.ids(r, "failed"), {"parity-invocation-control"})
         self.assertIn("host-specific", next(c["reason"] for c in r.checks if c["id"] == "frontmatter-fields"))
+        self.assertEqual(self.skill(extra="argument-hint: \"[file]\"\n").verdict, "PASS")
         self.assertTrue(self.status(self.skill(extra="disable-model-invocation: false\n"), "field-types"))
     def test_other_fields_still_fail(self):
         for extra in ("user-invocable: false\n", "model: opus\n", "inputs: x\n"):
@@ -1635,10 +1651,11 @@ class TestRound8EscapingRefs(TmpMixin, unittest.TestCase):
     def test_symlink_outside_fails(self):
         r = self.make("Run `scripts/esc.py`.\n", files={"outside.py": "x"}, links={"scripts/esc.py": "outside.py"})
         self.assert_escape_fails(r, "scripts/esc.py")
-    def test_symlink_inside_repo_is_review(self):
+    def test_symlink_inside_repo_is_review_and_fails_the_english_scan(self):
         r = self.make("Run `scripts/shared.py`.\n", files={"repo/tools/shared.py": "x"},
                       links={"scripts/shared.py": "repo/tools/shared.py"})
-        self.assertEqual(self.refs_exist(r)["status"], "needs-review"); self.assertEqual(r.verdict, "REVIEW")
+        self.assertEqual(self.refs_exist(r)["status"], "needs-review")
+        self.assertEqual(self.ids(r), {"english-bundled-files"}); self.assertEqual(r.verdict, "FAIL")
     def test_repo_root_ref_still_review_and_bundled_pass(self):
         r = self.make("Run `scripts/root.py`.\n", files={"repo/scripts/root.py": "x"})
         c = self.refs_exist(r)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Eva (에바): SKILL.md skill evaluator (agent checks are slated to move to a separate "agent master").
 stdlib only, Python 3.9+."""
-import argparse, json, os, posixpath, re, shlex, sys, unicodedata
+import argparse, codecs, collections, json, os, posixpath, re, shlex, shutil, sys, unicodedata
 
 PASS_THRESHOLD = 0.8
 CATEGORY_FLOOR = 0.5  # every category with applicable checks needs >=1 pass and pass rate >= this
@@ -319,7 +319,7 @@ def parse_frontmatter_ex(text):
                 if pe: return err(n, pe)
                 if meta[key] is None: meta[key] = []
                 meta[key].append(_scalar(s[2:]))
-            elif re.match(r"^[A-Za-z_][\w-]*:\s+\S", s):
+            elif re.match(r"^[A-Za-z_][\w./-]*:\s+\S", s):
                 if isinstance(meta[key], list):
                     return err(n, "key '%s' mixes '- item' list and 'key: value' mapping" % key)
                 if meta[key] is None: meta[key] = {}
@@ -373,7 +373,7 @@ def yaml_typed_keys(text):
         if not ln.strip() or ln.lstrip().startswith("#"):
             continue
         if ln[0] == " ":
-            m = re.match(r"^\s+(?:-\s+(.*)|([A-Za-z_][\w-]*):\s+(.*))$", ln)
+            m = re.match(r"^\s+(?:-\s+(.*)|([A-Za-z_][\w./-]*):\s+(.*))$", ln)
             if not block and parent and m:
                 v = m.group(1) if m.group(1) is not None else m.group(3)
                 if _YAML_TYPED_RE.match(_strip_comment(v)):
@@ -540,6 +540,1114 @@ def _common_name(r, meta, path):
     r.add("description-present", "single-task", bool(desc), "description present",
           "무엇을 하는지와 언제 쓰는지를 담은 description을 추가하세요.")
     return name, desc
+
+# ---------- English-only rule (owner decision 2026-10-19; design and exceptions: notes/english-rule-plan.md) ----------
+# The stdlib has no Unicode script property, so the script of a character is read from its Unicode name. The test fails
+# closed: a letter, mark or number whose name does not start with an English-compatible word is flagged, and so is a code
+# point this Python's Unicode database does not assign (Python 3.9 has Unicode 13.0), so a script or emoji added by a
+# newer Unicode version fails instead of passing. Greek stays allowed for math and unit notation. The scanner detects
+# scripts, not languages: German prose in Latin letters passes.
+NON_ENGLISH_SCRIPT_WORDS = frozenset("""HANGUL CJK KANGXI HIRAGANA KATAKANA KANA BOPOMOFO IDEOGRAPH IDEOGRAPHIC KOREAN
+CYRILLIC ARABIC HEBREW SYRIAC THAANA NKO SAMARITAN MANDAIC THAI LAO DEVANAGARI BENGALI GURMUKHI GUJARATI ORIYA TAMIL
+TELUGU KANNADA MALAYALAM SINHALA TIBETAN MYANMAR KHMER MONGOLIAN ARMENIAN GEORGIAN ETHIOPIC CHEROKEE CANADIAN COPTIC
+YI LISU VAI BAMUM OGHAM RUNIC GLAGOLITIC TIFINAGH TAGALOG HANUNOO BUHID TAGBANWA LIMBU TAI BUGINESE BALINESE SUNDANESE
+BATAK LEPCHA OL SYLOTI PHAGS PA SAURASHTRA KAYAH REJANG JAVANESE CHAM MEETEI LINEAR AEGEAN PHAISTOS LYCIAN CARIAN GOTHIC
+UGARITIC DESERET SHAVIAN OSMANYA OSAGE ELBASAN CAUCASIAN CYPRIOT IMPERIAL PALMYRENE NABATAEAN HATRAN PHOENICIAN LYDIAN
+MEROITIC KHAROSHTHI MANICHAEAN AVESTAN INSCRIPTIONAL PSALTER HANIFI YEZIDI SOGDIAN CHORASMIAN ELYMAIC BRAHMI KAITHI
+SORA CHAKMA MAHAJANI SHARADA KHOJKI MULTANI KHUDAWADI GRANTHA NEWA TIRHUTA SIDDHAM MODI TAKRI AHOM DOGRA WARANG DIVES
+NANDINAGARI ZANABAZAR SOYOMBO PAU BHAIKSUKI MARCHEN MASARAM GUNJALA MAKASAR CUNEIFORM EGYPTIAN ANATOLIAN MRO BASSA
+PAHAWH MEDEFAIDRIN MIAO TANGUT NUSHU KHITAN HENTAIGANA DUPLOYAN SIGNWRITING NYIAKENG WANCHO MENDE ADLAM INDIC OTTOMAN
+HANGZHOU MASU""".split())
+ENGLISH_COMPATIBLE_FIRST_WORDS = frozenset("""LATIN GREEK COMBINING MODIFIER CARON FEMININE MASCULINE MICRO SUPERSCRIPT SUBSCRIPT
+VULGAR FRACTION DOUBLE-STRUCK EULER SCRIPT BLACK-LETTER PLANCK OHM KELVIN ANGSTROM TURNED ALEF BET GIMEL DALET INFORMATION
+ROMAN SMALL CIRCLED PARENTHESIZED NEGATIVE DOUBLE DINGBAT DIGIT NUMBER FULLWIDTH VARIATION MUSICAL TALLY SEGMENTED
+VIETNAMESE MATHEMATICAL""".split())
+# squared katakana words and era names have no script word in their Unicode names
+_NON_ENGLISH_RANGES = ((0x3300, 0x3357, "Katakana"), (0x337B, 0x337F, "CJK"), (0x32FF, 0x32FF, "CJK"))
+_SCRIPT_CACHE = {}
+ENGLISH_MAX_SHOWN = 5
+ENGLISH_FIX = ("Rewrite the text in English (owner rule: all skill and agent content is English only). Task input data "
+               "that must stay non-English belongs in evals/files/, which is not scanned.")
+ENGLISH_BUILDER_RULE = ("Write all skill content in English only (every file a run installs, plus evals/evals.json and "
+                        "evals/trigger_evals.json); the loop stops if any non-English text appears.")
+# FEEDBACK.md and FEEDBACK.json are what `eva.py feedback` and loop.py write into the unit.
+SKILL_IGNORE = ("evals", "__pycache__", "*-workspace", ".git", "FEEDBACK.md", "FEEDBACK.json")
+SKILL_TOOL_FILES = ("agents/openai.yaml",)
+SKIP_DIRS = ("__pycache__", ".git")
+# Run-output matchers (review, not FAIL): only the fields that are matched against what a run produced. Key paths end-match,
+# list indexes are ignored. Everything else under "check" (path, fixture, tool, type, ...) is configuration and stays FAIL.
+OUTPUT_MATCHER_KEYS = {"evals": (("check", "pattern"), ("check", "input_regex"), ("check", "rows")),
+                       "scenarios": (("must_include",),)}
+_ESC_PAIR_RE = re.compile(r"\\u(d[89ab][0-9a-f]{2})\\u(d[c-f][0-9a-f]{2})", re.I)
+_ESC_RE = re.compile(r"\\\\|\\u([0-9a-fA-F]{4})|\\U([0-9a-fA-F]{8})")
+
+def non_english_script(ch):
+    """Script label ('Hangul', 'CJK', 'Cherokee', ...) when ch is a non-English-script character, else None."""
+    if ord(ch) < 0x80: return None
+    if ch not in _SCRIPT_CACHE:
+        label, cat, cp = None, unicodedata.category(ch), ord(ch)
+        if cat == "Cn":
+            label = "Unassigned"
+        elif cat[0] not in "PZC":
+            name = unicodedata.name(ch, "")
+            first = name.split(" ")[0]
+            hit = next((l for lo, hi, l in _NON_ENGLISH_RANGES if lo <= cp <= hi), None)
+            if hit is None:
+                hit = next((w for w in re.split(r"[ -]", name) if w in NON_ENGLISH_SCRIPT_WORDS), None)
+            if hit is None and cat[0] in "LMN" and first not in ENGLISH_COMPATIBLE_FIRST_WORDS:
+                hit = first or "Unnamed"
+            if hit: label = hit if hit in ("CJK", "Katakana") else hit.title()
+        _SCRIPT_CACHE[ch] = label
+    return _SCRIPT_CACHE[ch]
+
+def non_english_hits(text):
+    """[(index, char, script)] of every non-English-script character in text."""
+    return [(i, c, s) for i, c in enumerate(text) for s in (non_english_script(c),) if s]
+
+def _decode_escapes(line):
+    """Decodes \\uXXXX / \\UXXXXXXXX (JSON strings, double-quoted YAML/TOML strings) so escaped Hangul is still seen;
+    '\\\\' stays. Callers decide WHERE the format interprets escapes (_yaml_decode_lines, _toml_decode)."""
+    line = _ESC_PAIR_RE.sub(lambda m: chr(0x10000 + ((int(m.group(1), 16) - 0xD800) << 10) + int(m.group(2), 16) - 0xDC00), line)
+    def one(m):
+        if m.group(0) == "\\\\": return m.group(0)
+        try: return chr(int(m.group(1) or m.group(2), 16))
+        except (ValueError, OverflowError): return m.group(0)
+    return _ESC_RE.sub(one, line)
+
+_YAML_BLOCK_INDICATOR_RE = re.compile(r"[|>](?:[+-][1-9]?|[1-9][+-]?)?$")
+_YAML_KEY_RE = re.compile(r"^(?:[ \t]*-[ \t]+)*[ \t]*(?:[^\s'\"#\[\]{},-][^:#]*?|-[^\s:][^:#]*?):(?=[ \t]|$)[ \t]*")
+_YAML_ITEM_RE = re.compile(r"^(?:[ \t]*-[ \t]+)+")
+_YAML_COMPLEX_KEY_RE = re.compile(r"^((?:[ \t]*-[ \t]+)*[ \t]*)\?(?:[ \t]|$)")
+
+def _flow_scan(v, depth, quote=None):
+    """(depth, open quote) of a flow collection after the text v: '[' and '{' open and ']' and '}' close outside quoted
+    scalars and comments. open quote: the quote of a scalar that continues on the next line."""
+    prev, i = " ", 0
+    while i < len(v) and depth:
+        c = v[i]
+        if quote:
+            if quote == '"' and c == "\\":
+                i += 2; continue
+            if c == quote:
+                if quote == "'" and v[i + 1:i + 2] == "'":
+                    i += 2; continue
+                quote = None
+        elif c == "#" and prev in " \t":
+            break
+        elif c in "\"'" and prev in " \t[{,:":
+            quote = c
+        elif c in "[{":
+            depth += 1
+        elif c in "]}":
+            depth -= 1
+        prev, i = c, i + 1
+    return depth, quote
+
+def _yaml_decode_value(v, start=True):
+    """(value, open quote, open flow): decodes \\u escapes only inside double-quoted scalars of one YAML value (a quoted
+    scalar starts a value, also after a tag or anchor). A flow collection that opens at a value start is decoded strictly
+    to the end of the line; open flow is its (depth, open quote) when it continues on the next line. Plain scalars,
+    single-quoted scalars and comments keep backslashes literally. open quote: the quote of a scalar that continues on
+    the next line."""
+    out, i = [], 0
+    while i < len(v):
+        c = v[i]
+        if c in " \t":
+            out.append(c); i += 1; continue
+        if c == "#" and (i == 0 or v[i - 1] in " \t"):
+            out.append(v[i:]); break
+        if start and c in "!&":
+            j = i
+            while j < len(v) and v[j] not in " \t": j += 1
+            out.append(v[i:j]); i = j; continue
+        if start and c in "[{":
+            flow = _flow_scan(v[i + 1:], 1)
+            return "".join(out) + _decode_escapes(v[i:]), None, flow if flow[0] else None
+        if start and c in "\"'":
+            end = _quoted_end(v[i:])
+            span = v[i:] if end < 0 else v[i:i + end + 1]
+            out.append(_decode_escapes(span) if c == '"' else span)
+            if end < 0: return "".join(out), c, None
+            i += len(span); start = False; continue
+        out.append(c); i += 1
+        start = c in "[{," or (c == ":" and v[i:i + 1] in (" ", "\t", ""))
+    return "".join(out), None, None
+
+def _yaml_decode_lines(lines):
+    """Lines as a YAML reader sees them for the \\u rule: escapes are decoded in double-quoted scalars only, including their
+    continuation lines; the content of a '|' / '>' block scalar (the lines indented deeper than its key) and everything in
+    plain or single-quoted scalars stays as written. A key starts a block scalar only when its value, comment removed, is
+    the block indicator. Two forms these line rules do not model are decoded strictly instead (fail closed): a flow
+    collection that opens at a value start, up to the line where it closes, and a complex-key entry ('?' and the lines
+    indented deeper than it)."""
+    out, block_indent, quote, flow, key_indent = [], None, None, None, None
+    for ln in lines:
+        if flow:
+            out.append(_decode_escapes(ln))
+            flow = _flow_scan(ln, *flow)
+            flow = flow if flow[0] else None
+            continue
+        if quote:
+            end = _quoted_end(quote + ln)
+            head = ln if end < 0 else ln[:end]
+            head = _decode_escapes(head) if quote == '"' else head
+            if end < 0:
+                out.append(head); continue
+            tail, quote, flow = _yaml_decode_value(ln[end:], start=False)
+            out.append(head + tail); continue
+        indent = len(ln) - len(ln.lstrip(" \t"))
+        if block_indent is not None:
+            if not ln.strip() or indent > block_indent:
+                out.append(ln); continue
+            block_indent = None
+        if key_indent is not None:
+            if not ln.strip() or indent > key_indent:
+                out.append(_decode_escapes(ln)); continue
+            key_indent = None
+        complex_key = _YAML_COMPLEX_KEY_RE.match(ln)
+        if complex_key:
+            key_indent = len(complex_key.group(1))
+            out.append(_decode_escapes(ln)); continue
+        key = _YAML_KEY_RE.match(ln)
+        m = key or _YAML_ITEM_RE.match(ln)
+        cut = m.end() if m else 0
+        value, quote, flow = _yaml_decode_value(ln[cut:])
+        out.append(ln[:cut] + value)
+        if key and _YAML_BLOCK_INDICATOR_RE.match(_strip_comment(ln[cut:])):
+            block_indent = len(ln) - len(ln.lstrip(" \t-"))
+    return out
+
+def _toml_decode(text):
+    """text with \\u / \\U escapes decoded inside TOML basic strings ("..." and \"\"\"...\"\"\") only; literal strings
+    ('...' and \'\'\'...\'\'\') and comments keep backslashes literally (TOML does not interpret escapes there)."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "#":
+            j = text.find("\n", i); j = n if j < 0 else j
+            out.append(text[i:j]); i = j; continue
+        if c in "\"'":
+            delim = c * 3 if text.startswith(c * 3, i) else c
+            j = i + len(delim)
+            while j < n:
+                if c == '"' and text[j] == "\\": j += 2; continue
+                if text.startswith(delim, j):
+                    j += len(delim)
+                    while len(delim) == 3 and text.startswith(c, j): j += 1  # up to two extra quotes belong to the string
+                    break
+                if len(delim) == 1 and text[j] == "\n": break
+                j += 1
+            j = min(j, n)
+            span = text[i:j]
+            out.append(_decode_escapes(span) if c == '"' else span); i = j; continue
+        out.append(c); i += 1
+    return "".join(out)
+
+def _excerpt(s, i, width=24):
+    lo, hi = max(0, i - width), min(len(s), i + width)
+    return ("..." if lo else "") + s[lo:hi].strip() + ("..." if hi < len(s) else "")
+
+def _finding(rel, line, where, hits, probe):
+    return "%s:%s%s [%s]: \"%s\"" % (rel, line if line else "?", " (%s)" % where if where else "",
+                                     "/".join(sorted({h[2] for h in hits})), _excerpt(probe, hits[0][0]))
+
+def _front_end(lines):
+    """1-based line number of the closing '---' of a frontmatter block, 0 when there is none."""
+    if lines and lines[0].strip() == "---":
+        for i, ln in enumerate(lines[1:], 2):
+            if ln.strip() == "---": return i
+    return 0
+
+def english_text_findings(text, rel, frontmatter=False, decode=None):
+    """One finding string per line of text with non-English-script characters. frontmatter: label lines before the
+    closing '---' as 'frontmatter' and the rest as 'body'; the frontmatter lines are read as YAML. decode: where \\u escapes
+    are decoded before scanning: 'yaml' (double-quoted scalars only), 'toml' (basic strings only), 'strict' or True
+    (everywhere; used for JSON that does not parse), None/False (never: Markdown bodies, scripts, plain text)."""
+    lines = text.split("\n")
+    fend = _front_end(lines) if frontmatter else 0
+    mode = "strict" if decode is True else decode or None
+    if mode == "yaml": probes = _yaml_decode_lines(lines)
+    elif mode == "toml": probes = _toml_decode(text).split("\n")
+    elif mode == "strict": probes = [_decode_escapes(x) for x in lines]
+    else: probes = list(lines)
+    if fend: probes[:fend] = _yaml_decode_lines(lines[:fend])
+    out = []
+    for i, probe in enumerate(probes, 1):
+        hits = non_english_hits(probe)
+        if hits: out.append(_finding(rel, i, ("frontmatter" if i <= fend else "body") if frontmatter and fend else "", hits, probe))
+    return out
+
+def _json_strings(node, matchers, path=(), matcher=False):
+    """(string, is_matcher) for every string (dict keys included) of a parsed JSON value, in document order. A string is
+    a matcher when the dict-key path above it ends with one of matchers (tuples of keys)."""
+    if isinstance(node, str):
+        yield node, matcher
+    elif isinstance(node, list):
+        for x in node: yield from _json_strings(x, matchers, path, matcher)
+    elif isinstance(node, dict):
+        for k, v in node.items():
+            yield k, matcher
+            p = path + (k,)
+            yield from _json_strings(v, matchers, p, matcher or any(p[-len(m):] == m for m in matchers))
+
+def english_json_findings(raw, rel, matcher_keys=()):
+    """(violations, review): findings per JSON string with line numbers. Strings under the key paths matcher_keys (run-output
+    matchers) go to review. Invalid JSON is scanned as plain text, matchers included (strict)."""
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return english_text_findings(raw, rel, decode="strict"), []
+    lines = [_decode_escapes(x) for x in raw.split("\n")]
+    viol, review, cursor = [], [], 0
+    for text, is_matcher in _json_strings(data, matcher_keys):
+        hits = non_english_hits(text)
+        if not hits: continue
+        i = hits[0][0]
+        run = 1
+        while run < 6 and any(h[0] == i + run for h in hits): run += 1
+        needle = text[i:i + run]
+        at = next((n for n in range(cursor, len(lines)) if needle in lines[n]), None)
+        if at is None: at = next((n for n in range(len(lines)) if needle in lines[n]), None)
+        if at is not None: cursor = at
+        seg_start = text.rfind("\n", 0, i) + 1
+        seg_end = text.find("\n", i)
+        seg = text[seg_start:seg_end if seg_end >= 0 else len(text)]
+        f = _finding(rel, None if at is None else at + 1, "", [(h[0] - seg_start,) + h[1:] for h in hits], seg)
+        (review if is_matcher else viol).append(f)
+    return viol, review
+
+# Binary assets are skipped, never read as text. Text that decodes (UTF-8 or UTF-16 with BOM) is always scanned, whatever its
+# extension or first bytes say. Data that does not decode is binary only when its leading bytes match a known format
+# (BINARY_SIGNATURES) or its extension is a known binary format (BINARY_EXTENSIONS); otherwise it fails: it cannot be verified.
+BINARY_SIGNATURES = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a", b"%PDF-", b"PK\x03\x04", b"PK\x05\x06",
+                     b"\x1f\x8b", b"BZh", b"\xfd7zXZ\x00", b"7z\xbc\xaf\x27\x1c", b"II*\x00", b"MM\x00*", b"wOFF", b"wOF2",
+                     b"OTTO", b"\x00\x01\x00\x00", b"true", b"ID3", b"OggS", b"fLaC", b"\x7fELF", b"\xca\xfe\xba\xbe",
+                     b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"SQLite format 3\x00", b"\x00asm", b"\x00\x00\x01\x00")
+BINARY_EXTENSIONS = frozenset(""".png .jpg .jpeg .gif .webp .bmp .ico .icns .tif .tiff .heic .avif .pdf .zip .gz .tgz .bz2 .xz .7z
+.jar .woff .woff2 .ttf .otf .eot .mp3 .mp4 .m4a .wav .ogg .flac .mov .webm .avi .sqlite .sqlite3 .db .xlsx .xls .docx .doc
+.pptx .ppt .pyc .so .dylib .dll .exe .class .wasm .bin .npy .parquet""".split())
+
+def _is_binary_format(data, fp):
+    head = data[:16]
+    if any(head.startswith(sig) for sig in BINARY_SIGNATURES): return True
+    if head[:4] == b"RIFF" and data[8:12] in (b"WEBP", b"WAVE", b"AVI "): return True
+    return head[4:8] == b"ftyp"
+
+def read_scannable(fp):
+    """(text, note): text is None for supported binary formats (note 'binary') and for unreadable or undecodable files
+    (note = problem)."""
+    try:
+        with open(fp, "rb") as f: data = f.read()
+    except OSError as e:
+        return None, "cannot read: %s" % e
+    for bom, enc in ((codecs.BOM_UTF16_LE, "utf-16"), (codecs.BOM_UTF16_BE, "utf-16")):
+        if data.startswith(bom):
+            try: return data.decode(enc), None
+            except UnicodeDecodeError: return None, "not valid UTF-16 text, cannot verify English-only"
+    try: return data.decode("utf-8-sig"), None  # text that decodes is always scanned (a text file may start with 'true' or 'ID3')
+    except UnicodeDecodeError: pass
+    if _is_binary_format(data, fp) or os.path.splitext(fp)[1].lower() in BINARY_EXTENSIONS: return None, "binary"
+    return None, ("not valid UTF-8 text and not a supported binary format (known signature or extension), "
+                  "cannot verify English-only")
+
+UnitTree = collections.namedtuple("UnitTree", "files outside cycles")
+
+def _skip_dirs(dp, names):
+    """The ignore of the agent scan: folders named in SKIP_DIRS."""
+    return {n for n in names if n in SKIP_DIRS and os.path.isdir(os.path.join(dp, n))}
+
+def unit_tree(path, ignore=None):
+    """What shutil.copytree(path, dst, ignore=ignore) reaches with symlinks=False, as three lists of relative paths
+    (forward slashes) in walk order: top-down, a folder's files sorted, then its subfolders sorted. ignore: a
+    shutil.ignore_patterns callable applied at every depth to folders and files; default SKILL_IGNORE, what a skill run
+    does not install.
+    files: every path the copy holds. An internal folder link is walked and each alias is listed under its own path; file
+    links are listed, and so is a dangling link whose target path is inside the unit.
+    outside: links whose real path leaves the unit. Never walked, never read.
+    cycles: folder links whose real path is a folder on their own path from the unit root, the root included. Never
+    walked: a copy through them would never end."""
+    ignore = ignore or shutil.ignore_patterns(*SKILL_IGNORE)
+    root = os.path.realpath(path)
+    tree, above = UnitTree([], [], []), {path: {root}}
+    rel = lambda p: os.path.relpath(p, path).replace(os.sep, "/")
+    for dp, dn, fn in os.walk(path, followlinks=True):
+        skip, up = ignore(dp, dn + fn), above.pop(dp)
+        for p in (os.path.join(dp, f) for f in sorted(fn) if f not in skip):
+            (tree.files if _within(root, os.path.realpath(p)) else tree.outside).append(rel(p))
+        walk = []
+        for d in sorted(x for x in dn if x not in skip):
+            p = os.path.join(dp, d)
+            real = os.path.realpath(p)
+            if not _within(root, real): tree.outside.append(rel(p))
+            elif os.path.islink(p) and real in up: tree.cycles.append(rel(p))
+            else:
+                walk.append(d); above[p] = up | {real}
+        dn[:] = walk
+    return tree
+
+LINK_OUT = "%s (link) resolves outside the unit folder, so its content cannot be verified English-only"
+LINK_CYCLE = "%s (link) points back at a folder on its own path (a cycle), so a copy of the unit would never end"
+WRAPPER_OUT = "%s resolves outside the agent folder, so it is not read"
+
+def _tree_view(tree, top=""):
+    """(files, link findings) of a unit_tree under the folder top ("" is the whole unit): one LINK_OUT finding per
+    outside link and one LINK_CYCLE finding per cycle, a link named top included."""
+    pre = top and top + "/"
+    return ([r for r in tree.files if r.startswith(pre)],
+            [LINK_OUT % r for r in tree.outside if (r + "/").startswith(pre)]
+            + [LINK_CYCLE % r for r in tree.cycles if (r + "/").startswith(pre)])
+
+def _decode_mode(rel):
+    """Escape format of a tool or wrapper file by extension: TOML basic strings or YAML double-quoted scalars."""
+    ext = os.path.splitext(rel)[1].lower()
+    return "toml" if ext == ".toml" else "yaml" if ext in (".yaml", ".yml") else None
+
+def _scan_file(path, rel, frontmatter=False, decode=None):
+    """(findings, status): status 'scanned', 'binary' or 'missing'. decode: see english_text_findings."""
+    fp = os.path.join(path, rel)
+    if not os.path.isfile(fp): return [], "missing"
+    text, note = read_scannable(fp)
+    if text is None:
+        return ([] if note == "binary" else ["%s:? %s" % (rel, note)]), ("binary" if note == "binary" else "scanned")
+    if rel.endswith(".json"): return english_json_findings(text, rel)[0], "scanned"
+    return english_text_findings(text, rel, frontmatter=frontmatter, decode=decode), "scanned"
+
+def _json_group(path, rels, key):
+    """(violations, review, n_scanned) for JSON files rels; matcher keys OUTPUT_MATCHER_KEYS[key] go to review."""
+    viol, review, n = [], [], 0
+    for rel in rels:
+        fp = os.path.join(path, rel)
+        if not os.path.isfile(fp): continue
+        text, note = read_scannable(fp)
+        n += 1
+        if text is None:
+            viol.append("%s:? %s" % (rel, note)); continue
+        v, rv = english_json_findings(text, rel, OUTPUT_MATCHER_KEYS[key])
+        viol += v; review += rv
+    return viol, review, n
+
+class EnglishScan:
+    """groups: ordered [(check id, label, findings, scanned count or None when nothing to scan)]; review: findings in
+    output matchers (needs-review); violations: flat list of every FAIL-level finding."""
+    def __init__(self, kind):
+        self.kind, self.groups, self.review = kind, [], []
+    def add(self, cid, label, findings, scanned):
+        self.groups.append((cid, label, findings, scanned))
+    @property
+    def violations(self):
+        return [f for _, _, fs, _ in self.groups for f in fs]
+
+def english_scan(path):
+    """Full English-only scan of the skill or agent folder at path (kind from detect_kind)."""
+    kind = detect_kind(path)
+    s = EnglishScan(kind)
+    if kind == "skill":
+        text, _ = read_text(os.path.join(path, "SKILL.md"))
+        s.add("english-skill-md", "SKILL.md (frontmatter and body)",
+              english_text_findings(text, "SKILL.md", frontmatter=True) if text is not None else [],
+              1 if text is not None else None)
+        files, bf = _tree_view(unit_tree(path))
+        nb, skipped = 0, 0
+        for rel in files:
+            if rel == "SKILL.md" or rel in SKILL_TOOL_FILES: continue
+            name_hits = non_english_hits(rel)
+            if name_hits: bf.append("%s (file name) [%s]" % (rel, "/".join(sorted({h[2] for h in name_hits}))))
+            f, st = _scan_file(path, rel, decode=_decode_mode(rel))
+            bf += f; nb += st == "scanned"; skipped += st == "binary"
+        s.add("english-bundled-files", "installed files other than SKILL.md and agents/openai.yaml (%d binary skipped)"
+              % skipped, bf, nb or None)
+        ev, rv, n = _json_group(path, ("evals/evals.json", "evals/trigger_evals.json"), "evals")
+        s.add("english-evals", "evals/evals.json, evals/trigger_evals.json", ev, n or None)
+        s.review += rv
+        tf, nt = [], 0
+        for rel in SKILL_TOOL_FILES:
+            f, st = _scan_file(path, rel, decode=_decode_mode(rel))
+            tf += f; nt += st == "scanned"
+        s.add("english-tool-files", "agents/openai.yaml", tf, nt or None)
+    elif kind == "agent":
+        text, _ = read_text(os.path.join(path, "AGENT.md"))
+        s.add("english-agent-md", "AGENT.md (frontmatter and body)",
+              english_text_findings(text, "AGENT.md", frontmatter=True) if text is not None else [],
+              1 if text is not None else None)
+        tree = unit_tree(path, _skip_dirs)
+        files, links = _tree_view(tree, "scenarios")
+        ev, rv, n = _json_group(path, [x for x in files if x.count("/") == 1 and x.endswith(".json")], "scenarios")
+        ev = links + ev
+        for rel in files:  # file names reach the model too: every file under scenarios/
+            name_hits = non_english_hits(rel)
+            if name_hits: ev.append("%s (file name) [%s]" % (rel, "/".join(sorted({h[2] for h in name_hits}))))
+        s.add("english-scenarios", "scenarios/ (JSON contents and file names)", ev, n or None)
+        s.review += rv
+        files, wf = _tree_view(tree, "wrappers")
+        nw, skipped = 0, 0
+        for rel in files:
+            name_hits = non_english_hits(rel)
+            if name_hits: wf.append("%s (file name) [%s]" % (rel, "/".join(sorted({h[2] for h in name_hits}))))
+            f, st = _scan_file(path, rel, frontmatter=rel.endswith(".md"), decode=_decode_mode(rel))
+            wf += f; nw += st == "scanned"; skipped += st == "binary"
+        s.add("english-wrappers", "wrappers/ (%d binary skipped)" % skipped, wf, nw or None)
+    return s
+
+def english_violations(path):
+    """FAIL-level English-only findings of a skill/agent folder (strings 'file:line (where) [script]: "excerpt"').
+    skill_eval.load_eval_set (so validate and every live gate) and the loop after every builder call use it."""
+    return english_scan(path).violations
+
+def english_eval_problems(skill_dir):
+    """(violations, review) for evals/evals.json and evals/trigger_evals.json only; skill_eval validate uses it."""
+    v, r, _ = _json_group(skill_dir, ("evals/evals.json", "evals/trigger_evals.json"), "evals")
+    return v, r
+
+def review_items(path):
+    """Findings that need a recorded human decision before anything is spent: the needs-review rows of the English-only
+    rule (non-English run-output matchers) and of the parity rule (for example unverified Codex metadata fields), as
+    'check-id: reason' strings. skill_eval refuses --live and stops the loop on them until `approve --gate rule_review`."""
+    r = Report(path, detect_kind(path) or "unknown")
+    s = english_scan(path)
+    if s.review:
+        add_english_checks(r, path, s)
+    add_parity_checks(r, path)
+    return ["%s: %s" % (c["id"], c["reason"]) for c in r.needs_review]
+
+# The files whose bytes a rule-review decision covers, by unit kind, from the rows review_items collects (a trailing '/'
+# stands for every file under the folder). Skill: english-output-matchers reads the evals JSON, parity-skill-codex
+# agents/openai.yaml. Agent: english-output-matchers reads scenarios/, parity-permissions-codex and -opencode read the
+# AGENT.md tools and their own wrapper. SKILL.md only turns parity-invocation-hermes and parity-skill-codex on or off,
+# which already changes the findings, so a builder edit to it keeps the decision.
+REVIEW_SOURCES = {"skill": ("evals/evals.json", "evals/trigger_evals.json", "agents/openai.yaml"),
+                  "agent": ("AGENT.md", "scenarios/", "wrappers/codex/", "wrappers/opencode/")}
+
+def review_sources(path):
+    """Relative paths of the files whose bytes a recorded review_items decision also covers: a finding shows an excerpt
+    only, so an edit outside it must still void the decision. For an agent: the unit_tree files under each folder entry,
+    plus the wrapper file of each wrapper folder entry that agent_wrapper_states reads, whenever it is a file inside the
+    agent folder, even through a link that the walk does not follow."""
+    kind = detect_kind(path)
+    if kind != "agent": return list(REVIEW_SOURCES.get(kind, ()))
+    files, out = unit_tree(path, _skip_dirs).files, []
+    for src in REVIEW_SOURCES[kind]:
+        out += [r for r in files if r.startswith(src)] if src.endswith("/") else [src]
+    name, root = _str_field(_frontmatter_of(os.path.join(path, "AGENT.md"))[1] or {}, "name"), os.path.realpath(path)
+    tools = [src.split("/")[1] for src in REVIEW_SOURCES[kind] if src.startswith("wrappers/")] if name else []
+    for rel in (_wrapper_rel(tool, name) for tool in tools):
+        fp = os.path.join(path, *rel.split("/"))
+        if os.path.isfile(fp) and _within(root, os.path.realpath(fp)): out.append(rel)
+    return list(dict.fromkeys(out))
+
+def _show_findings(findings):
+    return "; ".join(findings[:ENGLISH_MAX_SHOWN]) + ("; (+%d more)" % (len(findings) - ENGLISH_MAX_SHOWN)
+                                                      if len(findings) > ENGLISH_MAX_SHOWN else "")
+
+def add_english_checks(r, path, scan=None):
+    """Adds the English-only rows (category 'language') to report r: FAIL groups plus the matcher review item."""
+    s = scan or english_scan(path)
+    for cid, label, findings, n in s.groups:
+        if n is None and not findings:
+            r.na(cid, "language", "nothing to scan in %s" % label, must=True)
+        else:
+            r.add(cid, "language", not findings,
+                  "%s has only English-script text" % label if not findings else
+                  "%d finding(s) with non-English text in %s: %s" % (len(findings), label, _show_findings(findings)),
+                  ENGLISH_FIX, must=True)
+    if s.review:
+        r.review("english-output-matchers", "language",
+                 "run-output matchers (%s) contain non-English text: %s" % (
+                     ", ".join(".".join(m) for m in OUTPUT_MATCHER_KEYS["evals" if s.kind == "skill" else "scenarios"]),
+                     _show_findings(s.review)),
+                 "Confirm that the task really requires non-English output. Matchers are exempt from FAIL because run "
+                 "output may be Korean; if it is not required, rewrite the matcher in English or with \\u escapes.")
+    else:
+        r.na("english-output-matchers", "language", "no non-English text in run-output matchers")
+
+# ---------- Multi-tool parity rule (owner decision 2026-10-19 18:43 KST; design: notes/multi-tool-parity-plan.md) ----------
+# Every skill and agent must be created for all four tools together. Formats per ~/workspace/pstack-trial/runs/engrule/
+# design.md sections 2-3; nothing here was re-verified against a primary source (UNVERIFIED items: plan section 8).
+# Skill: the shared SKILL.md is the single source; agents/openai.yaml (Codex) is optional. Agent: AGENT.md is the source and
+# wrappers/<tool>/ holds one thin file per tool.
+TOOLS = ("claude", "codex", "opencode", "hermes")
+TOOL_LABELS = {"claude": "Claude Code", "codex": "Codex CLI", "opencode": "OpenCode", "hermes": "Hermes Agent"}
+PORTABLE_NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")  # OpenCode skill name rule; house rule for agent file stems
+OPENAI_YAML = "agents/openai.yaml"
+OPENCODE_AUTOINVOKE_KEY = "opencode/autoinvoke"
+OPENCODE_MODES = ("primary", "subagent", "all")
+PERMISSION_ACTIONS = ("allow", "ask", "deny")
+# The Codex doc says sandbox_mode in a custom agent file does not override the parent session, so a Codex wrapper restricts
+# nothing this package can read (UNVERIFIED on codex-cli 0.162.1, notes/multi-tool-parity-plan.md section 2.4).
+CODEX_UNRESTRICTABLE = ("write", "shell", "web_fetch", "web_search", "delegate", "skill")
+# Five of the eight custom-agent keys that design.md 2.2 records. sandbox_mode and mcp_servers have no effect in an agent
+# file (agent-master-skills.md 3.4), and the strict flat reader rejects the dotted skills.config until A3.
+CODEX_AGENT_REQUIRED_KEYS = ("name", "description", "developer_instructions")
+CODEX_AGENT_OPTIONAL_KEYS = ("model", "model_reasoning_effort")
+CAPABILITY_BY_TOOL = {}
+for _cap, _names in (("read", "read_file read grep glob list_dir ls find search view cat"),
+                     ("write", "write_file edit_file write edit multiedit create_file delete_file notebookedit apply_patch"),
+                     ("shell", "bash shell terminal exec run_command"),
+                     ("web_fetch", "web_fetch webfetch"), ("web_search", "web_search websearch"),
+                     ("delegate", "task"), ("skill", "skill")):
+    for _n in _names.split():
+        CAPABILITY_BY_TOOL[_n] = _cap
+NEUTRAL_TOOLS = ("todowrite", "todo_write")
+# OpenCode agent permission keys as recorded from the OpenCode agents doc (inputs/agent-master-skills.md section 3.4, read
+# 2026-10-19), each with the capability class it grants. None: no class covers the key, so the wrapper must deny it.
+OPENCODE_PERMISSION_GRANTS = {"read": "read", "edit": "write", "glob": "read", "grep": "read", "list": "read", "bash": "shell",
+                              "task": "delegate", "external_directory": None, "webfetch": "web_fetch",
+                              "websearch": "web_search", "lsp": "read", "skill": "skill"}
+# The source list ends in "...", so OpenCode may have keys not recorded above, each with an UNVERIFIED default.
+OPENCODE_PERMISSION_KEYS_COMPLETE = False
+# Tool-name comparison (Claude Code wrapper vs AGENT.md): a tool is only the same tool under another harness's spelling when
+# listed here; every other name compares by itself (lower case), so read_file never matches grep or glob.
+TOOL_ALIASES = {"read": "read", "read_file": "read", "write": "write", "write_file": "write", "edit": "edit",
+                "edit_file": "edit", "bash": "shell", "shell": "shell", "websearch": "web_search", "web_search": "web_search",
+                "webfetch": "web_fetch", "web_fetch": "web_fetch"}
+PARITY_BUILDER_RULE = (
+    "Keep the skill loadable by all four tools together (Claude Code, Codex CLI, OpenCode, Hermes Agent): SKILL.md is the "
+    "single shared source. The name must match ^[a-z0-9]+(-[a-z0-9]+)*$ and the folder name; every metadata value must be "
+    "a string; do not put Hermes keys (metadata.hermes) in the frontmatter; do not use disable-model-invocation unless "
+    "metadata 'opencode/autoinvoke: \"false\"' and agents/openai.yaml 'policy: allow_implicit_invocation: false' are "
+    "also set; keep agents/openai.yaml valid if it exists. The loop stops if the parity check fails.")
+
+class TomlError(ValueError):
+    pass
+
+_TOML_BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
+_TOML_ESCAPES = {"b": "\b", "t": "\t", "n": "\n", "f": "\f", "r": "\r", '"': '"', "\\": "\\"}
+_TOML_INT_RE = re.compile(r"[+-]?(?:0|[1-9](?:_?[0-9])*)$")
+_TOML_FLOAT_RE = re.compile(r"[+-]?(?:0|[1-9](?:_?[0-9])*)(?:\.[0-9](?:_?[0-9])*)?(?:[eE][+-]?[0-9](?:_?[0-9])*)?$")
+
+class _TomlReader:
+    """Strict reader for the flat TOML subset a wrapper needs (see parse_flat_toml)."""
+    def __init__(self, text):
+        self.s, self.i, self.line = text, 0, 1
+    def fail(self, msg):
+        raise TomlError("line %d: %s" % (self.line, msg))
+    def peek(self, n=1):
+        return self.s[self.i:self.i + n]
+    def skip_blank(self):
+        while self.i < len(self.s) and self.s[self.i] in " \t": self.i += 1
+    def newline(self):
+        if self.peek(2) == "\r\n": self.i += 2
+        elif self.peek() == "\n": self.i += 1
+        else: self.fail("expected end of line")
+        self.line += 1
+    def at_eol(self):
+        return self.i >= len(self.s) or self.peek() == "\n" or self.peek(2) == "\r\n"
+    def comment(self):
+        """Consume an optional comment up to (not including) the end of line."""
+        if self.peek() == "#":
+            while not self.at_eol():
+                c = self.s[self.i]
+                if c == "\r" or (ord(c) < 0x20 and c != "\t") or ord(c) == 0x7F: self.fail("control character in comment")
+                self.i += 1
+    def parse(self):
+        out = {}
+        while self.i < len(self.s):
+            self.skip_blank()
+            if self.i >= len(self.s): break
+            c = self.peek()
+            if c == "#": self.comment()
+            if self.at_eol():
+                if self.i < len(self.s): self.newline()
+                continue
+            if c == "[": self.fail("tables are not supported (flat key = value files only)")
+            m = _TOML_BARE_KEY_RE.match(self.s, self.i)
+            if not m:
+                self.fail("quoted keys are not supported" if c in "\"'" else "expected a bare key, got %r" % c)
+            key = m.group(0); self.i = m.end(); self.skip_blank()
+            if self.peek() == ".": self.fail("dotted key '%s.' is not supported" % key)
+            if self.peek() != "=": self.fail("expected '=' after key '%s'" % key)
+            self.i += 1; self.skip_blank()
+            if key in out: self.fail("duplicate key '%s'" % key)
+            out[key] = self.value()
+            self.skip_blank(); self.comment()
+            if not self.at_eol(): self.fail("unexpected text after the value of '%s'" % key)
+            if self.i < len(self.s): self.newline()
+        return out
+    def value(self):
+        c, three = self.peek(), self.peek(3)
+        if three == '"""': return self.ml_basic()
+        if three == "'''": return self.ml_literal()
+        if c == '"': return self.basic()
+        if c == "'": return self.literal()
+        if c == "[": return self.array()
+        if c == "{": self.fail("inline tables are not supported")
+        m = re.match(r"[^\s,#\]\[{}]+", self.s[self.i:])
+        if not m: self.fail("missing value")
+        tok = m.group(0); self.i += len(tok)
+        if tok == "true": return True
+        if tok == "false": return False
+        if _TOML_INT_RE.match(tok): return int(tok.replace("_", ""))
+        if _TOML_FLOAT_RE.match(tok): return float(tok.replace("_", ""))
+        self.fail("unsupported value %r (strings must be quoted; dates, times, hex, inf and nan are not supported)" % tok[:20])
+    def escape(self):
+        e = self.peek()
+        if e in _TOML_ESCAPES:
+            self.i += 1; return _TOML_ESCAPES[e]
+        if e in ("u", "U"):
+            n = 4 if e == "u" else 8
+            hexs = self.s[self.i + 1:self.i + 1 + n]
+            if not re.match(r"^[0-9A-Fa-f]{%d}$" % n, hexs): self.fail("invalid \\%s escape" % e)
+            code = int(hexs, 16)
+            if code > 0x10FFFF or 0xD800 <= code <= 0xDFFF: self.fail("\\%s%s is not a Unicode scalar value" % (e, hexs))
+            self.i += 1 + n; return chr(code)
+        self.fail("invalid escape '\\%s'" % e)
+    def ctl(self, c, multiline):
+        if c == "\r" and multiline and self.peek(2) == "\r\n": return False
+        if (ord(c) < 0x20 and c != "\t" and not (multiline and c == "\n")) or ord(c) == 0x7F:
+            self.fail("control character U+%04X in string" % ord(c))
+        return True
+    def basic(self):
+        self.i += 1; out = []
+        while True:
+            if self.i >= len(self.s) or self.s[self.i] in "\n": self.fail("unterminated string")
+            c = self.s[self.i]
+            if c == '"': self.i += 1; return "".join(out)
+            self.ctl(c, False)
+            self.i += 1
+            out.append(self.escape() if c == "\\" else c)
+    def literal(self):
+        self.i += 1; j = self.s.find("'", self.i)
+        body = self.s[self.i:j] if j >= 0 else None
+        if body is None or "\n" in body: self.fail("unterminated literal string")
+        for c in body: self.ctl(c, False)
+        self.i = j + 1; return body
+    def _trim_first_newline(self):
+        if self.peek(2) == "\r\n": self.i += 2; self.line += 1
+        elif self.peek() == "\n": self.i += 1; self.line += 1
+    def ml_basic(self):
+        self.i += 3; self._trim_first_newline(); out = []
+        while True:
+            if self.i >= len(self.s): self.fail("unterminated multi-line string")
+            if self.peek(3) == '"""':
+                n = 0
+                while self.peek() == '"': n += 1; self.i += 1
+                if n > 5: self.fail("too many quotes at the end of a multi-line string")
+                return "".join(out) + '"' * (n - 3)
+            c = self.s[self.i]
+            if c == "\r" and self.peek(2) == "\r\n": self.i += 1; continue
+            if c == "\r": self.fail("lone carriage return in string")
+            self.ctl(c, True); self.i += 1
+            if c == "\n": self.line += 1
+            if c != "\\": out.append(c); continue
+            j = self.i
+            while j < len(self.s) and self.s[j] in " \t": j += 1
+            if self.s[j:j + 1] == "\n" or self.s[j:j + 2] == "\r\n":  # line-ending backslash trims the whitespace after it
+                while j < len(self.s) and self.s[j] in " \t\r\n":
+                    if self.s[j] == "\n": self.line += 1
+                    j += 1
+                self.i = j; continue
+            out.append(self.escape())
+    def ml_literal(self):
+        self.i += 3; self._trim_first_newline(); out = []
+        while True:
+            if self.i >= len(self.s): self.fail("unterminated multi-line literal string")
+            if self.peek(3) == "'''":
+                n = 0
+                while self.peek() == "'": n += 1; self.i += 1
+                if n > 5: self.fail("too many quotes at the end of a multi-line string")
+                return "".join(out) + "'" * (n - 3)
+            c = self.s[self.i]
+            if c == "\r" and self.peek(2) == "\r\n": self.i += 1; continue
+            if c == "\r": self.fail("lone carriage return in string")
+            self.ctl(c, True); self.i += 1
+            if c == "\n": self.line += 1
+            out.append(c)
+    def array(self):
+        self.i += 1; out = []
+        while True:
+            while True:
+                self.skip_blank()
+                if self.peek() == "#": self.comment()
+                if self.peek(2) == "\r\n" or self.peek() == "\n": self.newline(); continue
+                break
+            if self.i >= len(self.s): self.fail("unterminated array")
+            if self.peek() == "]": self.i += 1; return out
+            out.append(self.value())
+            while True:
+                self.skip_blank()
+                if self.peek() == "#": self.comment()
+                if self.peek(2) == "\r\n" or self.peek() == "\n": self.newline(); continue
+                break
+            if self.i >= len(self.s): self.fail("unterminated array")
+            if self.peek() == ",": self.i += 1
+            elif self.peek() != "]": self.fail("expected ',' or ']' in array")
+
+def parse_flat_toml(text):
+    """Strict flat-TOML reader (stdlib only; Python 3.9 has no tomllib). Returns {key: value}; raises TomlError on anything
+    it cannot parse. Supported: comments, bare keys, basic and literal strings (single and multi-line, all TOML escapes),
+    integers, floats, booleans, arrays of those. Rejected: tables, arrays of tables, dotted or quoted keys, inline tables,
+    dates and times, duplicate keys, control characters, invalid or surrogate escapes, trailing text, a BOM, a lone CR."""
+    if text.startswith("\ufeff"): raise TomlError("line 1: a byte order mark is not allowed")
+    return _TomlReader(text).parse()
+
+def _norm_ws(s):
+    return " ".join(str(s).split())
+
+def _tool_names(v):
+    """Tool names of a wrapper 'tools' value: a list, or a comma-separated string. None when it is neither."""
+    if isinstance(v, str): v = v.split(",")
+    if not isinstance(v, list): return None
+    out = [x.strip() for x in v if isinstance(x, str) and x.strip()]
+    return out if out and len(out) == len(v) else None
+
+def tool_keys(names):
+    """Set of tool identities of a list of tool names (TOOL_ALIASES, lower case; neutral tools dropped)."""
+    keys = {n.strip().lower() for n in names}
+    return {TOOL_ALIASES.get(k, k) for k in keys if k not in NEUTRAL_TOOLS}
+
+def capabilities(names):
+    """(set of capabilities, unmapped names) of a list of tool names, by CAPABILITY_BY_TOOL (case-insensitive)."""
+    caps, bad = set(), []
+    for n in names:
+        k = n.strip().lower()
+        if k in NEUTRAL_TOOLS: continue
+        if k in CAPABILITY_BY_TOOL: caps.add(CAPABILITY_BY_TOOL[k])
+        else: bad.append(n)
+    return caps, bad
+
+PARITY_ROW_TOOLS = {
+    "parity-skill-claude": ("claude",), "parity-skill-codex": ("codex",), "parity-skill-opencode": ("opencode",),
+    "parity-skill-hermes": ("hermes",), "parity-invocation-control": ("claude", "codex", "opencode"),
+    "parity-invocation-hermes": ("hermes",), "parity-agent-name": TOOLS,
+    "parity-wrapper-claude": ("claude",), "parity-wrapper-codex": ("codex",), "parity-wrapper-opencode": ("opencode",),
+    "parity-wrapper-hermes": ("hermes",), "parity-permissions-claude": ("claude",), "parity-permissions-codex": ("codex",),
+    "parity-permissions-opencode": ("opencode",), "parity-permissions-hermes": ("hermes",)}
+
+def _tag(tools, text):
+    return "[%s] %s" % ("/".join(tools), text)
+
+def _frontmatter_of(fp):
+    """(raw, meta, error): meta is None when the file is missing, unreadable or its frontmatter does not parse."""
+    raw, err = read_text(fp)
+    if raw is None: return None, None, err
+    meta, _, ferr = parse_frontmatter_ex(raw)
+    return raw, meta, ferr
+
+CODEX_VERIFIED_FIELDS = ("policy.allow_implicit_invocation",)  # the only agents/openai.yaml field verified (design 2.2)
+
+def _leaf_paths(node, prefix=""):
+    """Dotted paths of every leaf of a parsed mapping ('interface.display_name'); an empty mapping is a leaf."""
+    if isinstance(node, dict) and node:
+        return [x for k, v in node.items() for x in _leaf_paths(v, "%s%s." % (prefix, k))]
+    return [prefix[:-1]] if prefix else []
+
+def codex_policy(path):
+    """(problems, allow_implicit_invocation, unverified) for agents/openai.yaml. allow is True/False when the file declares
+    policy.allow_implicit_invocation as an unquoted boolean, else None. unverified: every other field of the file as a
+    dotted path. Only policy.allow_implicit_invocation is a verified Codex field (design 2.2); the rest of the Codex
+    schema is UNVERIFIED, so the file is never reported as loadable while it holds other fields (the codex row becomes
+    needs-review). A missing file is not a problem."""
+    fp = os.path.join(path, *OPENAI_YAML.split("/"))
+    if not os.path.lexists(fp): return [], None, []
+    raw, err = read_text(fp)
+    if raw is None: return ["%s: %s" % (OPENAI_YAML, err)], None, []
+    if any(ln.rstrip() == "---" for ln in raw.splitlines()):
+        return ["%s: YAML document markers ('---') are not supported" % OPENAI_YAML], None, []
+    wrapped = "---\n%s\n---\n" % raw.strip("\n")
+    meta, _, ferr = parse_frontmatter_ex(wrapped)
+    if meta is None:
+        ferr = re.sub(r"frontmatter line (\d+)", lambda m: "line %d" % (int(m.group(1)) - 1), ferr or "")
+        return ["%s cannot be parsed by the strict YAML reader: %s" % (OPENAI_YAML, ferr)], None, []
+    unverified = [x for x in _leaf_paths(meta) if x not in CODEX_VERIFIED_FIELDS]
+    if "policy" not in meta: return [], None, unverified
+    pol = meta["policy"]
+    if not isinstance(pol, dict): return ["%s: policy must be a mapping" % OPENAI_YAML], None, unverified
+    if "allow_implicit_invocation" not in pol: return [], None, unverified
+    v = pol["allow_implicit_invocation"]
+    if "policy.allow_implicit_invocation" not in set(yaml_typed_keys(wrapped)) or str(v).lower() not in ("true", "false"):
+        return ["%s: policy.allow_implicit_invocation must be an unquoted boolean true/false, got %r" % (OPENAI_YAML, v)], None, unverified
+    return [], str(v).lower() == "true", unverified
+
+def _skill_core(meta):
+    return ["%s: non-empty string required" % k for k in ("name", "description") if not _nonempty_str(meta.get(k))]
+
+def add_parity_checks_skill(r, path):
+    """Adds the skill parity rows (category 'parity', required) to report r."""
+    raw, meta, err = _frontmatter_of(os.path.join(path, "SKILL.md"))
+    typed = set(yaml_typed_keys(raw)) if raw is not None and meta else set()
+    fix = "See notes/multi-tool-parity-plan.md section 2.1. "
+    def row(cid, tools, problems, ok_text, hint):
+        r.add(cid, "parity", not problems, _tag(tools, ok_text if not problems else "; ".join(problems)),
+              fix + hint, must=True)
+    bad = ["SKILL.md frontmatter unusable: %s" % err] if meta is None else []
+    meta = meta or {}
+    name = meta.get("name") if isinstance(meta.get("name"), str) else ""
+    desc = meta.get("description") if isinstance(meta.get("description"), str) else ""
+    p = bad + (_skill_core(meta) if not bad else [])
+    if not p:
+        reserved = [w for w in RESERVED_NAME_WORDS if w in name.lower()]
+        if reserved: p.append("name contains reserved word(s) %s" % reserved)
+        if len(name) > NAME_MAX: p.append("name exceeds %d characters" % NAME_MAX)
+        if len(desc) > DESCRIPTION_MAX: p.append("description exceeds %d characters" % DESCRIPTION_MAX)
+        if any(c in name + desc for c in "<>"): p.append("name or description contains '<' or '>'")
+    row("parity-skill-claude", ("claude",), p, "SKILL.md satisfies the Claude Code rules (fields, reserved words, limits)",
+        "Fix SKILL.md name/description for Claude Code.")
+    pol_problems, allow, unverified = codex_policy(path)
+    p = bad + (_skill_core(meta) if not bad else []) + pol_problems
+    if not p and unverified:
+        r.review("parity-skill-codex", "parity",
+                 "[codex] %s declares fields this package cannot verify: %s (only %s is verified); Codex loadability is unconfirmed"
+                 % (OPENAI_YAML, ", ".join(unverified), ", ".join(CODEX_VERIFIED_FIELDS)),
+                 "A human confirms the fields against the Codex documentation, or remove them from %s." % OPENAI_YAML)
+    else:
+        row("parity-skill-codex", ("codex",), p,
+            "SKILL.md satisfies the Codex CLI rules (%s)" % ("%s: only the verified field %s" % (OPENAI_YAML, ", ".join(CODEX_VERIFIED_FIELDS))
+                if os.path.lexists(os.path.join(path, "agents", "openai.yaml")) else "no agents/openai.yaml"),
+            "Fix SKILL.md or agents/openai.yaml (policy.allow_implicit_invocation must be an unquoted boolean).")
+    p = list(bad)
+    if not bad:
+        p += _skill_core(meta)
+        if name and not PORTABLE_NAME_RE.match(name):
+            p.append("name %r must match %s" % (name, PORTABLE_NAME_RE.pattern))
+        folder = os.path.basename(os.path.realpath(path))
+        if name and name != folder: p.append("name %r must equal the folder name %r exactly" % (name, folder))
+        md = meta.get("metadata")
+        if isinstance(md, dict):
+            for k, v in md.items():
+                if not isinstance(v, str): p.append("metadata.%s must be a string, got %s" % (k, type(v).__name__))
+                elif "metadata." + k in typed: p.append("metadata.%s: YAML loads %r as a non-string; quote it" % (k, v))
+            av = md.get(OPENCODE_AUTOINVOKE_KEY)
+            if av is not None and av not in ("true", "false"):
+                p.append('metadata.%s must be the string "true" or "false", got %r' % (OPENCODE_AUTOINVOKE_KEY, av))
+        elif md is not None:
+            p.append("metadata must be a mapping of string keys to string values")
+    row("parity-skill-opencode", ("opencode",), p, "SKILL.md satisfies the OpenCode rules (name regex, folder name, string metadata)",
+        "Rename the skill folder and name to lowercase-hyphen form, quote every metadata value.")
+    p = list(bad)
+    if not bad:
+        p += _skill_core(meta)
+        md = meta.get("metadata")
+        if isinstance(md, dict) and "hermes" in md and not isinstance(md["hermes"], str):
+            p.append("metadata.hermes must not be a mapping or list in the portable package (OpenCode needs string metadata)")
+    if raw is not None and re.search(r"(?m)^[ \t]+hermes:[ \t]*(?:$|[{\[])", raw.split("\n---", 1)[0]):
+        p.append("metadata.hermes mapping/list is not allowed in the portable package (OpenCode needs string metadata "
+                 "values); Hermes uses the plain agentskills.io fields")
+    row("parity-skill-hermes", ("hermes",), sorted(set(p)),
+        "SKILL.md satisfies the Hermes Agent baseline (agentskills.io fields, no metadata.hermes mapping)",
+        "Remove metadata.hermes; Hermes-specific keys are unsupported until a string-safe form is verified.")
+    disabled = "disable-model-invocation" in meta and str(meta["disable-model-invocation"]).strip().lower() == "true"
+    if not disabled:
+        r.na("parity-invocation-control", "parity", "[claude/codex/opencode] disable-model-invocation is not used (absent or false)", must=True)
+        r.na("parity-invocation-hermes", "parity", "[hermes] disable-model-invocation is not used (absent or false)")
+        return
+    md = meta.get("metadata") if isinstance(meta.get("metadata"), dict) else {}
+    miss = []
+    if md.get(OPENCODE_AUTOINVOKE_KEY) != "false":
+        miss.append("[opencode] metadata '%s: \"false\"' (OpenCode ignores disable-model-invocation)" % OPENCODE_AUTOINVOKE_KEY)
+    if allow is not False:
+        miss.append("[codex] %s with policy.allow_implicit_invocation: false" % OPENAI_YAML)
+    r.add("parity-invocation-control", "parity", not miss,
+          _tag(("claude", "codex", "opencode"), "disable-model-invocation: true has the equivalent controls for Codex and OpenCode"
+               if not miss else "disable-model-invocation: true is only honored by Claude Code; missing: %s" % "; ".join(miss)),
+          fix + "Declare the equivalent controls or drop disable-model-invocation.", must=True)
+    r.review("parity-invocation-hermes", "parity",
+             "[hermes] disable-model-invocation: true has no verified Hermes equivalent (design 2.4); Hermes may auto-select this skill",
+             "A human confirms that auto-selection by Hermes is acceptable, or the skill stops relying on invocation control.")
+
+def _wrapper_rel(tool, name):
+    return {"claude": "wrappers/claude/%s.md" % name, "codex": "wrappers/codex/%s.toml" % name,
+            "opencode": "wrappers/opencode/%s.md" % name, "hermes": "wrappers/hermes/SOUL.md"}[tool]
+
+def _wrapper_common(meta_name, meta_desc, name, desc, body):
+    p = []
+    if meta_name is not None and meta_name != name: p.append("name %r differs from AGENT.md name %r" % (meta_name, name))
+    if _norm_ws(meta_desc or "") != desc: p.append("description differs from AGENT.md")
+    if body is not None and not body.strip(): p.append("prompt body is empty")
+    return p
+
+def agent_wrapper_states(path):
+    """{tool: {"rel", "problems", "caps"}} for the four wrappers of an agent folder. caps: capability set the wrapper
+    grants (None when it cannot be determined, and always for Codex and Hermes). problems: why the wrapper itself is unusable."""
+    raw, meta, _ = _frontmatter_of(os.path.join(path, "AGENT.md"))
+    meta = meta or {}
+    name, desc = _str_field(meta, "name"), _norm_ws(_str_field(meta, "description"))
+    root, out = os.path.realpath(path), {}
+    outside = lambda fp: not _within(root, os.path.realpath(fp))
+    for tool in TOOLS:
+        rel = _wrapper_rel(tool, name or "<name>")
+        st = out[tool] = {"rel": rel, "problems": [], "caps": None, "names": None}
+        p, fp = st["problems"], os.path.join(path, *rel.split("/"))
+        if not name:
+            p.append("AGENT.md has no usable name"); continue
+        if not os.path.isfile(fp):
+            p.append("missing wrapper file %s" % rel); continue
+        if outside(fp):
+            p.append(WRAPPER_OUT % rel); continue
+        if tool in ("claude", "opencode"):
+            _, m, err = _frontmatter_of(fp)
+            if m is None:
+                p.append("%s: frontmatter unusable: %s" % (rel, err)); continue
+            body = parse_frontmatter_ex(read_text(fp)[0])[1]
+            if tool == "claude":
+                for k in ("name", "description"):
+                    if not _nonempty_str(m.get(k)): p.append("%s: %s: non-empty string required" % (rel, k))
+                p += ["%s: %s" % (rel, x) for x in _wrapper_common(m.get("name") if _nonempty_str(m.get("name")) else None,
+                                                                    m.get("description"), name, desc, body)]
+                names = _tool_names(m.get("tools"))
+                if names is None: p.append("%s: tools: a non-empty list or comma-separated string is required" % rel)
+                else:
+                    caps, bad = capabilities(names)
+                    if bad: p.append("%s: tools %s are not in the capability table" % (rel, bad))
+                    else: st["caps"], st["names"] = caps, tool_keys(names)
+                if "model" in m and not _nonempty_str(m["model"]): p.append("%s: model must be a non-empty string" % rel)
+            else:
+                if not _nonempty_str(m.get("description")): p.append("%s: description: non-empty string required" % rel)
+                p += ["%s: %s" % (rel, x) for x in _wrapper_common(m["name"] if "name" in m and _nonempty_str(m.get("name")) else None,
+                                                                    m.get("description"), name, desc, body)]
+                if "name" in m and not _nonempty_str(m["name"]): p.append("%s: name must be a non-empty string" % rel)
+                if "mode" in m and m["mode"] not in OPENCODE_MODES: p.append("%s: mode must be one of %s" % (rel, "/".join(OPENCODE_MODES)))
+                if "model" in m and not _nonempty_str(m["model"]): p.append("%s: model must be a non-empty string" % rel)
+                perm = m.get("permission")
+                if not isinstance(perm, dict):
+                    p.append("%s: permission: a mapping that sets every recorded OpenCode permission key is required" % rel)
+                else:
+                    for k, cap in OPENCODE_PERMISSION_GRANTS.items():
+                        if k not in perm: p.append("%s: permission.%s must be set explicitly" % (rel, k))
+                        elif perm[k] not in PERMISSION_ACTIONS:
+                            p.append("%s: permission.%s must be one of %s" % (rel, k, "/".join(PERMISSION_ACTIONS)))
+                        elif cap is None and perm[k] != "deny":
+                            p.append("%s: permission.%s must be deny, because no capability class covers it" % (rel, k))
+                    unknown = sorted(k for k in perm if k not in OPENCODE_PERMISSION_GRANTS)
+                    if unknown: p.append("%s: permission keys %s are not in the recorded OpenCode permission key list" % (rel, unknown))
+                    if not any(x.startswith(rel + ": permission") for x in p):
+                        st["caps"] = {cap for k, cap in OPENCODE_PERMISSION_GRANTS.items() if cap and perm[k] != "deny"}
+        elif tool == "codex":
+            raw_t, err = read_text(fp)
+            if raw_t is None:
+                p.append(err); continue
+            try:
+                t = parse_flat_toml(raw_t)
+            except TomlError as e:
+                p.append("%s cannot be parsed by the strict flat-TOML reader: %s" % (rel, e)); continue
+            for k in CODEX_AGENT_REQUIRED_KEYS:
+                if not _nonempty_str(t.get(k)): p.append("%s: %s: non-empty string required" % (rel, k))
+            p += ["%s: %s" % (rel, x) for x in _wrapper_common(t.get("name") if _nonempty_str(t.get("name")) else None,
+                                                                t.get("description"), name, desc, None)]
+            for k in CODEX_AGENT_OPTIONAL_KEYS:
+                if k in t and not _nonempty_str(t[k]): p.append("%s: %s must be a non-empty string" % (rel, k))
+            if "sandbox_mode" in t:
+                p.append("%s: sandbox_mode in a Codex custom agent file does not override the parent session; remove it" % rel)
+            known = CODEX_AGENT_REQUIRED_KEYS + CODEX_AGENT_OPTIONAL_KEYS
+            unknown = sorted(set(t) - set(known) - {"sandbox_mode"})
+            if unknown: p.append("%s: keys %s are not in the recorded Codex custom-agent key list (%s)" % (rel, unknown, ", ".join(known)))
+        else:
+            text, err = read_text(fp)
+            if text is None:
+                p.append(err); continue
+            if not text.strip(): p.append("%s is empty" % rel)
+            else:
+                if not re.search(r"(?<![\w-])%s(?![\w-])" % re.escape(name), text): p.append("%s does not state the agent name %r" % (rel, name))
+                if desc and desc not in _norm_ws(text): p.append("%s does not contain the AGENT.md description verbatim" % rel)
+            cfg = os.path.join(path, "wrappers", "hermes", "config.yaml")
+            if os.path.lexists(cfg):
+                ctext, cerr = (None, WRAPPER_OUT % "wrappers/hermes/config.yaml") if outside(cfg) else read_text(cfg)
+                if ctext is None: p.append(cerr)
+                elif not ctext.strip(): p.append("wrappers/hermes/config.yaml is empty (remove it or fill it)")
+    return out
+
+def add_parity_checks_agent(r, path):
+    """Adds the agent parity rows (category 'parity', required) to report r."""
+    _, meta, _ = _frontmatter_of(os.path.join(path, "AGENT.md"))
+    meta = meta or {}
+    name = _str_field(meta, "name")
+    fix = "See notes/multi-tool-parity-plan.md section 2.4. "
+    ok = bool(PORTABLE_NAME_RE.match(name))
+    r.add("parity-agent-name", "parity", ok, _tag(TOOLS, "agent name %r is a portable file stem (%s)" % (name, PORTABLE_NAME_RE.pattern)
+          if ok else "agent name %r must match %s (it is the wrapper file name)" % (name, PORTABLE_NAME_RE.pattern)),
+          fix + "Rename the agent to lowercase letters, digits and single hyphens.", must=True)
+    states = agent_wrapper_states(path)
+    for tool in TOOLS:
+        st = states[tool]
+        r.add("parity-wrapper-" + tool, "parity", not st["problems"],
+              _tag((tool,), "%s is present, parseable and consistent with AGENT.md" % st["rel"] if not st["problems"]
+                   else "; ".join(st["problems"])),
+              fix + "Create or repair %s." % st["rel"], must=True)
+    tools = [str(t) for t in as_list(meta.get("tools"))]
+    want, unmapped = capabilities(tools)
+    for tool in ("claude", "codex", "opencode"):
+        st = states[tool]
+        cid = "parity-permissions-" + tool
+        if unmapped:
+            r.add(cid, "parity", False, _tag((tool,), "AGENT.md tools %s are not in the capability table; permissions cannot be compared" % unmapped),
+                  fix + "Use mapped tool names or extend CAPABILITY_BY_TOOL in eva.py.", must=True)
+        elif tool == "codex":
+            loose = [c for c in CODEX_UNRESTRICTABLE if c not in want]
+            if st["problems"]:
+                r.na(cid, "parity", _tag((tool,), "wrapper is not usable (see parity-wrapper-codex)"), must=True)
+            elif loose:
+                r.review(cid, "parity", _tag((tool,), "Codex cannot restrict %s per agent; the agent runs with the parent "
+                                                      "session's sandbox" % ", ".join(loose)),
+                         fix + "Run the agent on Codex only from a session whose sandbox fits it, and record that decision "
+                         "with `skill_eval.py approve --gate rule_review`.")
+            else:
+                r.add(cid, "parity", True, _tag((tool,), "AGENT.md tools need %s, so the agent needs no restriction that Codex "
+                                                "cannot apply per agent" % ", ".join(CODEX_UNRESTRICTABLE)), must=True)
+        elif st["caps"] is None:
+            r.na(cid, "parity", _tag((tool,), "wrapper permissions not readable (see parity-wrapper-%s)" % tool), must=True)
+        elif tool == "claude":
+            have, need = sorted(st["names"]), sorted(tool_keys(tools))
+            r.add(cid, "parity", have == need,
+                  _tag((tool,), "wrapper tools %s match the AGENT.md tools by name" % have if have == need else
+                       "wrapper tools %s differ from the AGENT.md tools %s by name (missing %s, extra %s)" % (
+                           have, need, sorted(set(need) - set(have)), sorted(set(have) - set(need)))),
+                  fix + "List the same tools in the wrapper as in AGENT.md (aliases: TOOL_ALIASES in eva.py).", must=True)
+        else:
+            have, need = sorted(st["caps"]), sorted(want)
+            classes = " (compared by capability class, because OpenCode permission keys are not tool names)"
+            if have != need:
+                r.add(cid, "parity", False, _tag((tool,), "wrapper grants %s, AGENT.md tools need %s%s" % (have, need, classes)),
+                      fix + "Align the wrapper permissions with the AGENT.md tools.", must=True)
+            elif not OPENCODE_PERMISSION_KEYS_COMPLETE:
+                r.review(cid, "parity", _tag((tool,), "wrapper permissions grant %s, as the AGENT.md tools need, but the OpenCode "
+                                                      "permission key list is not verified complete; an unlisted key keeps its "
+                                                      "UNVERIFIED default" % have),
+                         fix + "Check that no OpenCode permission key outside the recorded list matters for this agent, and "
+                         "record that decision with `skill_eval.py approve --gate rule_review`.")
+            else:
+                r.add(cid, "parity", True, _tag((tool,), "wrapper permissions %s match the AGENT.md tools%s" % (have, classes)),
+                      must=True)
+    r.add("parity-permissions-hermes", "parity", False,
+          _tag(("hermes",), "AGENT.md tools cannot be checked against Hermes: no verified per-agent tool-permission format "
+               "exists (UNVERIFIED, design 2.4); failing closed, so Hermes is never reported as consistent"),
+          fix + "Until a Hermes permission format is verified and implemented in add_parity_checks_agent (eva.py) this row "
+          "fails for every agent by design; see the README section on multi-tool parity.", must=True)
+
+def add_parity_checks(r, path):
+    kind = detect_kind(path)
+    if kind == "skill": add_parity_checks_skill(r, path)
+    elif kind == "agent": add_parity_checks_agent(r, path)
+
+def parity_report(path):
+    """A Report holding only the parity rows of the skill or agent folder at path (never raises)."""
+    kind = detect_kind(path)
+    r = Report(path, kind or "unknown")
+    add_parity_checks(r, path)
+    return r
+
+def parity_status(path_or_report):
+    """{tool: {"status": "pass"|"fail"|"review", "problems": [...], "unverified": [...]}} from the parity rows."""
+    r = parity_report(path_or_report) if isinstance(path_or_report, str) else path_or_report
+    out = {t: {"status": "pass", "problems": [], "unverified": []} for t in TOOLS}
+    for c in r.checks:
+        for t in PARITY_ROW_TOOLS.get(c["id"], ()):
+            st = out[t]
+            if c["status"] == "fail":
+                st["status"] = "fail"; st["problems"].append("%s: %s" % (c["id"], c["reason"]))
+            elif c["status"] == "needs-review":
+                if st["status"] != "fail": st["status"] = "review"
+                st["problems"].append("%s: %s" % (c["id"], c["reason"]))
+            elif c["status"] == "n/a" and "UNVERIFIED" in c["reason"]:
+                st["unverified"].append(c["id"])
+    return out
+
+def parity_violations(path):
+    """FAIL-level parity findings ('[tool] reason') of a skill or agent folder. The skill_eval loop calls this after
+    every builder call and load_eval_set reports them as validation problems."""
+    return [c["reason"] for c in parity_report(path).failed]
+
+def parity_line(status):
+    """One line: 'claude=pass codex=pass opencode=fail hermes=pass' (+ '(unverified: ...)' for tools with open items)."""
+    return " ".join("%s=%s%s" % (t, status[t]["status"], " (unverified: %s)" % ",".join(
+        x.replace("parity-", "") for x in status[t]["unverified"]) if status[t]["unverified"] else "") for t in TOOLS)
 
 # ---------- skills (agentskills.io specification + Claude skill authoring best practices) ----------
 SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
@@ -917,6 +2025,8 @@ def check_skill(path):
           "\"files\"(선택), \"assertions\"(선택)}]} 형식으로 쓰세요." % name, must=True)
     r.add("evals-count", "evaluation", n >= MIN_EVALS, "%d eval cases (need >= %d)" % (n, MIN_EVALS),
           "실제 사용자 요청처럼 쓴 테스트 케이스를 %d개 이상 두세요(경계 상황 1개 이상 포함)." % MIN_EVALS, must=True)
+    add_english_checks(r, path)
+    add_parity_checks(r, path)
     return r
 
 # ---------- agents (slated to move to the separate "agent master"; kept here until then) ----------
@@ -1021,6 +2131,8 @@ def check_agent(path):
     multi = [f for f, s in objs if isinstance(s.get("turns"), list) and len(s["turns"]) >= 2]
     r.add("multi-turn-scenario", "context", bool(multi),
           "multi-turn scenarios: %s" % multi, "turns가 2개 이상이고 앞 턴 정보를 참조하는 시나리오를 추가하세요.")
+    add_english_checks(r, path)
+    add_parity_checks(r, path)
     return r
 
 def check(path):
@@ -1494,6 +2606,13 @@ def feedback_md(r, rnd=None):
     lines += ["", "다 고친 뒤 `python3 eva.py check %s`로 다시 제출하세요." % r.path]
     return "\n".join(lines) + "\n"
 
+def english_state(rep):
+    """'fail' when an English-only row failed, 'review' when a language row needs review (non-English run-output matchers),
+    else 'pass'. The index writes this next to the verdict, so a review is never shown as a pass."""
+    lang = [c for c in rep.checks if c["category"] == "language"]
+    if any(c["status"] == "fail" for c in lang): return "fail"
+    return "review" if any(c["status"] == "needs-review" for c in lang) else "pass"
+
 def build_index(root):
     reg = []
     for u in find_units(root):
@@ -1503,11 +2622,15 @@ def build_index(root):
         rep = check(u)
         reg.append({"kind": kind, "name": meta.get("name", ""), "version": (meta.get("metadata") or {}).get("version", meta.get("version", "")) if isinstance(meta.get("metadata", {}), dict) else meta.get("version", ""),
                     "description": meta.get("description", ""), "path": os.path.relpath(u, root),
-                    "verdict": rep.verdict, "score": rep.score})
-    md = ["# INDEX", "", "| kind | name | version | verdict | score | path | description |", "|---|---|---|---|---|---|---|"]
+                    "verdict": rep.verdict, "score": rep.score,
+                    "english": english_state(rep),
+                    "parity": {t: st["status"] for t, st in parity_status(rep).items()}})
+    md = ["# INDEX", "", "| kind | name | version | verdict | score | english | parity | path | description |",
+          "|---|---|---|---|---|---|---|---|---|"]
     for e in reg:
-        md.append("| %s | %s | %s | %s | %.2f | %s | %s |" % (e["kind"], e["name"], e["version"], e["verdict"],
-                  e["score"], e["path"], str(e["description"]).replace("|", "/")[:120]))
+        md.append("| %s | %s | %s | %s | %.2f | %s | %s | %s | %s |" % (e["kind"], e["name"], e["version"], e["verdict"],
+                  e["score"], e["english"], " ".join("%s=%s" % kv for kv in e["parity"].items()), e["path"],
+                  str(e["description"]).replace("|", "/")[:120]))
     return reg, "\n".join(md) + "\n"
 
 def print_report(r):

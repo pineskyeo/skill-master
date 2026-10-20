@@ -85,7 +85,6 @@ FORBIDDEN_EXTRA_ARGS = {"claude": ("--model", "--fallback-model", "--max-budget-
                         "codex": ("-m", "--model", "-p", "--profile", "--oss", "-C", "--cd", "--add-dir")}
 
 SAFE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")  # an eval `name` must be one safe path component
-SKILL_IGNORE = ("evals", "__pycache__", "*-workspace")      # not installed into runs, not part of the skill hash
 
 class EvalError(Exception): pass
 class LiveDisabled(RuntimeError): pass
@@ -130,8 +129,9 @@ def sha256_files(*paths):
             h.update(b"<missing>")
     return h.hexdigest()
 
-def sha256_labeled(pairs):
-    """pairs: [(label, path)]; the label (path relative to the skill) is hashed with the content."""
+def sha256_labeled(pairs, marked=()):
+    """pairs: [(label, path)]; the label (path relative to the skill) is hashed with the content. marked: [(label,
+    marker bytes)], hashed after the pairs with the marker in place of content."""
     h = hashlib.sha256()
     for label, p in pairs:
         h.update(label.encode() + b"\0")
@@ -140,20 +140,17 @@ def sha256_labeled(pairs):
         else:
             h.update(b"<missing>")
         h.update(b"\0")
+    for label, marker in marked:
+        h.update(label.encode() + b"\0" + marker + b"\0")
     return h.hexdigest()
 
 def skill_tree_hash(skill_dir):
-    """sha256 over every file a run installs (the skill folder minus SKILL_IGNORE), labeled by relative path.
-    Symlinks are followed and hashed by content, as copytree copies content too."""
-    pairs, ign = [], shutil.ignore_patterns(*SKILL_IGNORE)
-    for dp, dn, fn in os.walk(skill_dir, followlinks=True):
-        skip = ign(dp, dn + fn)
-        dn[:] = sorted(d for d in dn if d not in skip)
-        for f in sorted(fn):
-            if f not in skip:
-                p = os.path.join(dp, f)
-                pairs.append((os.path.relpath(p, skill_dir).replace(os.sep, "/"), p))
-    return sha256_labeled(pairs)
+    """sha256 over every file a run installs (eva.unit_tree files), labeled by relative path and hashed by content. A
+    link out of the folder and a cycle enter as their path with a marker, never as content and never walked."""
+    import eva
+    tree = eva.unit_tree(skill_dir)
+    return sha256_labeled([(rel, os.path.join(skill_dir, *rel.split("/"))) for rel in tree.files],
+                          [(rel, b"<outside>") for rel in tree.outside] + [(rel, b"<cycle>") for rel in tree.cycles])
 
 def cents_floor(x):
     return math.floor(x * 100 + 1e-9) / 100.0
@@ -293,6 +290,8 @@ def load_eval_set(skill_dir):
                       "pressure": pressure})
     triggers, tp = load_triggers(skill_dir)
     problems += tp
+    problems += ["english-only rule: " + x for x in eva.english_violations(skill_dir)]
+    problems += ["multi-tool parity rule: " + x for x in eva.parity_violations(skill_dir)]
     return {"skill_name": name, "skill_dir": skill_dir, "description": meta.get("description") or "",
             "claude_python_script": claude_script, "cases": cases, "triggers": triggers}, problems
 
@@ -932,15 +931,26 @@ class Engine:
     def label(self):
         return "%s(%s%s)" % (self.name, self.model or "CLI default", ", effort %s" % self.effort if self.effort else "")
     def install_skill(self, workdir, skill_dir, name):
-        """Copy the skill without evals/ (the eval set must not leak into the run). The name (SKILL.md frontmatter)
-        must be one safe path component and the destination must stay inside the skills folder of the sandbox."""
+        """Copy exactly the eva.unit_tree files of the skill, so the run holds what the English scan read (eva.SKILL_IGNORE
+        is left out, evals/ among them: the eval set must not leak into the run). A link that leaves the folder or
+        dangles, and a cycle, refuse the install. The name (SKILL.md frontmatter) must be one safe path component and the
+        destination must stay inside the skills folder of the sandbox."""
+        import eva
         if not safe_name(name):
             raise EvalError("skill name %r is not a safe path component; refusing to install it" % (name,))
-        bad = escaping_links(skill_dir)
+        tree = eva.unit_tree(skill_dir)
+        bad = escaping_links(skill_dir, tree)
         if bad: raise EvalError("skill folder %s has symlinks that leave it (or dangle): %s; refusing to copy them "
                                 "into the run" % (skill_dir, ", ".join(bad[:5])))
+        if tree.cycles: raise EvalError("skill folder %s has folder links that point back at a folder on their own path: "
+                                        "%s; a copy would never end, refusing to install it"
+                                        % (skill_dir, ", ".join(tree.cycles[:5])))
         dst = ensure_inside(os.path.join(workdir, self.skills_rel), os.path.join(workdir, self.skills_rel, name))
-        shutil.copytree(skill_dir, dst, ignore=shutil.ignore_patterns(*SKILL_IGNORE))
+        os.makedirs(dst)
+        for rel in tree.files:
+            to = os.path.join(dst, *rel.split("/"))
+            os.makedirs(os.path.dirname(to), exist_ok=True)
+            shutil.copy2(os.path.join(skill_dir, *rel.split("/")), to)
         return dst
     def command(self, prompt, with_skill, budget_usd=None, skill_name=None): raise NotImplementedError
     def parse(self, stdout): raise NotImplementedError
@@ -1253,6 +1263,46 @@ class CodexEngine(Engine):
         return any(needle in json.dumps(c.get("input"), ensure_ascii=False) for c in result["tool_calls"])
 
 ENGINES = {"claude": ClaudeCodeEngine, "codex": CodexEngine}
+# Multi-tool parity (owner decision 2026-10-19 18:43): a skill is created for Claude Code, Codex CLI, OpenCode and Hermes
+# Agent together. Only claude and codex have an engine; OpenCode and Hermes engines do not exist and are never faked.
+TOOL_ENGINES = {"claude": "claude", "codex": "codex", "opencode": None, "hermes": None}
+UNAVAILABLE_ENGINES = {"opencode": "OpenCode", "hermes": "Hermes Agent"}
+NOT_AVAILABLE = "not-run: engine not available"
+NOT_SELECTED = "not-run: engine not selected"
+NOT_GRADED = "not-run: no graded runs"
+PENDING = "pending: runs collected, none graded yet"
+
+def tool_coverage(engine_names=None, graded=None, collected=None):
+    """Per tool whether the dynamic eval ran: {tool: {"status", "engine", "graded_runs", "pending_runs"}}. status is "run"
+    (at least one run graded, the summarize() criterion: pass_rate is not None; NOT "passed"), "planned" (plan time, nothing
+    ran yet), "pending: ..." (runs were collected but none is graded yet) or "not-run: <reason>". engine_names: engines
+    selected (None: unknown, treated as all available ones). graded: {engine: graded run count} of a finished iteration
+    (None: plan time). collected: {engine: collected run count} (default: equal to graded). OpenCode and Hermes are always
+    "not-run: engine not available"."""
+    import eva
+    out = {}
+    for tool in eva.TOOLS:
+        eng = TOOL_ENGINES[tool]
+        n = (graded or {}).get(eng, 0) if eng else 0
+        c = (collected if collected is not None else graded or {}).get(eng, 0) if eng else 0
+        if eng is None: status = NOT_AVAILABLE
+        elif engine_names is not None and eng not in engine_names: status = NOT_SELECTED
+        elif graded is None: status = "planned"
+        elif n > 0: status = "run"
+        else: status = PENDING if c > n else NOT_GRADED
+        out[tool] = {"status": status, "engine": eng, "graded_runs": n, "pending_runs": max(0, c - n)}
+    return out
+
+def coverage_line(cov):
+    return ", ".join("%s=%s" % (t, c["status"]) for t, c in cov.items())
+
+def coverage_note(cov):
+    """Gate note (never a gate problem, see compute_gate) naming the tools the dynamic eval did not cover; None if all ran."""
+    missing = ["%s (%s)" % (t, c["status"].replace("not-run: ", "")) for t, c in cov.items() if c["status"] != "run"]
+    if not missing: return None
+    ran = [t for t, c in cov.items() if c["status"] == "run"]
+    return ("per-tool dynamic coverage: run on %s; NOT run on %s (not-run is never counted as passed; adding the OpenCode "
+            "and Hermes engines is a follow-up)" % (", ".join(ran) or "none", ", ".join(missing)))
 
 # ---------- per-run isolation (README "Eval isolation") ----------
 def ancestors(path):
@@ -1340,20 +1390,13 @@ def claude_shared_skill_notes(cfg):
             "config dir); if any loads, the post-run init check (skills exactly as expected, plugins == []) stops "
             "the iteration after that run" % (len(synced), len(plugin), cfg)]
 
-def escaping_links(root):
-    """Paths (relative to root) of symlinks a copy of root would follow out of root, or that dangle. SKILL_IGNORE
+def escaping_links(root, tree=None):
+    """Paths (relative to root, forward slashes) of symlinks a copy of root would follow out of root, or that dangle:
+    the outside links and the dangling files of eva.unit_tree (tree, when the caller already has it). eva.SKILL_IGNORE
     entries are not copied, so they are not checked."""
-    r, bad, ign = os.path.realpath(root), [], shutil.ignore_patterns(*SKILL_IGNORE)
-    for dp, dn, fn in os.walk(root):
-        skip = ign(dp, dn + fn)
-        dn[:] = [d for d in dn if d not in skip]
-        for n in [d for d in dn] + [f for f in fn if f not in skip]:
-            p = os.path.join(dp, n)
-            if not os.path.islink(p): continue
-            t = os.path.realpath(p)
-            if not os.path.exists(t) or (t != r and not t.startswith(r.rstrip(os.sep) + os.sep)):
-                bad.append(os.path.relpath(p, root))
-    return sorted(bad)
+    import eva
+    tree = tree or eva.unit_tree(root)
+    return sorted(set(tree.outside) | {r for r in tree.files if not os.path.exists(os.path.join(root, *r.split("/")))})
 
 RMTREE_ATTEMPTS = 3
 
@@ -1872,11 +1915,37 @@ def gate_hash(gate, spec, ws):
         return sha256_files(os.path.join(ws, "requirements.md")) if os.path.isfile(os.path.join(ws, "requirements.md")) else None
     if gate == "eval_set":
         return sha256_labeled(eval_set_files(spec["skill_dir"]))
+    if gate == "rule_review":
+        return rule_review_hash(spec["skill_dir"])
     m = re.match(r"(?:iteration-(\d+)|registration)$", gate)
-    if not m: raise EvalError("unknown gate %r (requirements|eval_set|iteration-N|registration)" % gate)
+    if not m: raise EvalError("unknown gate %r (requirements|eval_set|rule_review|iteration-N|registration)" % gate)
     n = int(m.group(1)) if m.group(1) else (iterations(ws) or [None])[-1]
     bp = os.path.join(ws, "iteration-%s" % n, "benchmark.json")
     return sha256_files(bp) if n is not None and os.path.isfile(bp) else None
+
+def rule_review_items(skill_dir):
+    """Needs-review findings of the English-only and parity rules (eva.review_items): non-English run-output matchers,
+    Codex metadata fields that cannot be verified, Hermes invocation control."""
+    import eva
+    return eva.review_items(skill_dir)
+
+def rule_review_hash(skill_dir):
+    """The findings show short excerpts, five at most per check, so the hash also covers the bytes of the files the review
+    rows read (eva.review_sources); otherwise an edit outside the excerpts would keep an old decision valid."""
+    import eva
+    items = rule_review_items(skill_dir)
+    if not items: return None
+    files = sha256_labeled([(rel, os.path.join(skill_dir, *rel.split("/"))) for rel in eva.review_sources(skill_dir)])
+    return hashlib.sha256(("\n".join(items) + "\n" + files).encode("utf-8")).hexdigest()
+
+def rule_review_problems(spec, ws):
+    """[problem] when the skill has rule-review findings and no recorded human decision (`approve --gate rule_review`) matches
+    exactly these findings and the bytes of eva.review_sources: changing a matcher, a metadata field, AGENT.md or a Codex or
+    OpenCode wrapper invalidates the decision."""
+    items = rule_review_items(spec["skill_dir"])
+    if not items or approval_ok("rule_review", spec, ws): return []
+    return ["rule review not recorded: %d finding(s) need a human decision (%s); read them with `validate`, then run `approve "
+            "--gate rule_review --by NAME` (the decision is bound to these exact findings)" % (len(items), "; ".join(i[:200] for i in items))]
 
 def eval_set_files(skill_dir):
     """[(label, path)] covered by the eval_set approval: evals.json, trigger_evals.json and every evals[].files fixture."""
@@ -2106,6 +2175,7 @@ def run_iteration(spec, ws, engines, runs=DEFAULT_RUNS, baseline="none", old_ski
     wjson(os.path.join(it_dir, "plan.json"), {"skill_name": spec["skill_name"], "skill_path": spec["skill_dir"],
           "old_skill": old_skill, "configurations": configs, "runs_per_configuration": runs,
           "engines": {e.name: e.model for e in engines}, "evals_run": [c["id"] for c in spec["cases"]],
+          "tool_coverage": tool_coverage([e.name for e in engines]),
           "efforts": {e.name: getattr(e, "effort", None) for e in engines},
           "trigger_queries": len(spec["triggers"] or []), "started_at": now_iso(),
           "skill_sha256": skill_tree_hash(spec["skill_dir"]), "eval_set_sha256": gate_hash("eval_set", spec, ws),
@@ -2595,6 +2665,12 @@ def build_benchmark(spec, ws, n):
                                  # one blind comparison per (case, run k) when two configurations are compared
                                  "expected_comparisons": len(plan.get("evals_run") or []) * rpc if len(cfgs) == 2 else 0,
                                  "comparisons": (pw.get(eng) or {}).get("total", 0)}
+    import eva
+    planned = list(plan["engines"]) if plan.get("engines") is not None else sorted({r["engine"] for r in runs})
+    engines_seen = {r["engine"] for r in runs}
+    coverage = tool_coverage(
+        planned, {e: sum(1 for r in runs if r["engine"] == e and r["result"]["pass_rate"] is not None) for e in engines_seen},
+        {e: sum(1 for r in runs if r["engine"] == e) for e in engines_seen})
     exec_errors = [{"engine": r["engine"], "eval_id": r["eval_id"], "configuration": r["configuration"],
                     "run_number": r["run_number"]} for r in runs if r["result"]["errors"]]
     pressure = {}
@@ -2609,6 +2685,8 @@ def build_benchmark(spec, ws, n):
                           "skill_sha256": plan.get("skill_sha256"), "eval_set_sha256": plan.get("eval_set_sha256"),
                           "current_skill_sha256": skill_tree_hash(spec["skill_dir"]),
                           "current_eval_set_sha256": gate_hash("eval_set", spec, ws)},
+             "tool_coverage": coverage,
+             "parity": {t: st["status"] for t, st in eva.parity_status(spec["skill_dir"]).items()},
              "runs": runs, "run_summary": summarize(runs), "per_engine": per_engine, "trigger": trig, "pairwise": pw,
              "static_failures": static_fail, "pressure": pressure, "completeness": completeness,
              "execution_errors": exec_errors,
@@ -2641,6 +2719,8 @@ def compute_gate(bench, prev=None):
         problems.append("low grader agreement: %.2f < %.2f on %d golden examples" % (cal["agreement"], AGREEMENT_MIN, cal["n"]))
     elif not cal:
         notes.append("grader not calibrated for this iteration (run `calibrate --golden ...`)")
+    cov_note = coverage_note(bench["tool_coverage"]) if bench.get("tool_coverage") else None
+    if cov_note: notes.append(cov_note)  # a note, not a problem: registration semantics are unchanged
     if bench.get("static_failures"):
         problems.append("failing static checks in with_skill runs: %d" % len(bench["static_failures"]))
     stopped = (bench.get("metadata") or {}).get("stopped")
@@ -2703,6 +2783,12 @@ def comparison_md(bench, gate, n):
         if "delta" in rs:
             d = rs["delta"]
             L.append("| %s | **delta** | %s | %s | %s | |" % (eng, d["pass_rate"], d["time_seconds"], d["tokens"]))
+    if bench.get("tool_coverage"):
+        L += ["", "## Tool coverage (multi-tool parity)", "",
+              "| tool | static parity (eva.py) | dynamic eval | graded runs |", "|---|---|---|---|"]
+        for t, c in bench["tool_coverage"].items():
+            L.append("| %s | %s | %s | %d%s |" % (t, (bench.get("parity") or {}).get(t, "unknown"), c["status"], c["graded_runs"],
+                                              " (+%d pending)" % c["pending_runs"] if c.get("pending_runs") else ""))
     if bench["trigger"]:
         L += ["", "## Trigger evals (threshold %.1f)" % TRIGGER_THRESHOLD, "",
               "| engine | configuration | passed | should-trigger ok | should-not ok |", "|---|---|---|---|---|"]
@@ -2759,7 +2845,9 @@ def report_iteration(spec, ws, n):
     wtext(os.path.join(it_dir, "comparison.md"), comparison_md(bench, gate, n))
     return bench, gate
 
-def register(spec, ws, by=None):
+def registration_record(spec, ws):
+    """The record `register` writes for the last iteration, or EvalError when that iteration may not be registered.
+    Writes nothing."""
     its = iterations(ws)
     if not its: raise EvalError("no iteration to register in %s" % ws)
     n = its[-1]
@@ -2776,11 +2864,14 @@ def register(spec, ws, by=None):
         raise EvalError("iteration-%d used a different eval set than the one on disk; re-run the eval" % n)
     if gate["needs_approval"] and not approval_ok("registration", spec, ws):
         raise EvalError("iteration-%d has problems %s; registration needs `approve --gate registration`" % (n, gate["problems"]))
-    rec = {"skill_name": spec["skill_name"], "skill_path": spec["skill_dir"], "iteration": n,
-           "benchmark_sha256": gate_hash("iteration-%d" % n, spec, ws), "skill_sha256": now_skill,
-           "eval_set_sha256": now_evals,
-           "skill_md_sha256": sha256_files(os.path.join(spec["skill_dir"], "SKILL.md")), "registered_at": now_iso(),
-           "approval": (rjson(os.path.join(ws, "approvals.json"), {}) or {}).get("registration") if gate["needs_approval"] else "auto"}
+    return {"skill_name": spec["skill_name"], "skill_path": spec["skill_dir"], "iteration": n,
+            "benchmark_sha256": gate_hash("iteration-%d" % n, spec, ws), "skill_sha256": now_skill,
+            "eval_set_sha256": now_evals,
+            "skill_md_sha256": sha256_files(os.path.join(spec["skill_dir"], "SKILL.md")), "registered_at": now_iso(),
+            "approval": (rjson(os.path.join(ws, "approvals.json"), {}) or {}).get("registration") if gate["needs_approval"] else "auto"}
+
+def register(spec, ws, by=None):
+    rec = registration_record(spec, ws)
     wjson(os.path.join(ws, "registration.json"), rec)
     return rec
 
@@ -2814,9 +2905,11 @@ class ClaudeBuilder:
         rp = os.path.join(it_dir, "comparison.md")
         if os.path.isfile(rp):
             with open(rp, encoding="utf-8") as f: report = f.read()[:TRANSCRIPT_CHARS]
+        import eva
         prompt = ("%s\n\nYou are improving the agent skill in the current directory (SKILL.md and its files). "
-                  "Do not edit evals/ (the eval set is approved separately; editing it stops the loop).\n\n"
-                  "Eval report of the last iteration:\n%s\n" % (self.instructions.strip(), report))
+                  "Do not edit evals/ (the eval set is approved separately; editing it stops the loop). %s %s\n\n"
+                  "Eval report of the last iteration:\n%s\n" % (self.instructions.strip(), eva.ENGLISH_BUILDER_RULE,
+                                                                 eva.PARITY_BUILDER_RULE, report))
         bound = call_bound("builder", self.model, "builder", self.prices, DEFAULT_TOKENS) or 0.0
         fallback = cap if cap is not None else bound  # no usage: the cap
         try:
@@ -2861,7 +2954,10 @@ def loop(spec, ws, engines, grader, builder, max_iterations=MAX_AUTO_ITERATIONS,
     """run -> grade -> (calibrate) -> report; stop when the gate is clean; otherwise call builder(iteration_dir,
     skill_dir) and reload the skill. precheck(spec, iterations_left) -> [problems] runs before EVERY iteration (the
     CLI passes the full --live gate set: validation, approvals incl. fixture hashes, preflight, cost vs remaining
-    budget); any problem stops the loop. At most MAX_AUTO_ITERATIONS automatic iterations."""
+    budget); any problem stops the loop. After every builder call the skill folder must pass the static English-only
+    check (eva.english_violations), else the loop stops with status "builder-non-english", and then the multi-tool
+    parity check (eva.parity_violations), else with status "builder-parity-missing", before anything more is
+    spent. Run outputs are never checked. At most MAX_AUTO_ITERATIONS automatic iterations."""
     if max_iterations > MAX_AUTO_ITERATIONS:
         raise EvalError("max %d automatic iterations, got %d" % (MAX_AUTO_ITERATIONS, max_iterations))
     n = None
@@ -2882,11 +2978,21 @@ def loop(spec, ws, engines, grader, builder, max_iterations=MAX_AUTO_ITERATIONS,
         if gate.get("human_pending_only"): return {"status": "needs-human-review", "iteration": n}
         if budget is not None and budget.remaining() <= 0: return {"status": "budget-exhausted", "iteration": n}
         if i == max_iterations - 1 or builder is None: break
+        rc, error = None, None
         try:
             rc = builder(os.path.join(ws, "iteration-%d" % n), spec["skill_dir"])
         except EvalError as ex:
-            return {"status": "builder-failed", "iteration": n, "error": str(ex)}
-        if rc != 0: return {"status": "builder-failed", "iteration": n, "returncode": rc}
+            error = str(ex)
+        import eva
+        extra = {} if error is None else {"error": error}
+        if rc is not None: extra["returncode"] = rc
+        non_english = eva.english_violations(spec["skill_dir"])
+        if non_english: return dict({"status": "builder-non-english", "iteration": n, "problems": non_english}, **extra)
+        missing = eva.parity_violations(spec["skill_dir"])
+        if missing: return dict({"status": "builder-parity-missing", "iteration": n, "problems": missing}, **extra)
+        review = rule_review_problems(spec, ws)
+        if review: return dict({"status": "builder-review-required", "iteration": n, "problems": review}, **extra)
+        if error is not None or rc != 0: return dict({"status": "builder-failed", "iteration": n}, **extra)
         spec, problems = load_eval_set(spec["skill_dir"])
         if problems: return {"status": "eval-set-invalid", "iteration": n, "problems": problems}
     return {"status": "needs-approval", "iteration": n}
@@ -2896,7 +3002,11 @@ def make_engines(a, spec=None):
     out = []
     for name in a.engines.split(","):
         name = name.strip()
-        if name not in ENGINES: raise EvalError("unknown engine %r (claude|codex)" % name)
+        if name in UNAVAILABLE_ENGINES:
+            raise EvalError("engine %r (%s) is not available: no %s engine exists yet, so nothing could be run or graded "
+                            "for it (never faked). Available engines: %s" % (name, UNAVAILABLE_ENGINES[name],
+                                                                           UNAVAILABLE_ENGINES[name], "|".join(ENGINES)))
+        if name not in ENGINES: raise EvalError("unknown engine %r (%s)" % (name, "|".join(ENGINES)))
         model = a.claude_model if name == "claude" else a.codex_model
         extra = a.claude_arg if name == "claude" else a.codex_arg
         effort = _str_opt(a, "claude_effort" if name == "claude" else "codex_effort")
@@ -2926,6 +3036,12 @@ def plan_text(spec, problems, a, engines, ws, est):
              sum(1 for c in spec["cases"] if c["pressure"]), len(trig), sum(q["should_trigger"] for q in trig),
              sum(not q["should_trigger"] for q in trig))]
     L += ["validation problems (%d):" % len(problems)] + ["  - " + p for p in problems]
+    import eva
+    L += ["rule review (English-only / parity needs-review findings): " + (
+              "none" if not rule_review_items(spec["skill_dir"]) else
+              "RECORDED" if approval_ok("rule_review", spec, ws) else "NOT RECORDED (blocks --live and the loop)"),
+          "multi-tool parity (static, eva.py): " + eva.parity_line(eva.parity_status(spec["skill_dir"])),
+          "tool coverage (dynamic): " + coverage_line(tool_coverage([e.name for e in engines]))]
     L += ["approval gates: requirements=%s, eval_set=%s" % (
         "approved" if approval_ok("requirements", spec, ws) else "NOT APPROVED",
         "approved" if approval_ok("eval_set", spec, ws) else "NOT APPROVED")]
@@ -3046,6 +3162,7 @@ def check_live_gates(a, spec, problems, ws, n, engines, tokens, prices, budget_l
         if same and a.cmd in ("run", "loop"):
             fail("grader %s is the model under test %s; pick another --grader-model or --grader-engine codex"
                  % (a.grader_model, ", ".join(same)))
+    for x in rule_review_problems(spec, ws): fail(x)
     for g in ("requirements", "eval_set"):
         if not approval_ok(g, spec, ws): fail("gate %s not approved (write %s/requirements.md, then `approve --gate %s`)" % (g, ws, g))
     live_est = live_estimate(a, spec, ws, n, engines, tokens, prices, iterations_left)
@@ -3194,7 +3311,20 @@ def _dispatch(a):
     spec, problems = load_eval_set(a.skill)
     if a.cmd == "validate":  # before the workspace: an unsafe SKILL.md name is reported, not raised
         print("\n".join(problems) if problems else "eval set OK: %d cases, %d trigger queries" % (len(spec["cases"]), len(spec["triggers"] or [])))
-        return 1 if problems else 0
+        import eva
+        for x in eva.english_eval_problems(spec["skill_dir"])[1]:
+            print("review: non-English text in a run-output matcher (allowed, a human confirms the task needs it): " + x)
+        rep_ = eva.parity_report(spec["skill_dir"])
+        print("multi-tool parity: " + eva.parity_line(eva.parity_status(rep_)))
+        for c in rep_.needs_review:
+            print("review: " + c["reason"])
+        unrecorded = []
+        if rule_review_items(spec["skill_dir"]):
+            try: ws_ = os.path.realpath(a.workspace) if a.workspace else default_workspace(spec)
+            except EvalError: ws_ = None
+            unrecorded = rule_review_problems(spec, ws_) if ws_ else ["rule review not recorded: no workspace"]
+            print(("RULE REVIEW NOT RECORDED: " + unrecorded[0]) if unrecorded else "rule review decision recorded for these exact findings")
+        return 1 if problems else 3 if unrecorded else 0
     ws = os.path.realpath(a.workspace) if a.workspace else default_workspace(spec)
     if a.cmd == "approve":
         rec = approve(a.gate, spec, ws, a.by); print("approved %s sha256=%s" % (a.gate, rec["sha256"][:12])); return 0
@@ -3204,6 +3334,10 @@ def _dispatch(a):
     if a.cmd == "snapshot":
         dst = os.path.join(ws, "skill-snapshot")
         if os.path.exists(dst): raise EvalError("%s exists" % dst)
+        import eva
+        cycles = eva.unit_tree(spec["skill_dir"], shutil.ignore_patterns()).cycles
+        if cycles: raise EvalError("skill folder %s has folder links that point back at a folder on their own path: %s; "
+                                   "a copy would never end, refusing to snapshot it" % (spec["skill_dir"], ", ".join(cycles)))
         shutil.copytree(spec["skill_dir"], dst); print("snapshot -> %s (use --baseline old --old-skill %s)" % (dst, dst)); return 0
     if a.cmd == "report":
         n = a.iteration or (iterations(ws) or [None])[-1]

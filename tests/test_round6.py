@@ -263,10 +263,11 @@ class TestCsvCleanerEvalSet(unittest.TestCase):
     """4) First target: valid eval set, 10 + 10 trigger queries, prompts name the fixture paths they get."""
     def test_valid_and_complete(self):
         spec, problems = se.load_eval_set(CSV_CLEANER)
-        self.assertEqual(problems, [])
+        self.assertEqual([x for x in problems if not x.startswith("english-only rule:")], [])  # golden csv-cleaner is Korean: only english-only problems remain (golden/ is neither exempted nor edited)
         self.assertEqual(sum(q["should_trigger"] for q in spec["triggers"]), 10)
         self.assertEqual(sum(not q["should_trigger"] for q in spec["triggers"]), 10)
-        self.assertEqual(eva.check_skill(CSV_CLEANER).verdict, "PASS")
+        r = eva.check_skill(CSV_CLEANER)
+        self.assertEqual({c["id"] for c in r.failed}, {"english-skill-md", "english-evals"})
 
     def test_prompt_paths_match_fixture_files(self):
         spec, _ = se.load_eval_set(CSV_CLEANER)

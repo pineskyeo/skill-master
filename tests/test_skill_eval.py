@@ -27,7 +27,7 @@ def rjson(path):
 
 SKILL_MD = ("---\nname: branch-setup\ndescription: Creates a git worktree and branch for new work. Use when the user "
             "starts a new task and wants a fresh branch.\n---\n# Branch Setup\n## Inputs\n- task\n## Outputs\n- branch\n"
-            "## Example\n입력: 작업 시작 → 출력: feat/x\n")
+            "## Example\nInput: start a task -> Output: feat/x\n")
 TRIGGERS = [{"query": "SHOULD start task %d" % i, "should_trigger": True} for i in range(10)] + \
            [{"query": "explain repo %d" % i, "should_trigger": False} for i in range(10)]
 
