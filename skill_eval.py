@@ -3335,9 +3335,10 @@ def _dispatch(a):
         dst = os.path.join(ws, "skill-snapshot")
         if os.path.exists(dst): raise EvalError("%s exists" % dst)
         import eva
-        cycles = eva.unit_tree(spec["skill_dir"], shutil.ignore_patterns()).cycles
-        if cycles: raise EvalError("skill folder %s has folder links that point back at a folder on their own path: %s; "
-                                   "a copy would never end, refusing to snapshot it" % (spec["skill_dir"], ", ".join(cycles)))
+        tree = eva.unit_tree(spec["skill_dir"], shutil.ignore_patterns())
+        links = [eva.LINK_OUT % r for r in tree.outside] + [eva.LINK_CYCLE % r for r in tree.cycles]
+        if links: raise EvalError("skill folder %s: %s; refusing to snapshot it, nothing was copied"
+                                  % (spec["skill_dir"], "; ".join(links)))
         shutil.copytree(spec["skill_dir"], dst); print("snapshot -> %s (use --baseline old --old-skill %s)" % (dst, dst)); return 0
     if a.cmd == "report":
         n = a.iteration or (iterations(ws) or [None])[-1]
