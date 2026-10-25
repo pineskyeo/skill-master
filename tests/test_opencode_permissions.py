@@ -6,6 +6,7 @@ import contextlib, io, json, os, shutil, subprocess, sys, unittest
 from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import eva
+from engine.primitives import parity as PR
 import test_skill_eval as T
 import test_multi_tool_parity as P
 
@@ -128,7 +129,7 @@ class TestIncompleteKeyList(OpenCodeBase, unittest.TestCase):
         self.assertEqual(P.tool_status(d)["opencode"], "review")
 
     def test_the_same_wrapper_passes_once_the_list_is_complete(self):
-        with mock.patch.object(eva, "OPENCODE_PERMISSION_KEYS_COMPLETE", True):
+        with mock.patch.dict(PR.target("opencode")["permissions"], {"complete": True}):
             d, r = self.opencode()
             self.assertEqual(P.row(r, ROW)["status"], "pass")
             self.assertEqual(P.tool_status(d)["opencode"], "pass")
@@ -139,7 +140,7 @@ class TestIncompleteKeyList(OpenCodeBase, unittest.TestCase):
         self.assertEqual(P.row(r, WRAPPER)["status"], "pass")
         self.assertEqual(P.row(r, ROW)["status"], "needs-review")
         self.assertIn(str(sorted(caps)), P.row(r, ROW)["reason"])
-        with mock.patch.object(eva, "OPENCODE_PERMISSION_KEYS_COMPLETE", True):
+        with mock.patch.dict(PR.target("opencode")["permissions"], {"complete": True}):
             self.assertEqual(P.row(eva.check(d), ROW)["status"], "pass")
 
     def test_check_json_reports_the_review_with_the_derived_set(self):

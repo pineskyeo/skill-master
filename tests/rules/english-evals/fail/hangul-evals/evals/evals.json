@@ -1,0 +1,10 @@
+{
+ "skill_name": "hangul-evals",
+ "evals": [
+  {
+   "id": 1,
+   "prompt": "\uac00\ub098",
+   "expected_output": "The word count."
+  }
+ ]
+}

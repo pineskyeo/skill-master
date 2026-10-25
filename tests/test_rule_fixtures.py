@@ -20,6 +20,34 @@ def subfolders(path, skip_underscore=False):
                   and not (skip_underscore and n.startswith("_")))
 
 
+SIDES = ("pass", "fail", "review", "na")
+STATUS_OF_SIDE = {"pass": "pass", "fail": "fail", "review": "needs-review", "na": "n/a"}
+# Rules whose reachable outcomes are not pass and fail (brief A3 D13), with the reason. Every other rule needs pass/ and
+# fail/; a review/ or na/ side, when present, is checked as well.
+OUTCOMES = {
+    "english-output-matchers": (("review", "na"), "run-output matchers give needs-review or n/a, never pass or fail"),
+    "parity-invocation-hermes": (("review", "na"), "Hermes has no verified invocation control: needs-review or n/a"),
+    "parity-permissions-opencode": (("fail", "review", "na"), "cannot reach pass while the OpenCode key list is not "
+                                                               "complete (targets/opencode.json, gates.md G3)"),
+    "parity-permissions-hermes": (("fail",), "Hermes permissions always fail closed (gates.md G4)"),
+}
+# Outcomes a rule reaches that also need a fixture side.
+EXTRA_SIDES = {
+    "english-bundled-files": ("na",), "english-evals": ("na",), "english-tool-files": ("na",),
+    "english-scenarios": ("na",), "english-wrappers": ("na",), "parity-skill-codex": ("review",),
+    "parity-invocation-control": ("na",), "parity-permissions-claude": ("na",), "parity-permissions-codex": ("review", "na"),
+}
+# Reachable outcomes with no fixture side, and why: an unreadable main file needs non-UTF-8 bytes, which an ASCII-only
+# fixture cannot hold; tests/test_rule_targets.py builds that case in a temp folder.
+NO_SIDE = {"english-skill-md": ("na", "needs a non-UTF-8 SKILL.md"), "english-agent-md": ("na", "needs a non-UTF-8 AGENT.md")}
+
+
+def required_sides(rule):
+    if rule.id in OUTCOMES:
+        return OUTCOMES[rule.id][0]
+    return ("pass", "fail") + EXTRA_SIDES.get(rule.id, ())
+
+
 def side_problems(bundle, rule, side, folder):
     rid = rule.id
     if not os.path.isdir(folder):
@@ -35,7 +63,7 @@ def side_problems(bundle, rule, side, folder):
         expected = json.load(f)
     if not isinstance(expected, dict):
         return out + ["%s: %s/expected.json is not an object" % (rid, side)]
-    want = "pass" if side == "pass" else "needs-review" if rule.severity == "review" else "fail"
+    want = "needs-review" if side == "fail" and rule.severity == "review" else STATUS_OF_SIDE[side]
     for name in sorted(set(expected) - set(units)):
         out.append("%s: %s/expected.json names %s, which is not a fixture unit" % (rid, side, name))
     for name in units:
@@ -45,6 +73,12 @@ def side_problems(bundle, rule, side, folder):
         if expected[name] != want:
             out.append("%s: %s/expected.json says %r for %s, a %s/ fixture must be %r" % (rid, side, expected[name],
                                                                                           name, side, want))
+        if "repository" in rule.applies_to:
+            got, reason = repository_status(bundle, rule, os.path.join(folder, name))
+            if got != expected[name]:
+                out.append("%s: %s/%s gives status %r, expected.json says %r (%s)" % (rid, side, name, got,
+                                                                                      expected[name], reason))
+            continue
         rows = [c for c in eva.check(os.path.join(folder, name), bundle).checks if c["id"] == rid]
         if len(rows) != 1:
             out.append("%s: %s/%s gives %d rows for the rule, not 1" % (rid, side, name, len(rows)))
@@ -52,6 +86,13 @@ def side_problems(bundle, rule, side, folder):
             out.append("%s: %s/%s gives status %r, expected.json says %r (%s)" % (rid, side, name, rows[0]["status"],
                                                                                   expected[name], rows[0]["reason"]))
     return out
+
+
+def repository_status(bundle, rule, root):
+    """The status of a repository rule over a fixture folder that is a mini repository root (rules/, schemas/,
+    targets/, policy/)."""
+    status, facts, _, _ = rule.check.repository(os.path.join(root, "rules"), root)
+    return status, facts.get("findings", "")
 
 
 def fixture_problems(bundle, fixtures, skip_underscore):
@@ -63,8 +104,11 @@ def fixture_problems(bundle, fixtures, skip_underscore):
         if not os.path.isdir(base):
             out.append("%s: no fixture folder tests/rules/%s/" % (rule.id, rule.id))
             continue
-        for side in ("pass", "fail"):
-            out += side_problems(bundle, rule, side, os.path.join(base, side))
+        need = required_sides(rule)
+        for side in SIDES:
+            if side in need or os.path.isdir(os.path.join(base, side)):
+                out += side_problems(bundle, rule, side, os.path.join(base, side))
+        out += ["%s: unknown fixture side %s/" % (rule.id, n) for n in subfolders(base) if n not in SIDES]
     return out
 
 
@@ -86,6 +130,23 @@ class TestBundleFixtures(unittest.TestCase):
 
     def test_the_selftest_bundle_is_exactly_its_five_files(self):
         self.assertEqual(tree_files(SELFTEST), SELFTEST_FILES)
+
+    def test_the_outcome_tables_name_rules_of_the_default_bundle(self):
+        ids = {r.id for r in RR.default_bundle().rules}
+        for table in (OUTCOMES, EXTRA_SIDES, NO_SIDE):
+            self.assertEqual(set(table) - ids, set())
+        for rid, (sides, reason) in OUTCOMES.items():
+            self.assertNotIn("pass", sides, rid)
+            self.assertTrue(reason, rid)
+
+    def test_a_missing_outcome_side_is_found(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        copy = os.path.join(tmp, "rules")
+        shutil.copytree(RULES_TESTS, copy, ignore=shutil.ignore_patterns("_selftest"))
+        shutil.rmtree(os.path.join(copy, "parity-skill-codex", "review"))
+        problems = fixture_problems(RR.default_bundle(), copy, skip_underscore=True)
+        self.assertIn("parity-skill-codex: no review/ fixture folder", problems)
 
 
 class TestFixtureGaps(unittest.TestCase):

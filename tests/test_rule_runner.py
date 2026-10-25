@@ -12,8 +12,9 @@ PASSING_UNIT = os.path.join(ROOT, "tests", "fixtures", "skills", "csv-cleaner-en
 HEX64 = re.compile(r"^ruleset_sha256 [0-9a-f]{64}$")
 DESC = "Checks one rule runner fixture. Use when a rule runner test needs a unit folder."
 IMPLEMENTED = {"schema", "equals", "subset", "set_equals", "contains_text", "regex", "not_regex", "file_exists",
-               "file_absent", "count", "max_bytes", "max_lines", "all", "any", "not", "when"}
-RESERVED = {"script_denylist", "heading_present", "description_heuristics", "local_refs", "generated_up_to_date"}
+               "file_absent", "count", "max_bytes", "max_lines", "all", "any", "not", "when", "script_denylist",
+               "parity_skill", "parity_invocation", "parity_agent_name", "parity_wrapper", "parity_permissions"}
+RESERVED = {"heading_present", "description_heuristics", "local_refs", "generated_up_to_date"}
 
 
 def write(path, text):
@@ -294,6 +295,9 @@ class TestSelectors(Base):
         self.assertEqual(self.status(check, {"w.toml": 'name = "x"\n'}), "pass")
         self.assertEqual(self.status(check, name="b"), "fail")
         self.assertEqual(self.status(check, {"w.toml": "[table]\nname = 'x'\n"}, name="c"), "fail")
+        self.assertEqual(self.status(check, {"w.toml": "[[table]]\nname = 'x'\n"}, name="d"), "fail")
+        nested = {"op": "equals", "left": {"sel": "toml:w.toml#/table/name"}, "right": {"value": "x"}}
+        self.assertEqual(self.status(nested, {"w.toml": "[table]\nname = 'x'\n"}, name="e"), "pass")
 
     def test_yaml(self):
         check = {"op": "equals", "left": {"sel": "yaml:agents/openai.yaml#/policy/allow_implicit_invocation"},

@@ -8,17 +8,19 @@ is ever printed for a broken bundle. engine.schema is imported only when a bundl
 default bundle costs a folder listing and a hash. Standard library only; no import of eva or skill_eval
 (engine/writable.py)."""
 import hashlib, json, os, re, stat, unicodedata
-from engine.loaders import TomlError, parse_flat_toml, parse_frontmatter_ex, yaml_typed_keys
+from engine.loaders import TomlError, parse_frontmatter_ex, parse_toml, yaml_typed_keys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RULES_SCHEMA = "schemas/rules.schema.json"
 HASHED_TREES = ("schemas", "targets")
 POLICY_FILES = ("policy/eval-policy.json", "policy/gates.json", "policy/gate.rules.json")
 NON_DEFAULT_ID = "bundle-non-default"
-RESERVED_OPS = {"script_denylist": "A3", "heading_present": "A4", "description_heuristics": "A4", "local_refs": "A4",
+RESERVED_OPS = {"heading_present": "A4", "description_heuristics": "A4", "local_refs": "A4",
                 "generated_up_to_date": "B2"}
 SELECTORS = ("frontmatter", "json", "toml", "yaml", "markdown", "text", "glob", "path")
-NORMALIZE = {"strip": str.strip, "nfkc": lambda s: unicodedata.normalize("NFKC", s)}
+NORMALIZE = {"strip": str.strip, "nfkc": lambda s: unicodedata.normalize("NFKC", s), "lower": str.lower}
+OR_EMPTY = "string-or-empty"
+REPOSITORY = "repository"
 MAIN_FILE = {"skill": "SKILL.md", "agent": "AGENT.md"}
 TEMPLATE_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_-]*)\}")
 
@@ -90,37 +92,54 @@ def ruleset_pairs(folder, root):
 
 
 class Rule:
-    def __init__(self, raw, check):
+    def __init__(self, raw, check, file="rules.json"):
         self.id, self.category, self.severity = raw["id"], raw["category"], raw["severity"]
         self.applies_to, self.message, self.fix, self.check = tuple(raw["applies_to"]), raw["message"], raw["fix"], check
+        self.file, self.source, self.protects = file, raw["source"], tuple(raw["protects"])
+        self.na_must = raw.get("na_must", True)
+
+    def text(self, value, outcome, facts, fallback):
+        """The message or fix for outcome: one string for every outcome, or the outcome's entry of an object."""
+        if isinstance(value, dict):
+            value = value.get(outcome, fallback)
+        return _render(value, facts)
 
     def add_row(self, report, unit):
         status, facts, note, _ = self.check(unit)
-        reason = _render(self.message, facts) + (" (%s)" % note if note else "")
+        if status == "fail" and self.severity == "review":
+            status = "review"
+        reason = self.text(self.message, status, facts, "rule %s: %s" % (self.id, status)) + (" (%s)" % note if note else "")
         must = self.severity != "soft"
         if status == "na":
-            report.na(self.id, self.category, reason, must=must)
+            report.na(self.id, self.category, reason, must=must and self.na_must)
         elif status == "pass":
             report.add(self.id, self.category, True, reason, must=must)
-        elif self.severity == "review":
-            report.review(self.id, self.category, reason, self.fix)
+        elif status == "review":
+            report.review(self.id, self.category, reason, self.text(self.fix, "review", facts, ""))
         else:
-            report.add(self.id, self.category, False, reason, self.fix, must=must)
+            report.add(self.id, self.category, False, reason, self.text(self.fix, "fail", facts, ""), must=must)
+        report.checks[-1]["rule"] = {"file": "rules/" + self.file, "source": self.source}
 
 
 class Bundle:
     def __init__(self, rules, sha256, default, display):
         self.rules, self.sha256, self.default, self.display = rules, sha256, default, display
 
-    def apply(self, report):
-        """Adds one row per rule that applies to report.kind, then, for a bundle given with --rules, the review row
-        that keeps the verdict from ever being PASS (plan.md:560)."""
-        if self.rules and report.kind in MAIN_FILE:
-            unit = _Unit(report.path, report.kind)
-            for rule in self.rules:
+    def files(self):
+        return {rule.file for rule in self.rules}
+
+    def apply(self, report, only=None, skip=(), dedupe=True):
+        """Adds one row per rule that applies to report.kind, in bundle order. only: apply just the rules of these rule
+        files. Otherwise every rule outside the files in skip, then, for a bundle given with --rules, the review row
+        that keeps the verdict from ever being PASS (plan.md:560); that row comes once per report. dedupe False: a
+        primitive row keeps a cause that another rule of the bundle also reports (the gate rows of eva.parity_report)."""
+        rules = [r for r in self.rules if (only is None or r.file in only) and r.file not in skip]
+        if rules and report.kind in MAIN_FILE:
+            unit = _Unit(report.path, report.kind, dedupe)
+            for rule in rules:
                 if report.kind in rule.applies_to:
                     rule.add_row(report, unit)
-        if not self.default:
+        if only is None and not self.default and not any(c["id"] == NON_DEFAULT_ID for c in report.checks):
             report.review(NON_DEFAULT_ID, "structure", "bundle non-default %s" % self.display,
                           "Run without --rules: only the default rule bundle can give PASS.")
 
@@ -141,6 +160,11 @@ def load_bundle(folder=None, root=ROOT):
         if os.path.isdir(path) else []
     display = "rules" if default else folder
     rules = _load_rules(path, names, root, display) if names else []
+    for rule in [r for r in rules if REPOSITORY in r.applies_to]:
+        status, facts, note, _ = rule.check.repository(path, root)
+        if status == "fail":
+            raise BundleError(os.path.join(display, rule.file), "rule '%s' fails: %s" % (
+                rule.id, rule.text(rule.message, status, facts, "") + (" (%s)" % note if note else "")))
     return Bundle(rules, digest, default, display)
 
 
@@ -178,22 +202,31 @@ def _load_rules(path, names, root, display):
                 raise BundleError(where, "duplicate rule id '%s' (also in %s)" % (rid, seen[rid]))
             seen[rid] = name
             try:
-                check = compile_check(raw["check"], root)
+                check = compile_check(raw["check"], root, path)
+                if REPOSITORY in raw["applies_to"] and not hasattr(check, "repository"):
+                    raise RuleError("a repository rule needs a script_denylist group check")
             except RuleError as e:
                 raise BundleError(where, "rule '%s': %s" % (rid, e)) from None
-            rules.append(Rule(raw, check))
+            rules.append(Rule(raw, check, name))
+    by_id = {r.id: r for r in rules}
+    for rule in rules:
+        if hasattr(rule.check, "link"):
+            try:
+                rule.check.link(by_id)
+            except ValueError as e:
+                raise BundleError(os.path.join(display, rule.file), "rule '%s': %s" % (rule.id, e)) from None
     return rules
 
 
-def compile_check(node, root=ROOT):
+def compile_check(node, root=ROOT, folder=None):
     """The runnable form of one check node. The runner's own closed op table: an op outside OPS fails here even if a
-    schema let it through."""
+    schema let it through. folder: the bundle folder, where a data/ operand resolves (default root/rules)."""
     op = node.get("op") if isinstance(node, dict) else None
     if op in RESERVED_OPS:
         raise RuleError("op '%s' is reserved until unit %s adds its primitive" % (op, RESERVED_OPS[op]))
     if op not in OPS:
         raise RuleError("unknown op '%s'" % (op,))
-    return OPS[op](node, root)
+    return OPS[op](node, root, folder or os.path.join(root, "rules"))
 
 
 def _relpath(where, rel):
@@ -215,8 +248,9 @@ def _pointer(where, text):
 
 
 class _Unit:
-    def __init__(self, path, kind):
-        self.path, self.kind, self.real, self._fm = path, kind, os.path.realpath(path), None
+    def __init__(self, path, kind, dedupe=True):
+        self.path, self.kind, self.real, self._fm, self.dedupe = path, kind, os.path.realpath(path), None, dedupe
+        self.memo = {}  # scans the rules of one Bundle.apply share (script_denylist groups, parity states)
 
     def frontmatter(self):
         """(meta dict or Absent, typed-key set or None) of the main file."""
@@ -313,6 +347,8 @@ class _Sel:
         kind, colon, rest = text.partition(":")
         if not colon or kind not in SELECTORS:
             raise RuleError("unknown selector '%s'" % text)
+        if OR_EMPTY in normalize[1:]:
+            raise RuleError("normalize '%s' must come first (selector '%s')" % (OR_EMPTY, text))
         self.text, self.kind, self.normalize, self.rel, self.tokens = text, kind, tuple(normalize), None, []
         where = "selector '%s'" % text
         if kind == "frontmatter":
@@ -352,9 +388,9 @@ class _Sel:
                 return Absent("'%s' is not valid JSON: %s" % (self.rel, e)), None
         if self.kind == "toml":
             try:
-                return self.at(parse_flat_toml(text)), None
+                return self.at(parse_toml(text)), None
             except TomlError as e:
-                return Absent("'%s' is not valid flat TOML: %s" % (self.rel, e)), None
+                return Absent("'%s' is not valid TOML: %s" % (self.rel, e)), None
         if any(ln.rstrip() == "---" for ln in text.splitlines()):
             return Absent("'%s': YAML document markers ('---') are not supported" % self.rel), None
         wrapped = "---\n%s\n---\n" % text.strip("\n")
@@ -365,6 +401,8 @@ class _Sel:
 
     def value(self, unit):
         v, typed = self.raw(unit)
+        if self.normalize[:1] == (OR_EMPTY,):
+            return _normalized(v if isinstance(v, str) else "", self.normalize[1:]), typed
         return (v, typed) if isinstance(v, Absent) else (_normalized(v, self.normalize), typed)
 
 
@@ -400,7 +438,7 @@ def _canon_set(items):
 
 
 def _pair(test, want):
-    def build(node, root):
+    def build(node, root, folder=None):
         left, right = _operand(node["left"]), _operand(node["right"])
 
         def run(unit):
@@ -419,7 +457,7 @@ def _pair(test, want):
 
 
 def _string_op(test):
-    def build(node, root):
+    def build(node, root, folder=None):
         sel, arg = _sel(node), test(node)
 
         def run(unit):
@@ -445,7 +483,7 @@ def _c_contains(node):
 
 
 def _file_op(test):
-    def build(node, root):
+    def build(node, root, folder=None):
         rel = _relpath("path", node["path"])
 
         def run(unit):
@@ -458,7 +496,7 @@ def _file_op(test):
 
 
 def _size_op(measure):
-    def build(node, root):
+    def build(node, root, folder=None):
         rel, limit = _relpath("path", node["path"]), node["max"]
 
         def run(unit):
@@ -480,7 +518,7 @@ def _lines_of(unit, rel):
     return text if isinstance(text, Absent) else len(text.splitlines())
 
 
-def _c_count(node, root):
+def _c_count(node, root, folder=None):
     sel, lo, hi = _sel(node), node.get("min"), node.get("max")
 
     def run(unit):
@@ -493,7 +531,7 @@ def _c_count(node, root):
     return run
 
 
-def _c_schema(node, root):
+def _c_schema(node, root, folder=None):
     from engine import schema
     name = node["schema"]
     fp = os.path.join(root, "schemas", name)
@@ -516,8 +554,8 @@ def _c_schema(node, root):
     return run
 
 
-def _children(node, root):
-    return [compile_check(c, root) for c in node["of"]]
+def _children(node, root, folder):
+    return [compile_check(c, root, folder) for c in node["of"]]
 
 
 def _first(outs, status):
@@ -526,8 +564,8 @@ def _first(outs, status):
     return next((o for o in hits if o[3]), hits[0]) if hits else None
 
 
-def _c_all(node, root):
-    kids = _children(node, root)
+def _c_all(node, root, folder=None):
+    kids = _children(node, root, folder)
 
     def run(unit):
         outs = [k(unit) for k in kids]
@@ -539,8 +577,8 @@ def _c_all(node, root):
     return run
 
 
-def _c_any(node, root):
-    kids = _children(node, root)
+def _c_any(node, root, folder=None):
+    kids = _children(node, root, folder)
 
     def run(unit):
         outs = [k(unit) for k in kids]
@@ -552,8 +590,8 @@ def _c_any(node, root):
     return run
 
 
-def _c_not(node, root):
-    kid = compile_check(node["check"], root)
+def _c_not(node, root, folder=None):
+    kid = compile_check(node["check"], root, folder)
 
     def run(unit):
         status, facts, note, unusable = kid(unit)
@@ -565,8 +603,8 @@ def _c_not(node, root):
     return run
 
 
-def _c_when(node, root):
-    cond, then = compile_check(node["if"], root), compile_check(node["then"], root)
+def _c_when(node, root, folder=None):
+    cond, then = compile_check(node["if"], root, folder), compile_check(node["then"], root, folder)
 
     def run(unit):
         status, facts, _, _ = cond(unit)
@@ -592,6 +630,28 @@ OPS = {
     "not": _c_not,
     "when": _c_when,
 }
+
+
+def _primitive(name):
+    def build(node, root, folder=None):
+        if name == "script_denylist":
+            from engine.primitives import script_denylist as mod
+            make = mod.RuleCheck
+            args = (node, folder or os.path.join(root, "rules"))
+        else:
+            from engine.primitives import parity as mod
+            make = mod.OPS[name]
+            args = (node, root)
+        try:
+            return make(*args)
+        except ValueError as e:
+            raise RuleError(str(e)) from None
+    return build
+
+
+for _name in ("script_denylist", "parity_skill", "parity_invocation", "parity_agent_name", "parity_wrapper",
+              "parity_permissions"):
+    OPS[_name] = _primitive(_name)
 
 
 def _render(message, facts):

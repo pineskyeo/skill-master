@@ -407,6 +407,92 @@ class _TomlReader:
             if self.peek() == ",": self.i += 1
             elif self.peek() != "]": self.fail("expected ',' or ']' in array")
 
+class _TableTomlReader(_TomlReader):
+    """The flat reader plus [table] headers (bare dotted names) and dotted bare keys, read into nested dicts (unit A3,
+    plan.md:674). Values and strings are read by the flat reader's methods."""
+    def __init__(self, text):
+        from engine.schema import MAX_DEPTH
+        _TomlReader.__init__(self, text)
+        # tables: path -> (how it was made, header section): "header", "implicit" (a parent of a header) or "dotted"
+        self.root, self.tables, self.values, self.section, self.max_depth = {}, {}, set(), 0, MAX_DEPTH
+    def dotted(self, what):
+        parts = []
+        while True:
+            self.skip_blank()
+            c = self.peek()
+            m = _TOML_BARE_KEY_RE.match(self.s, self.i)
+            if not m:
+                if c in "\"'": self.fail("quoted keys are not supported")
+                self.fail("expected a bare %s, got %r" % (what, c) if c else "expected a bare %s" % what)
+            parts.append(m.group(0)); self.i = m.end(); self.skip_blank()
+            if self.peek() != ".": return parts
+            self.i += 1; self.skip_blank()
+            if not _TOML_BARE_KEY_RE.match(self.s, self.i) and self.peek() not in "\"'":
+                self.fail("dotted key '%s.' has an empty part" % ".".join(parts))
+    def table(self, parts, upto, dotted_from=None):
+        """The table at parts[:upto], made on the way. Tables from dotted_from on are dotted-key tables: TOML 1.0 lets a
+        dotted key make or extend only tables that dotted keys of the same section made."""
+        if len(parts) > self.max_depth: self.fail("tables nest deeper than %d levels" % self.max_depth)
+        node = self.root
+        for n in range(1, upto + 1):
+            path = tuple(parts[:n])
+            if path in self.values: self.fail("key '%s' is used both as a value and a table" % ".".join(path))
+            made = self.tables.get(path)
+            if dotted_from is not None and n > dotted_from:
+                if made is None: self.tables[path] = ("dotted", self.section)
+                elif made != ("dotted", self.section): self.fail("table '%s' is defined twice" % ".".join(path))
+            elif made is None:
+                self.tables[path] = ("implicit", self.section)
+            node = node.setdefault(parts[n - 1], {})
+        return node
+    def parse(self):
+        node, prefix = self.root, ()
+        while self.i < len(self.s):
+            self.skip_blank()
+            if self.i >= len(self.s): break
+            c = self.peek()
+            if c == "#": self.comment()
+            if self.at_eol():
+                if self.i < len(self.s): self.newline()
+                continue
+            if c == "[":
+                if self.peek(2) == "[[": self.fail("arrays of tables are not supported")
+                self.i += 1
+                parts = self.dotted("table header name")
+                if self.peek() != "]": self.fail("expected ']' to close the table header")
+                self.i += 1
+                prefix = tuple(parts)
+                if self.tables.get(prefix, ("implicit",))[0] != "implicit":
+                    self.fail("table '%s' is defined twice" % ".".join(prefix))
+                self.section += 1
+                node = self.table(parts, len(parts))
+                self.tables[prefix] = ("header", self.section)
+            else:
+                parts = self.dotted("key")
+                if self.peek() != "=": self.fail("expected '=' after key '%s'" % ".".join(parts))
+                self.i += 1; self.skip_blank()
+                parent = self.table(list(prefix) + parts, len(prefix) + len(parts) - 1, len(prefix))
+                full = prefix + tuple(parts)
+                if parts[-1] in parent:
+                    if isinstance(parent[parts[-1]], dict) and full not in self.values:
+                        self.fail("key '%s' is used both as a value and a table" % ".".join(full))
+                    self.fail("duplicate key '%s'" % parts[-1])
+                parent[parts[-1]] = self.value()
+                self.values.add(full)
+            self.skip_blank(); self.comment()
+            if not self.at_eol(): self.fail("unexpected text after %s" % ("the table header" if c == "[" else
+                                                                            "the value of '%s'" % ".".join(parts)))
+            if self.i < len(self.s): self.newline()
+        return self.root
+
+def parse_toml(text):
+    """parse_flat_toml plus [table] headers (dotted names too) and dotted bare keys, returned as nested dicts. Still
+    refused: arrays of tables [[...]], quoted keys, inline tables, a key or table defined twice, a key used both as a
+    value and as a table, and everything parse_flat_toml refuses. A file without tables or dotted keys reads exactly as
+    parse_flat_toml reads it."""
+    if text.startswith("\ufeff"): raise TomlError("line 1: a byte order mark is not allowed")
+    return _TableTomlReader(text).parse()
+
 def parse_flat_toml(text):
     """Strict flat-TOML reader (stdlib only; Python 3.9 has no tomllib). Returns {key: value}; raises TomlError on anything
     it cannot parse. Supported: comments, bare keys, basic and literal strings (single and multi-line, all TOML escapes),

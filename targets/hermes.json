@@ -1,0 +1,29 @@
+{
+  "$comment": "Hermes Agent target (unit A3, plan.md:673). No verified per-agent tool-permission format exists, so the permission row fails closed for every agent (gates.md G4). Hermes is not installed here; the wrapper is a profile SOUL.md.",
+  "tool": "hermes",
+  "label": "Hermes Agent",
+  "engine": null,
+  "docs": [
+    {"url": "https://hermes-agent.nousresearch.com/docs/user-guide/profiles", "section": "Hermes profiles (SOUL.md, config.yaml)", "verified": "2026-10-19", "note": "inputs/agent-master-skills.md section 9"},
+    {"url": "https://hermes-agent.nousresearch.com/docs/user-guide/features/tools", "section": "Hermes tools", "verified": "2026-10-19", "note": "inputs/agent-master-skills.md section 9"}
+  ],
+  "skill": {
+    "metadata_key": "hermes",
+    "ok": "SKILL.md satisfies the Hermes Agent baseline (agentskills.io fields, no metadata.hermes mapping)"
+  },
+  "invocation": {"verified": false},
+  "wrapper": {
+    "path": "wrappers/hermes/SOUL.md",
+    "format": "text",
+    "required": [],
+    "fields": {},
+    "forbidden": {},
+    "extra_files": [{"path": "wrappers/hermes/config.yaml", "optional": true, "non_empty": true}]
+  },
+  "permissions": {
+    "compare": "none",
+    "derive": {},
+    "unrestrictable": [],
+    "fixed": "fail"
+  }
+}

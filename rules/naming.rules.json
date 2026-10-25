@@ -1,0 +1,49 @@
+{
+  "ruleset": "naming",
+  "version": "1.0.0",
+  "rules": [
+    {
+      "id": "name-format",
+      "applies_to": ["skill", "agent"],
+      "category": "single-task",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"url": "https://agentskills.io/specification", "section": "name field (skills-ref validator rules)", "verified": "2026-10-19"},
+      "check": {
+        "op": "all",
+        "of": [
+          {"op": "regex", "sel": "frontmatter:#/name", "normalize": ["string-or-empty", "strip", "nfkc"], "pattern": "\\A(?!-)(?!.*--)(?!.*-\\Z)(?:[^\\W_]|-){1,64}\\Z"},
+          {"op": "equals", "left": {"sel": "frontmatter:#/name", "normalize": ["string-or-empty", "strip", "nfkc"]}, "right": {"sel": "frontmatter:#/name", "normalize": ["string-or-empty", "strip", "nfkc", "lower"]}}
+        ]
+      },
+      "message": "name follows the skills-ref rules: NFKC, lowercase letters, digits and '-', no leading, trailing or double '-', at most 64 characters",
+      "fix": "Write the name in lowercase letters, digits and single hyphens (for example pdf-summarizer), at most 64 characters."
+    },
+    {
+      "id": "name-matches-folder",
+      "applies_to": ["skill", "agent"],
+      "category": "structure",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"url": "https://agentskills.io/specification", "section": "name field (must match the parent folder name)", "verified": "2026-10-19"},
+      "check": {
+        "op": "equals",
+        "left": {"sel": "frontmatter:#/name", "normalize": ["string-or-empty", "strip", "nfkc"]},
+        "right": {"sel": "path:basename", "normalize": ["nfkc"]}
+      },
+      "message": "name '{left}' must equal the folder name '{right}'",
+      "fix": "Rename the folder or the frontmatter name so they are identical."
+    },
+    {
+      "id": "name-reserved",
+      "applies_to": ["skill"],
+      "category": "single-task",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "Claude skill authoring best practices: a skill name cannot contain the reserved words anthropic or claude (cited at eva.py RESERVED_NAME_WORDS; no dated record)", "verified": null},
+      "check": {"op": "not_regex", "sel": "frontmatter:#/name", "normalize": ["string-or-empty", "strip", "nfkc", "lower"], "pattern": "anthropic|claude"},
+      "message": "name has no reserved word (anthropic, claude)",
+      "fix": "Remove the reserved words anthropic and claude from the name."
+    }
+  ]
+}

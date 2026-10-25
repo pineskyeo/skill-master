@@ -1,0 +1,22 @@
+{
+ "id": "drill",
+ "turns": [
+  {
+   "user": "Give me an overview"
+  },
+  {
+   "user": "Explain the test folder you just mentioned"
+  }
+ ],
+ "expected_tools": [
+  "grep",
+  "read_file"
+ ],
+ "must_include": [
+  "test"
+ ],
+ "expected_outcome": [
+  "explains the test folder from the earlier turn",
+  "no file changes"
+ ]
+}

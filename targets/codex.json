@@ -1,0 +1,30 @@
+{
+  "$comment": "Codex CLI target (unit A3, plan.md:673-674). The C2 probe never ran (<plan>/prototypes/codex-sandbox/ does not exist, A3 how D1), so shell stays unrestrictable and the features.shell_tool derive entry is recorded with verified false and never read. features.shell_tool is an accepted wrapper key only.",
+  "tool": "codex",
+  "label": "Codex CLI",
+  "engine": "codex",
+  "docs": [
+    {"url": "https://developers.openai.com/codex/subagents", "section": "Codex custom agents", "verified": "2026-10-19", "note": "inputs/agent-master-skills.md section 9"},
+    {"url": "https://developers.openai.com/codex/skills", "section": "skills and agents/openai.yaml", "verified": null, "note": "inputs/design.md section 2.2 lists it with no date"}
+  ],
+  "skill": {
+    "tool_file": "agents/openai.yaml",
+    "verified_fields": ["policy.allow_implicit_invocation"]
+  },
+  "invocation": {"tool_file": "agents/openai.yaml", "field": "policy.allow_implicit_invocation", "value": false},
+  "wrapper": {
+    "path": "wrappers/codex/{name}.toml",
+    "format": "toml",
+    "required": ["name", "description", "developer_instructions"],
+    "fields": {"model": {"kind": "string"}, "model_reasoning_effort": {"kind": "string"}, "features.shell_tool": {"kind": "boolean"}},
+    "forbidden": {"sandbox_mode": "sandbox_mode in a Codex custom agent file does not override the parent session; remove it"},
+    "unknown_keys": "fail",
+    "extra_files": []
+  },
+  "permissions": {
+    "compare": "none",
+    "derive": {"shell": {"key": "features.shell_tool", "off": [false], "verified": false, "evidence": "<plan>/prototypes/codex-sandbox/shell-tool.txt does not exist: the C2 probe never ran (A3 how D1)"}},
+    "unrestrictable": ["write", "shell", "web_fetch", "web_search", "delegate", "skill"],
+    "fixed": null
+  }
+}

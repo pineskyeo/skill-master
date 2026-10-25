@@ -1,0 +1,105 @@
+{
+  "ruleset": "parity-agent",
+  "version": "1.0.0",
+  "rules": [
+    {
+      "id": "parity-agent-name",
+      "applies_to": ["agent"],
+      "category": "parity",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "owner decision 2026-10-19 18:43 KST: the agent name is the wrapper file stem of all four tools (notes/multi-tool-parity-plan.md section 2.4)", "verified": "2026-10-19"},
+      "check": {"op": "parity_agent_name", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"},
+      "message": "{reason}",
+      "fix": "See notes/multi-tool-parity-plan.md section 2.4. Rename the agent to lowercase letters, digits and single hyphens."
+    },
+    {
+      "id": "parity-wrapper-claude",
+      "applies_to": ["agent"],
+      "category": "parity",
+      "severity": "fail",
+      "protects": ["claude"],
+      "source": {"url": "https://code.claude.com/docs/en/sub-agents", "section": "Claude Code sub-agents (targets/claude.json wrapper)", "verified": "2026-10-19"},
+      "check": {"op": "parity_wrapper", "tool": "claude"},
+      "message": "{reason}",
+      "fix": "See notes/multi-tool-parity-plan.md section 2.4. Create or repair {rel}."
+    },
+    {
+      "id": "parity-wrapper-codex",
+      "applies_to": ["agent"],
+      "category": "parity",
+      "severity": "fail",
+      "protects": ["codex"],
+      "source": {"url": "https://developers.openai.com/codex/subagents", "section": "Codex custom agents (targets/codex.json wrapper)", "verified": "2026-10-19"},
+      "check": {"op": "parity_wrapper", "tool": "codex"},
+      "message": "{reason}",
+      "fix": "See notes/multi-tool-parity-plan.md section 2.4. Create or repair {rel}."
+    },
+    {
+      "id": "parity-wrapper-opencode",
+      "applies_to": ["agent"],
+      "category": "parity",
+      "severity": "fail",
+      "protects": ["opencode"],
+      "source": {"url": "https://opencode.ai/docs/agents/", "section": "OpenCode agents (targets/opencode.json wrapper)", "verified": "2026-10-19"},
+      "check": {"op": "parity_wrapper", "tool": "opencode"},
+      "message": "{reason}",
+      "fix": "See notes/multi-tool-parity-plan.md section 2.4. Create or repair {rel}."
+    },
+    {
+      "id": "parity-wrapper-hermes",
+      "applies_to": ["agent"],
+      "category": "parity",
+      "severity": "fail",
+      "protects": ["hermes"],
+      "source": {"url": "https://hermes-agent.nousresearch.com/docs/user-guide/profiles", "section": "Hermes profiles (targets/hermes.json wrapper)", "verified": "2026-10-19"},
+      "check": {"op": "parity_wrapper", "tool": "hermes"},
+      "message": "{reason}",
+      "fix": "See notes/multi-tool-parity-plan.md section 2.4. Create or repair {rel}."
+    },
+    {
+      "id": "parity-permissions-claude",
+      "applies_to": ["agent"],
+      "category": "parity",
+      "severity": "fail",
+      "protects": ["claude"],
+      "source": {"url": "https://code.claude.com/docs/en/sub-agents", "section": "Claude Code sub-agent tools (targets/claude.json permissions)", "verified": "2026-10-19"},
+      "check": {"op": "parity_permissions", "tool": "claude"},
+      "message": "{reason}",
+      "fix": "See notes/multi-tool-parity-plan.md section 2.4. List the same tools in the wrapper as in AGENT.md (aliases: TOOL_ALIASES in engine/primitives/parity.py), using tool names the capability table maps."
+    },
+    {
+      "id": "parity-permissions-codex",
+      "applies_to": ["agent"],
+      "category": "parity",
+      "severity": "fail",
+      "protects": ["codex"],
+      "source": {"url": "https://developers.openai.com/codex/subagents", "section": "Codex custom agents (targets/codex.json permissions)", "verified": "2026-10-19"},
+      "check": {"op": "parity_permissions", "tool": "codex"},
+      "message": "{reason}",
+      "fix": {"fail": "See notes/multi-tool-parity-plan.md section 2.4. Use mapped tool names or extend CAPABILITY_BY_TOOL in engine/primitives/parity.py.", "review": "See notes/multi-tool-parity-plan.md section 2.4. Run the agent on Codex only from a session whose sandbox fits it, and record that decision with `skill_eval.py approve --gate rule_review`."}
+    },
+    {
+      "id": "parity-permissions-opencode",
+      "applies_to": ["agent"],
+      "category": "parity",
+      "severity": "fail",
+      "protects": ["opencode"],
+      "source": {"url": "https://opencode.ai/docs/agents/", "section": "OpenCode agent permissions (targets/opencode.json permissions)", "verified": "2026-10-19"},
+      "check": {"op": "parity_permissions", "tool": "opencode"},
+      "message": "{reason}",
+      "fix": {"fail": "See notes/multi-tool-parity-plan.md section 2.4. Align the wrapper permissions with the AGENT.md tools.", "review": "See notes/multi-tool-parity-plan.md section 2.4. Check that no OpenCode permission key outside the recorded list matters for this agent, and record that decision with `skill_eval.py approve --gate rule_review`."}
+    },
+    {
+      "id": "parity-permissions-hermes",
+      "applies_to": ["agent"],
+      "category": "parity",
+      "severity": "fail",
+      "protects": ["hermes"],
+      "source": {"url": "https://hermes-agent.nousresearch.com/docs/user-guide/features/tools", "section": "Hermes tools (targets/hermes.json permissions)", "verified": "2026-10-19"},
+      "check": {"op": "parity_permissions", "tool": "hermes"},
+      "message": "{reason}",
+      "fix": "See notes/multi-tool-parity-plan.md section 2.4. Until a Hermes permission format is verified and recorded in targets/hermes.json this row fails for every agent by design; see the README section on multi-tool parity."
+    }
+  ]
+}

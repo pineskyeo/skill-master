@@ -4,12 +4,14 @@ same {row id: status}, must flags, score, categories and verdict; for every corp
 variant each public function accepts exactly what its legacy body accepts and returns equal data. A difference must be
 listed in tests/differential/intentional.json, and every listed entry must occur. Also here (A6 deletes this file with
 the oracle): the schema, rule-entry and policy tests of A2."""
-import ast, contextlib, copy, functools, hashlib, io, json, os, re, shutil, subprocess, sys, tempfile, unittest
+import ast, contextlib, copy, functools, hashlib, inspect, io, json, os, re, shutil, subprocess, sys, tempfile, unittest
 from unittest import mock
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, "tests"))
 import eva, skill_eval
 from engine import rule_runner as RR, schema as S
+import test_multi_tool_parity as P
 
 INTENTIONAL_PATH = os.path.join(ROOT, "tests", "differential", "intentional.json")
 SCHEMAS = ("evals.schema.json", "trigger-evals.schema.json", "scenario.schema.json", "transcript.schema.json",
@@ -35,7 +37,30 @@ LEGACY_PINS = {
     ("eva.py", "_field_type_errors"): "8949b0a4b456895b6da77ae9420ea23a595887ebbd2dfccc624698a648eb2435",
     ("skill_eval.py", "load_eval_set"): "37487b394b54db63f25e8a02a951583882794582c047fe33f1b10cee5242de12",
     ("skill_eval.py", "load_triggers"): "187630cc42d713e85870646c9afdeba9ac0c4b530ac5ff63315294b7385e1f22",
+    # A3: A2 sha256 of each body, computed from the A2 export by /tmp/a3-owner/pins.py (/tmp/a3-owner/pins.txt).
+    ("eva.py", "add_english_checks"): "5093b3950fffffe3d2466680dbf1ebf05cde9c7bbdb99976bd6998d33c7b91e7",
+    ("eva.py", "add_parity_checks_skill"): "23747214bc7515d22523aa29d1a349f21af6e8d3925d1c179059dfa20282f618",
+    ("eva.py", "add_parity_checks_agent"): "be5db8692b6e9343dc654e49468593752175c41544297344521ee8b805234809",
+    ("eva.py", "agent_wrapper_states"): "9c497d38a7c97b7924186afe7004413c450f80679ab1a693d55704099c59357b",
+    ("eva.py", "english_scan"): "de21cf62408d10608403bddafaa2114032c3b2d3470be7f05db2024687aabe41",
+    ("eva.py", "codex_policy"): "e07fc4c7768f851c89b931137c5231ead9b0bf8652a3418379383a6a8dd5aee8",
+    ("eva.py", "english_eval_problems"): "26d6aa52179dbcd6be4f7eb663aaaeb54607f35b741e45e620ff53a8164070f9",
 }
+# A3 rule ids by rule file (brief A3 D3). Their rows come from the bundle; the naming rows merge like the A2 shape rows.
+A3_RULE_FILES = {}
+for _fname, _ids in (("naming.rules.json", ("name-format", "name-matches-folder", "name-reserved")),
+                     ("english-only.rules.json", ("english-skill-md", "english-bundled-files", "english-evals",
+                                                  "english-tool-files", "english-agent-md", "english-scenarios",
+                                                  "english-wrappers", "english-output-matchers", "english-ruleset")),
+                     ("parity-skill.rules.json", ("parity-skill-claude", "parity-skill-codex", "parity-skill-opencode",
+                                                  "parity-skill-hermes", "parity-invocation-control",
+                                                  "parity-invocation-hermes")),
+                     ("parity-agent.rules.json", ("parity-agent-name",) + tuple(
+                         "parity-%s-%s" % (k, t) for k in ("wrapper", "permissions")
+                         for t in ("claude", "codex", "opencode", "hermes")))):
+    for _rid in _ids:
+        A3_RULE_FILES[_rid] = _fname
+ROW_FAMILY_FILES = ("english-only.rules.json", "parity-skill.rules.json", "parity-agent.rules.json")
 UNCHANGED_PINS = {
     ("skill_eval.py", "_check_problems"): "9b96dbde4cc903ed854c49f0607aa88823c4aeb1756c4b817bdcf12400b756ae",
     ("skill_eval.py", "_csv_rows_problems"): "17c8f420caa72778c36bf9f8e7656d582e04b63a30b7ee674a942b5d06527824",
@@ -102,8 +127,24 @@ def legacy():
             mock.patch.object(eva, "scenario_errors", eva._legacy_scenario_errors), \
             mock.patch.object(eva, "load_transcript", eva._legacy_load_transcript), \
             mock.patch.object(eva, "_field_type_errors", eva._legacy_field_type_errors), \
-            mock.patch.object(skill_eval, "load_triggers", skill_eval._legacy_load_triggers):
+            mock.patch.object(skill_eval, "load_triggers", skill_eval._legacy_load_triggers), \
+            mock.patch.object(eva, "add_english_checks",
+                              lambda r, path, scan=None, bundle=None: eva._legacy_add_english_checks(r, path, scan)), \
+            mock.patch.object(eva, "add_parity_checks_skill",
+                              lambda r, path, bundle=None, dedupe=True: eva._legacy_add_parity_checks_skill(r, path)), \
+            mock.patch.object(eva, "add_parity_checks_agent",
+                              lambda r, path, bundle=None: eva._legacy_add_parity_checks_agent(r, path)), \
+            mock.patch.object(eva, "agent_wrapper_states", eva._legacy_agent_wrapper_states), \
+            mock.patch.object(eva, "english_scan", lambda path, bundle=None: eva._legacy_english_scan(path)), \
+            mock.patch.object(eva, "codex_policy", eva._legacy_codex_policy), \
+            mock.patch.object(eva, "english_eval_problems", eva._legacy_english_eval_problems):
         yield
+
+
+def legacy_source(*names):
+    """The source of the legacy bodies eva._legacy_<name>, for the target and operand pins of tests/test_rule_targets.py
+    (only this file names the oracle)."""
+    return "\n".join(inspect.getsource(getattr(eva, "_legacy_" + n)) for n in names)
 
 
 def quiet(fn, *a):
@@ -549,6 +590,297 @@ def trigger_variant_unit(name):
     return path
 
 
+# ---------- A3 variants: one per legacy branch of the English, parity and naming bodies (brief A3 D14) ----------
+KO = "\ud55c\uad6d\uc5b4"
+CHEROKEE, YI = "\u13a0\u13a1\u13a2", "\ua000\ua001\ua002"
+CODEX_REL, OPENCODE_REL, CLAUDE_REL, HERMES_REL = ("wrappers/codex/code-scout.toml", "wrappers/opencode/code-scout.md",
+                                                   "wrappers/claude/code-scout.md", "wrappers/hermes/SOUL.md")
+
+
+def sub(old, new):
+    return lambda t: t.replace(old, new, 1)
+
+
+def skill_variant(name="diff-base", md_edit=None, files=None, links=None, raw=None, evals_edit=None):
+    def build(top):
+        md = SKILL_MD.replace("name: diff-base", "name: " + name, 1) if name != "diff-base" else SKILL_MD
+        md = md_edit(md) if md_edit else md
+        ev = evals_edit(copy.deepcopy(BASE_EVALS)) if evals_edit else BASE_EVALS
+        path = make_unit(top, name=name, skill_md=md, evals=ev)
+        for rel_path, text in (files or {}).items():
+            fp = os.path.join(path, *rel_path.split("/"))
+            os.makedirs(os.path.dirname(fp), exist_ok=True)
+            if isinstance(text, bytes):
+                with open(fp, "wb") as f:
+                    f.write(text)
+            elif text is None:
+                os.makedirs(fp, exist_ok=True)
+            else:
+                write(fp, text)
+        for rel_path, target in (links or {}).items():
+            os.symlink(target(path) if callable(target) else target, os.path.join(path, *rel_path.split("/")))
+        return path
+    return build
+
+
+def agent_variant(md_edit=None, caps=None, skip=(), replace=None, files=None, links=None, wrappers=True, folder="code-scout"):
+    def build(top):
+        d = os.path.join(top, folder)
+        md = md_edit(P.AGENT_MD) if md_edit else P.AGENT_MD
+        write(os.path.join(d, "AGENT.md"), md)
+        write(os.path.join(d, "scenarios", "01.json"), json.dumps(P.S1, indent=1))
+        write(os.path.join(d, "scenarios", "02.json"), json.dumps(P.S2, indent=1))
+        if wrappers:
+            P.write_wrappers(d, caps=caps, skip=skip, replace=replace)
+        for rel_path, text in (files or {}).items():
+            fp = os.path.join(d, *rel_path.split("/"))
+            os.makedirs(os.path.dirname(fp), exist_ok=True)
+            if isinstance(text, bytes):
+                with open(fp, "wb") as f:
+                    f.write(text)
+            else:
+                write(fp, text)
+        for rel_path, target in (links or {}).items():
+            fp = os.path.join(d, *rel_path.split("/"))
+            os.makedirs(os.path.dirname(fp), exist_ok=True)
+            os.symlink(target(d) if callable(target) else target, fp)
+        return d
+    return build
+
+
+def outside_file(text):
+    def make(unit):
+        fp = os.path.dirname(unit) + "-outside.txt"
+        write(fp, text)
+        return fp
+    return make
+
+
+def fm(extra):
+    return sub("license: MIT\n", "license: MIT\n" + extra)
+
+
+YAML = "agents/openai.yaml"
+ALL_CAPS = "[read_file, write_file, bash, web_fetch, web_search, task, skill]"
+# name -> (builder, row id, legacy status that proves the branch is reached)
+A3_VARIANTS = {
+    "skill-base": (skill_variant(), "parity-skill-claude", "pass"),
+    "skill-no-frontmatter": (skill_variant(md_edit=lambda t: t.replace("---\n", "", 2)), "parity-skill-claude", "fail"),
+    "skill-no-description": (skill_variant(md_edit=lambda t: re.sub(r"description: .*\n", "", t)), "parity-skill-hermes",
+                             "fail"),
+    "skill-reserved-word": (skill_variant(name="claude-helper"), "parity-skill-claude", "fail"),
+    "skill-long-name": (skill_variant(name="a" * 70), "parity-skill-claude", "fail"),
+    "skill-long-description": (skill_variant(md_edit=sub("Use when a test", "x" * 1100 + " Use when a test")),
+                               "parity-skill-claude", "fail"),
+    "skill-angle": (skill_variant(md_edit=sub("one CSV file", "one <csv> file")), "parity-skill-claude", "fail"),
+    "skill-codex-unverified": (skill_variant(files={YAML: "interface:\n  display_name: X\n"}), "parity-skill-codex",
+                               "needs-review"),
+    "skill-codex-quoted": (skill_variant(files={YAML: 'policy:\n  allow_implicit_invocation: "false"\n'}),
+                           "parity-skill-codex", "fail"),
+    "skill-codex-not-mapping": (skill_variant(files={YAML: "policy: strict\n"}), "parity-skill-codex", "fail"),
+    "skill-codex-markers": (skill_variant(files={YAML: "a: 1\n---\nb: 2\n"}), "parity-skill-codex", "fail"),
+    "skill-codex-parse-error": (skill_variant(files={YAML: "a: 1\nb: 2\nc d\n"}), "parity-skill-codex", "fail"),
+    "skill-codex-folder": (skill_variant(files={YAML + "/x.txt": "x"}), "parity-skill-codex", "fail"),
+    "skill-codex-undecodable": (skill_variant(files={YAML: b"\xff\xfe\xfa\x80"}), "parity-skill-codex", "fail"),
+    "skill-codex-true": (skill_variant(files={YAML: "policy:\n  allow_implicit_invocation: true\n"}),
+                         "parity-skill-codex", "pass"),
+    "skill-codex-other-policy": (skill_variant(files={YAML: "policy:\n  other: 1\n"}), "parity-skill-codex",
+                                 "needs-review"),
+    "skill-codex-empty": (skill_variant(files={YAML: ""}), "parity-skill-codex", "pass"),
+    "skill-opencode-regex": (skill_variant(name="diff_base"), "parity-skill-opencode", "fail"),
+    "skill-nfkc-name": (skill_variant(md_edit=sub("name: diff-base", "name: \uff44\uff49\uff46\uff46-base")),
+                        "parity-skill-opencode", "fail"),
+    "skill-metadata-typed": (skill_variant(md_edit=sub("version: 1.0.0", "version: 1.0")), "parity-skill-opencode",
+                             "fail"),
+    "skill-metadata-list": (skill_variant(md_edit=sub("version: 1.0.0", "version: [1, 2]")), "parity-skill-opencode",
+                            "fail"),
+    "skill-metadata-not-mapping": (skill_variant(md_edit=sub("metadata:\n  version: 1.0.0\n", "metadata: text\n")),
+                                   "parity-skill-opencode", "fail"),
+    "skill-autoinvoke-bad": (skill_variant(md_edit=sub("version: 1.0.0", 'version: 1.0.0\n  opencode/autoinvoke: "no"')),
+                             "parity-skill-opencode", "fail"),
+    "skill-hermes-mapping": (skill_variant(md_edit=sub("version: 1.0.0", "version: 1.0.0\n  hermes:\n    tags: [a]")),
+                             "parity-skill-hermes", "fail"),
+    "skill-hermes-flow": (skill_variant(md_edit=sub("version: 1.0.0", "version: 1.0.0\n  hermes: {tags: [a]}")),
+                          "parity-skill-hermes", "fail"),
+    "skill-hermes-string": (skill_variant(md_edit=sub("version: 1.0.0", "version: 1.0.0\n  hermes: terminal")),
+                            "parity-skill-hermes", "pass"),
+    "skill-disabled": (skill_variant(md_edit=fm("disable-model-invocation: true\n")), "parity-invocation-control", "fail"),
+    "skill-disabled-opencode-only": (skill_variant(md_edit=lambda t: fm("disable-model-invocation: true\n")(t).replace(
+        "version: 1.0.0", 'version: 1.0.0\n  opencode/autoinvoke: "false"')), "parity-invocation-control", "fail"),
+    "skill-disabled-codex-only": (skill_variant(md_edit=fm("disable-model-invocation: true\n"),
+                                                files={YAML: "policy:\n  allow_implicit_invocation: false\n"}),
+                                  "parity-invocation-control", "fail"),
+    "skill-disabled-both": (skill_variant(md_edit=lambda t: fm("disable-model-invocation: true\n")(t).replace(
+        "version: 1.0.0", 'version: 1.0.0\n  opencode/autoinvoke: "false"'),
+        files={YAML: "policy:\n  allow_implicit_invocation: false\n"}), "parity-invocation-hermes", "needs-review"),
+    "skill-disabled-false": (skill_variant(md_edit=fm("disable-model-invocation: false\n")), "parity-invocation-control",
+                             "n/a"),
+    "skill-disabled-string": (skill_variant(md_edit=fm('disable-model-invocation: "TRUE"\n')), "parity-invocation-control",
+                              "fail"),
+    "skill-name-format": (skill_variant(name="Diff--Base"), "name-format", "fail"),
+    "skill-ko-body": (skill_variant(md_edit=lambda t: t + KO + "\n"), "english-skill-md", "fail"),
+    "agent-md-not-utf8": (agent_variant(files={"AGENT.md": b"---\nname: code-scout\n---\n\xff\xfe\x80\n"}),
+                          "english-agent-md", "n/a"),
+    "skill-ko-frontmatter-escape": (skill_variant(md_edit=fm('compatibility: "\\uac00"\n')), "english-skill-md", "fail"),
+    "skill-cherokee-yi": (skill_variant(md_edit=lambda t: t + CHEROKEE + "\n", files={"scripts/run.py": "# %s\n" % YI}),
+                          "english-bundled-files", "fail"),
+    "skill-ko-bundled": (skill_variant(files={"references/a.md": "x %s\n" % KO}), "english-bundled-files", "fail"),
+    "skill-ko-file-name": (skill_variant(files={"references/%s.md" % KO: "x\n"}), "english-bundled-files", "fail"),
+    "skill-many-findings": (skill_variant(files={"references/a.md": ("%s\n" % KO) * 8}), "english-bundled-files", "fail"),
+    "skill-binary": (skill_variant(files={"assets/x.png": b"\x89PNG\r\n\x1a\n\x00\xff"}), "english-bundled-files", "n/a"),
+    "skill-undecodable": (skill_variant(files={"assets/x.dat": b"\x80\x81\x82"}), "english-bundled-files", "fail"),
+    "skill-json-bundled": (skill_variant(files={"assets/d.json": json.dumps({"k": KO})}), "english-bundled-files", "fail"),
+    "skill-toml-bundled": (skill_variant(files={"assets/d.toml": 'k = "\\uac00"\n'}), "english-bundled-files", "fail"),
+    "skill-link-outside": (skill_variant(links={"references": outside_file("x\n")}), "english-bundled-files", "fail"),
+    "skill-link-cycle": (skill_variant(files={"references/a.md": "x\n"}, links={"references/loop": lambda u: os.path.join(
+        u, "references")}), "english-bundled-files", "fail"),
+    "skill-ko-evals": (skill_variant(evals_edit=edit_case(1, prompt=KO)), "english-evals", "fail"),
+    "skill-ko-matcher": (skill_variant(evals_edit=lambda d: (d["evals"][0]["assertions"][0]["check"].update(pattern=KO), d)[1]),
+                         "english-output-matchers", "needs-review"),
+    "skill-evals-invalid-json": (skill_variant(files={"evals/evals.json": '{"skill_name": "%s",' % KO}), "english-evals",
+                                 "fail"),
+    "skill-ko-tool-file": (skill_variant(files={YAML: 'interface:\n  display_name: "\\uAC00"\n'}), "english-tool-files",
+                           "fail"),
+    "agent-complete": (agent_variant(), "parity-permissions-codex", "needs-review"),
+    "agent-no-wrappers": (agent_variant(wrappers=False), "parity-wrapper-claude", "fail"),
+    "agent-skip-claude": (agent_variant(skip=("claude",)), "parity-permissions-claude", "n/a"),
+    "agent-skip-codex": (agent_variant(skip=("codex",)), "parity-permissions-codex", "n/a"),
+    "agent-skip-opencode": (agent_variant(skip=("opencode",)), "parity-permissions-opencode", "n/a"),
+    "agent-skip-hermes": (agent_variant(skip=("hermes",)), "parity-wrapper-hermes", "fail"),
+    "agent-no-name": (agent_variant(md_edit=sub("name: code-scout\n", ""), wrappers=False), "parity-wrapper-codex", "fail"),
+    "agent-bad-name": (agent_variant(md_edit=sub("name: code-scout", "name: Code_Scout")), "parity-agent-name", "fail"),
+    "agent-claude-unparsable": (agent_variant(replace={CLAUDE_REL: "no frontmatter\n"}), "parity-wrapper-claude", "fail"),
+    "agent-claude-name-differs": (agent_variant(replace={CLAUDE_REL: sub("name: code-scout", "name: other")}),
+                                  "parity-wrapper-claude", "fail"),
+    "agent-claude-description-differs": (agent_variant(replace={CLAUDE_REL: sub("Reads a repository", "Scans a repository")}),
+                                         "parity-wrapper-claude", "fail"),
+    "agent-claude-no-tools": (agent_variant(replace={CLAUDE_REL: lambda t: re.sub(r"tools: .*\n", "", t)}),
+                              "parity-wrapper-claude", "fail"),
+    "agent-claude-unmapped-tool": (agent_variant(replace={CLAUDE_REL: sub("Glob, Grep, Read", "Read, CrmLookup")}),
+                                   "parity-wrapper-claude", "fail"),
+    "agent-claude-model-empty": (agent_variant(replace={CLAUDE_REL: sub("---\nYou", "model:\n---\nYou")}),
+                                 "parity-wrapper-claude", "fail"),
+    "agent-claude-body-empty": (agent_variant(replace={CLAUDE_REL: lambda t: t.split("---\n")[0] + "---\n" + t.split("---\n")[1]
+                                                       + "---\n"}), "parity-wrapper-claude", "fail"),
+    "agent-claude-outside": (agent_variant(skip=("claude",), links={CLAUDE_REL: outside_file("---\nname: code-scout\n---\nx\n")}),
+                             "parity-wrapper-claude", "fail"),
+    "agent-opencode-unparsable": (agent_variant(replace={OPENCODE_REL: "---\ndescription: x\n"}), "parity-wrapper-opencode",
+                                  "fail"),
+    "agent-opencode-mode": (agent_variant(replace={OPENCODE_REL: sub("subagent", "sidekick")}), "parity-wrapper-opencode",
+                            "fail"),
+    "agent-opencode-name-differs": (agent_variant(replace={OPENCODE_REL: sub("mode: subagent", "name: other\nmode: subagent")}),
+                                    "parity-wrapper-opencode", "fail"),
+    "agent-opencode-name-empty": (agent_variant(replace={OPENCODE_REL: sub("mode: subagent", "name: ''\nmode: subagent")}),
+                                  "parity-wrapper-opencode", "fail"),
+    "agent-opencode-model-empty": (agent_variant(replace={OPENCODE_REL: sub("mode: subagent", "model: ''\nmode: subagent")}),
+                                   "parity-wrapper-opencode", "fail"),
+    "agent-opencode-no-description": (agent_variant(replace={OPENCODE_REL: lambda t: re.sub(r"description: .*\n", "", t)}),
+                                      "parity-wrapper-opencode", "fail"),
+    "agent-opencode-no-permission": (agent_variant(replace={OPENCODE_REL: lambda t: re.sub(r"permission:\n(  .*\n)+", "", t)}),
+                                     "parity-wrapper-opencode", "fail"),
+    "agent-opencode-key-missing": (agent_variant(replace={OPENCODE_REL: sub("  lsp: allow\n", "")}), "parity-wrapper-opencode",
+                                   "fail"),
+    "agent-opencode-bad-value": (agent_variant(replace={OPENCODE_REL: sub("edit: deny", "edit: sometimes")}),
+                                 "parity-wrapper-opencode", "fail"),
+    "agent-opencode-external-allow": (agent_variant(replace={OPENCODE_REL: sub("external_directory: deny",
+                                                                               "external_directory: allow")}),
+                                      "parity-wrapper-opencode", "fail"),
+    "agent-opencode-unknown-key": (agent_variant(replace={OPENCODE_REL: sub("webfetch: deny", "webfetch: deny\n  foo: deny")}),
+                                   "parity-wrapper-opencode", "fail"),
+    "agent-opencode-ask": (agent_variant(replace={OPENCODE_REL: sub("bash: deny", "bash: ask")}),
+                           "parity-permissions-opencode", "fail"),
+    "agent-codex-parse-error": (agent_variant(replace={CODEX_REL: "name = code-scout\n"}), "parity-wrapper-codex", "fail"),
+    "agent-codex-duplicate": (agent_variant(replace={CODEX_REL: lambda t: t + 'name = "x"\n'}), "parity-wrapper-codex",
+                              "fail"),
+    "agent-codex-sandbox": (agent_variant(replace={CODEX_REL: lambda t: t + 'sandbox_mode = "read-only"\n'}),
+                            "parity-wrapper-codex", "fail"),
+    "agent-codex-unknown-key": (agent_variant(replace={CODEX_REL: lambda t: t + 'foo = "x"\n'}), "parity-wrapper-codex",
+                                "fail"),
+    "agent-codex-model-empty": (agent_variant(replace={CODEX_REL: lambda t: t + 'model = ""\n'}), "parity-wrapper-codex",
+                                "fail"),
+    "agent-codex-optional-keys": (agent_variant(replace={CODEX_REL: lambda t: t + 'model = "m"\nmodel_reasoning_effort = "high"\n'}),
+                                  "parity-wrapper-codex", "pass"),
+    "agent-codex-no-instructions": (agent_variant(replace={CODEX_REL: 'name = "code-scout"\ndescription = "x"\n'}),
+                                    "parity-wrapper-codex", "fail"),
+    "agent-codex-undecodable": (agent_variant(files={CODEX_REL: b"name = \"\xff\"\n"}), "parity-wrapper-codex", "fail"),
+    "agent-hermes-empty": (agent_variant(replace={HERMES_REL: "   \n"}), "parity-wrapper-hermes", "fail"),
+    "agent-hermes-no-name": (agent_variant(replace={HERMES_REL: sub("# code-scout", "# scout")}), "parity-wrapper-hermes",
+                             "fail"),
+    "agent-hermes-description": (agent_variant(replace={HERMES_REL: sub("Reads a repository", "Scans a repository")}),
+                                 "parity-wrapper-hermes", "fail"),
+    "agent-hermes-config-ok": (agent_variant(files={"wrappers/hermes/config.yaml": "skills:\n  x: y\n"}),
+                               "parity-wrapper-hermes", "pass"),
+    "agent-hermes-config-empty": (agent_variant(files={"wrappers/hermes/config.yaml": "\n"}), "parity-wrapper-hermes", "fail"),
+    "agent-hermes-config-outside": (agent_variant(links={"wrappers/hermes/config.yaml": outside_file("a: b\n")}),
+                                    "parity-wrapper-hermes", "fail"),
+    "agent-unmapped-tool": (agent_variant(md_edit=sub("[glob, grep, read_file]", "[read_file, crm_lookup]")),
+                            "parity-permissions-claude", "fail"),
+    "agent-all-caps": (agent_variant(md_edit=sub("[glob, grep, read_file]", ALL_CAPS)), "parity-permissions-codex", "pass"),
+    "agent-grants-more": (agent_variant(caps={"read", "write", "shell", "web_fetch", "web_search"}),
+                          "parity-permissions-opencode", "fail"),
+    "agent-grants-less": (agent_variant(md_edit=sub("[glob, grep, read_file]", "[read_file, write_file, web_fetch]"),
+                                        caps={"read"}), "parity-permissions-claude", "fail"),
+    "agent-write-web": (agent_variant(md_edit=sub("[glob, grep, read_file]", "[read_file, write_file, web_fetch]")),
+                        "parity-permissions-claude", "pass"),
+    "agent-ko-agent-md": (agent_variant(md_edit=lambda t: t + KO + "\n"), "english-agent-md", "fail"),
+    "agent-ko-scenario": (agent_variant(files={"scenarios/03.json": json.dumps(dict(P.S1, id=KO))}), "english-scenarios",
+                          "fail"),
+    "agent-ko-matcher": (agent_variant(files={"scenarios/03.json": json.dumps(dict(P.S1, must_include=[KO]))}),
+                         "english-output-matchers", "needs-review"),
+    "agent-ko-scenario-name": (agent_variant(files={"scenarios/%s.json" % KO: json.dumps(P.S1)}), "english-scenarios", "fail"),
+    "agent-scenario-link-outside": (agent_variant(links={"scenarios/04.json": outside_file("{}")}), "english-scenarios", "fail"),
+    "agent-ko-wrapper": (agent_variant(replace={HERMES_REL: lambda t: t + KO + "\n"}), "english-wrappers", "fail"),
+    "agent-ko-wrapper-name": (agent_variant(files={"wrappers/hermes/%s.md" % KO: "x\n"}), "english-wrappers", "fail"),
+    "agent-escaped-toml": (agent_variant(replace={CODEX_REL: lambda t: t + 'model = "\\uAC00"\n'}), "english-wrappers", "fail"),
+    "agent-wrapper-binary": (agent_variant(files={"wrappers/hermes/logo.png": b"\x89PNG\r\n\x1a\n\x00\xff"}),
+                             "english-wrappers", "pass"),
+    "skill-name-64": (skill_variant(name="a" * 64), "name-format", "pass"),
+    "skill-name-65": (skill_variant(name="a" * 65), "name-format", "fail"),
+    "skill-name-64-raw-65-nfkc": (skill_variant(name="a" * 63 + "\ufb00"), "name-format", "fail"),
+    "skill-hermes-list": (skill_variant(md_edit=sub("version: 1.0.0", "version: 1.0.0\n  hermes: [a, b]")),
+                          "parity-skill-hermes", "fail"),
+    "agent-hermes-undecodable": (agent_variant(files={HERMES_REL: b"# code-scout \xff\xfe\x80\n"}), "parity-wrapper-hermes",
+                                 "fail"),
+    "agent-claude-escaped-frontmatter": (agent_variant(replace={CLAUDE_REL: sub("---\nYou", 'model: "\\uAC00"\n---\nYou')}),
+                                         "english-wrappers", "fail"),
+    "agent-claude-extra-key": (agent_variant(replace={CLAUDE_REL: sub("---\nYou", "color: blue\n---\nYou")}),
+                               "parity-wrapper-claude", "pass"),
+    "agent-opencode-extra-key": (agent_variant(replace={OPENCODE_REL: sub("---\nYou", "color: blue\n---\nYou")}),
+                                 "parity-wrapper-opencode", "pass"),
+    "agent-opencode-escaped-frontmatter": (agent_variant(replace={OPENCODE_REL: sub("---\nYou",
+                                                                                    'model: "\\uAC00"\n---\nYou')}),
+                                           "english-wrappers", "fail"),
+}
+# The OpenCode PASS branch needs a complete key list; the variant patches the legacy constant and the target together.
+COMPLETE_OPENCODE = "agent-complete"
+
+
+@functools.lru_cache(maxsize=None)
+def a3_variant_unit(name):
+    return A3_VARIANTS[name][0](os.path.join(tmpdir(), "a3", name))
+
+
+def a3_functions(unit):
+    """The A3 public functions on one unit, compared legacy against new on every corpus unit and variant."""
+    kind = eva.detect_kind(unit)
+    out = {"parity_status": eva.parity_status(unit), "review_items": eva.review_items(unit),
+           "english_violations": eva.english_violations(unit), "parity_violations": eva.parity_violations(unit)}
+    out["parity_line"] = eva.parity_line(out["parity_status"])
+    s = eva.english_scan(unit)
+    out["english_scan"] = (s.kind, s.groups, s.review)
+    if kind == "skill":
+        out["codex_policy"] = eva.codex_policy(unit)
+        out["english_eval_problems"] = eva.english_eval_problems(unit)
+    if kind == "agent":
+        out["agent_wrapper_states"] = eva.agent_wrapper_states(unit)
+    return out
+
+
+def a3_row_view(rep):
+    """row_view plus the reason of every naming, English and parity row (D11)."""
+    return dict(row_view(rep), reasons={c["id"]: c["reason"] for c in rep.checks if c["id"] in A3_RULE_FILES})
+
+
 def corpus_units():
     out = []
     for top in CORPUS_ROOTS:
@@ -582,11 +914,17 @@ def area_rows():
     units = [(rel(u), u) for u in corpus_units()]
     units += [("variant:evals:" + n, evals_variant_unit(n)) for n in EVALS_VARIANTS]
     units += [("variant:frontmatter:" + n, frontmatter_variant_unit(n)) for n in FRONTMATTER_UNITS]
+    units += [("variant:a3:" + n, a3_variant_unit(n)) for n in A3_VARIANTS]
     for key, u in units:
-        old, new = row_view(legacy_check(u)), eva.check(u)
+        with legacy():
+            old, old_fn = a3_row_view(eva.check(u, EMPTY_BUNDLE)), a3_functions(u)
+        new = eva.check(u)
+        new_rows, new_fn = a3_row_view(new), a3_functions(u)
         compared.append(key)
-        if old != row_view(new):
-            diffs["row-map:" + key] = {"legacy": old, "new": row_view(new)}
+        if old != new_rows:
+            diffs["row-map:" + key] = {"legacy": old, "new": new_rows}
+        if old_fn != new_fn:
+            diffs["functions:" + key] = {"legacy": old_fn, "new": new_fn}
         split = [c["id"] for c in new.checks if DISAGREE in c["reason"]]
         if split:
             diffs["status-reason:" + key] = split
@@ -761,8 +1099,13 @@ class TestCorpusRows(unittest.TestCase):
         ids = [c["id"] for c in r.checks]
         for rid in RULE_FILES:
             self.assertEqual(ids.count(rid), 1, ids)
-        bundle_ids = [rule.id for rule in RR.default_bundle().rules]
+        bundle_ids = [rule.id for rule in RR.default_bundle().rules
+                      if rule.file not in ROW_FAMILY_FILES and "skill" in rule.applies_to]
         self.assertEqual(ids[-len(bundle_ids):], bundle_ids)
+        family = [rule.id for rule in RR.default_bundle().rules
+                  if rule.file in ROW_FAMILY_FILES and "skill" in rule.applies_to]
+        self.assertEqual([i for i in ids if i in family], family)
+        self.assertLess(ids.index(family[0]), ids.index(bundle_ids[0]))
         direct = [c["id"] for c in eva.check_skill(u).checks]
         self.assertIn("field-types", direct)
         self.assertIn("evals-valid", direct)
@@ -788,6 +1131,76 @@ class TestCorpusRows(unittest.TestCase):
         row = next(c for c in eva.check(u).checks if c["id"] == "evals-valid")
         self.assertEqual((row["status"], row["must"]), ("fail", True))
         self.assertIn(DISAGREE, row["reason"])
+
+
+class TestA3Variants(unittest.TestCase):
+    def test_every_a3_variant_reaches_its_legacy_branch(self):
+        wrong = {}
+        for name, (_, rid, status) in A3_VARIANTS.items():
+            u = a3_variant_unit(name)
+            with legacy():
+                rows = [c for c in eva.check(u, EMPTY_BUNDLE).checks if c["id"] == rid]
+            if [c["status"] for c in rows] != [status]:
+                wrong[name] = (rid, status, [(c["status"], c["reason"]) for c in rows])
+        self.assertEqual(wrong, {})
+
+    def test_the_variants_and_fixtures_are_compared(self):
+        _, compared = area_rows()
+        self.assertEqual(len([c for c in compared if c.startswith("variant:a3:")]), len(A3_VARIANTS))
+        for rid in A3_RULE_FILES:
+            if rid == "english-ruleset":
+                continue
+            self.assertTrue(any(c.startswith("tests/rules/%s/" % rid) for c in compared), rid)
+        self.assertGreaterEqual(len(A3_VARIANTS), 90)
+
+    def test_the_functions_are_compared_for_every_kind(self):
+        u = a3_variant_unit("agent-complete")
+        self.assertIn("agent_wrapper_states", a3_functions(u))
+        u = a3_variant_unit("skill-codex-unverified")
+        self.assertEqual(set(a3_functions(u)), {"parity_status", "review_items", "english_violations", "english_scan",
+                                                "codex_policy", "english_eval_problems", "parity_violations",
+                                                "parity_line"})
+
+    def test_the_only_recorded_difference_is_the_naming_dedupe(self):
+        unit = "tests/rules/_selftest/selftest-name-matches-folder/fail/bad-name"
+        self.assertEqual(intentional(), ["row-map:" + unit])
+        diffs = all_differences()
+        d = diffs[intentional()[0]]
+        old = d["legacy"]["rows"]["parity-skill-opencode"]
+        new = d["new"]["rows"]["parity-skill-opencode"]
+        self.assertEqual((old[0], new[0]), ("fail", "pass"))
+        for part in ("rows", "reasons"):
+            changed = {k for k in set(d["legacy"][part]) | set(d["new"][part])
+                       if d["legacy"][part].get(k) != d["new"][part].get(k)}
+            self.assertEqual(changed, {"parity-skill-opencode"}, part)
+        self.assertIn("must equal the folder name", d["legacy"]["reasons"]["parity-skill-opencode"])
+        self.assertNotIn("functions:" + unit, diffs)
+
+    def test_the_folder_cause_reaches_the_gate_functions_as_in_the_legacy_body(self):
+        u = os.path.join(ROOT, "tests", "rules", "_selftest", "selftest-name-matches-folder", "fail", "bad-name")
+        with legacy():
+            old = a3_functions(u)
+        new = a3_functions(u)
+        self.assertEqual(new, old)
+        self.assertEqual(new["parity_status"]["opencode"]["status"], "fail")
+        self.assertTrue(new["parity_violations"] and all(v.startswith("[") for v in new["parity_violations"]))
+        self.assertTrue(any(v.startswith("[opencode]") and "must equal the folder name" in v
+                            for v in new["parity_violations"]), new["parity_violations"])
+
+    def test_the_opencode_complete_branch_matches_with_the_constant_and_target_patched(self):
+        from engine.primitives import parity as PR
+        u = a3_variant_unit(COMPLETE_OPENCODE)
+        with mock.patch.object(eva, "OPENCODE_PERMISSION_KEYS_COMPLETE", True), \
+                mock.patch.dict(PR.target("opencode")["permissions"], {"complete": True}):
+            with legacy():
+                old_rep = eva.check(u, EMPTY_BUNDLE)
+                old, old_fn = a3_row_view(old_rep), a3_functions(u)
+            new, new_fn = a3_row_view(eva.check(u)), a3_functions(u)
+        self.assertEqual(old["rows"]["parity-permissions-opencode"][0], "pass")
+        self.assertIn("match the AGENT.md tools (compared by capability class",
+                      old["reasons"]["parity-permissions-opencode"])
+        self.assertEqual(new, old)
+        self.assertEqual(new_fn, old_fn)
 
 
 class TestFunctions(unittest.TestCase):
@@ -868,8 +1281,10 @@ class TestLegacyOracle(unittest.TestCase):
                 if rel(p) not in ("eva.py", "skill_eval.py"):
                     self.assertEqual(hits, [], rel(p))
         self.assertEqual(sorted(n for n in dir(eva) if n.startswith("_legacy_")),
-                         ["_legacy_evals_errors", "_legacy_field_type_errors", "_legacy_load_transcript",
-                          "_legacy_scenario_errors"])
+                         ["_legacy_add_english_checks", "_legacy_add_parity_checks_agent", "_legacy_add_parity_checks_skill",
+                          "_legacy_agent_wrapper_states", "_legacy_codex_policy", "_legacy_english_eval_problems",
+                          "_legacy_english_scan", "_legacy_evals_errors", "_legacy_field_type_errors",
+                          "_legacy_load_transcript", "_legacy_scenario_errors"])
         self.assertEqual(sorted(n for n in dir(skill_eval) if n.startswith("_legacy_")),
                          ["_legacy_load_eval_set", "_legacy_load_triggers"])
 
@@ -1117,7 +1532,7 @@ class TestPolicy(unittest.TestCase):
 
     def tree(self):
         t = os.path.join(tempfile.mkdtemp(dir=tmpdir()), "tree")
-        for d in ("engine", "schemas", "rules", "policy"):
+        for d in ("engine", "schemas", "rules", "policy", "targets"):
             shutil.copytree(os.path.join(ROOT, d), os.path.join(t, d),
                             ignore=shutil.ignore_patterns("__pycache__"))
         for f in ("skill_eval.py", "eva.py"):

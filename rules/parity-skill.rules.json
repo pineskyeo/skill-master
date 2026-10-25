@@ -1,0 +1,73 @@
+{
+  "ruleset": "parity-skill",
+  "version": "1.0.0",
+  "rules": [
+    {
+      "id": "parity-skill-claude",
+      "applies_to": ["skill"],
+      "category": "parity",
+      "severity": "fail",
+      "protects": ["claude"],
+      "source": {"house": "owner decision 2026-10-19 18:43 KST: every skill is created for Claude Code, Codex CLI, OpenCode and Hermes Agent together (notes/multi-tool-parity-plan.md section 2.1; tool facts in targets/claude.json)", "verified": "2026-10-19"},
+      "check": {"op": "parity_skill", "tool": "claude"},
+      "message": "{reason}",
+      "fix": "See notes/multi-tool-parity-plan.md section 2.1. Fix SKILL.md name/description for Claude Code."
+    },
+    {
+      "id": "parity-skill-codex",
+      "applies_to": ["skill"],
+      "category": "parity",
+      "severity": "fail",
+      "protects": ["codex"],
+      "source": {"house": "owner decision 2026-10-19 18:43 KST: every skill is created for Claude Code, Codex CLI, OpenCode and Hermes Agent together (notes/multi-tool-parity-plan.md section 2.1; tool facts in targets/codex.json)", "verified": "2026-10-19"},
+      "check": {"op": "parity_skill", "tool": "codex"},
+      "message": "{reason}",
+      "fix": {"fail": "See notes/multi-tool-parity-plan.md section 2.1. Fix SKILL.md or agents/openai.yaml (policy.allow_implicit_invocation must be an unquoted boolean).", "review": "A human confirms the fields against the Codex documentation, or remove them from agents/openai.yaml."}
+    },
+    {
+      "id": "parity-skill-opencode",
+      "applies_to": ["skill"],
+      "category": "parity",
+      "severity": "fail",
+      "protects": ["opencode"],
+      "source": {"house": "owner decision 2026-10-19 18:43 KST: every skill is created for Claude Code, Codex CLI, OpenCode and Hermes Agent together (notes/multi-tool-parity-plan.md section 2.1; tool facts in targets/opencode.json)", "verified": "2026-10-19"},
+      "check": {"op": "parity_skill", "tool": "opencode"},
+      "message": "{reason}",
+      "fix": "See notes/multi-tool-parity-plan.md section 2.1. Rename the skill folder and name to lowercase-hyphen form, quote every metadata value."
+    },
+    {
+      "id": "parity-skill-hermes",
+      "applies_to": ["skill"],
+      "category": "parity",
+      "severity": "fail",
+      "protects": ["hermes"],
+      "source": {"house": "owner decision 2026-10-19 18:43 KST: every skill is created for Claude Code, Codex CLI, OpenCode and Hermes Agent together (notes/multi-tool-parity-plan.md section 2.1; tool facts in targets/hermes.json)", "verified": "2026-10-19"},
+      "check": {"op": "parity_skill", "tool": "hermes"},
+      "message": "{reason}",
+      "fix": "See notes/multi-tool-parity-plan.md section 2.1. Remove metadata.hermes; Hermes-specific keys are unsupported until a string-safe form is verified."
+    },
+    {
+      "id": "parity-invocation-control",
+      "applies_to": ["skill"],
+      "category": "parity",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode"],
+      "source": {"house": "owner decision 2026-10-19 18:43 KST: disable-model-invocation needs the Codex and OpenCode equivalents (notes/multi-tool-parity-plan.md section 2.1; targets/*.json invocation)", "verified": "2026-10-19"},
+      "check": {"op": "parity_invocation", "tools": ["claude", "codex", "opencode"]},
+      "message": "{reason}",
+      "fix": "See notes/multi-tool-parity-plan.md section 2.1. Declare the equivalent controls or drop disable-model-invocation."
+    },
+    {
+      "id": "parity-invocation-hermes",
+      "applies_to": ["skill"],
+      "category": "parity",
+      "severity": "review",
+      "na_must": false,
+      "protects": ["hermes"],
+      "source": {"house": "owner decision 2026-10-19 18:43 KST: Hermes has no verified invocation control (notes/multi-tool-parity-plan.md section 2.1; targets/hermes.json invocation)", "verified": "2026-10-19"},
+      "check": {"op": "parity_invocation", "tools": ["hermes"]},
+      "message": "{reason}",
+      "fix": "A human confirms that auto-selection by Hermes is acceptable, or the skill stops relying on invocation control."
+    }
+  ]
+}

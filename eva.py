@@ -6,6 +6,15 @@ from engine.loaders import (TomlError, _DQ_ESCAPES, _DQ_HEX, _TOML_BARE_KEY_RE, 
                             _TomlReader, _YAML_TYPED_RE, _block_scalar, _plain_scalar_error, _quoted_end, _scalar,
                             _strip_comment, _unquote, parse_flat_toml, parse_frontmatter_ex, yaml_typed_keys)
 from engine import rule_runner
+from engine.primitives import parity as parity_primitive, script_denylist
+from engine.primitives.script_denylist import (ENGLISH_MAX_SHOWN, LINK_CYCLE, LINK_DANGLING, LINK_LOOP, LINK_OUT, WRAPPER_OUT,
+                                               EnglishScan, UnitTree, _ESC_PAIR_RE, _ESC_RE, _YAML_BLOCK_INDICATOR_RE,
+                                               _YAML_COMPLEX_KEY_RE, _YAML_ITEM_RE, _YAML_KEY_RE, _decode_escapes,
+                                               _decode_mode, _excerpt, _finding, _flow_scan, _front_end, _is_binary_format,
+                                               _json_group, _json_strings, _scan_file, _show_findings, _skip_dirs,
+                                               _toml_decode, _tree_view, _yaml_decode_lines, _yaml_decode_value,
+                                               english_json_findings, english_text_findings, non_english_hits,
+                                               non_english_script, read_scannable, unit_tree)
 
 PASS_THRESHOLD = 0.8
 CATEGORY_FLOOR = 0.5  # every category with applicable checks needs >=1 pass and pass rate >= this
@@ -331,8 +340,6 @@ ROMAN SMALL CIRCLED PARENTHESIZED NEGATIVE DOUBLE DINGBAT DIGIT NUMBER FULLWIDTH
 VIETNAMESE MATHEMATICAL""".split())
 # squared katakana words and era names have no script word in their Unicode names
 _NON_ENGLISH_RANGES = ((0x3300, 0x3357, "Katakana"), (0x337B, 0x337F, "CJK"), (0x32FF, 0x32FF, "CJK"))
-_SCRIPT_CACHE = {}
-ENGLISH_MAX_SHOWN = 5
 ENGLISH_FIX = ("Rewrite the text in English (owner rule: all skill and agent content is English only). Task input data "
                "that must stay non-English belongs in evals/files/, which is not scanned.")
 ENGLISH_BUILDER_RULE = ("Write all skill content in English only (every file a run installs, plus evals/evals.json and "
@@ -345,243 +352,6 @@ SKIP_DIRS = ("__pycache__", ".git")
 # list indexes are ignored. Everything else under "check" (path, fixture, tool, type, ...) is configuration and stays FAIL.
 OUTPUT_MATCHER_KEYS = {"evals": (("check", "pattern"), ("check", "input_regex"), ("check", "rows")),
                        "scenarios": (("must_include",),)}
-_ESC_PAIR_RE = re.compile(r"\\u(d[89ab][0-9a-f]{2})\\u(d[c-f][0-9a-f]{2})", re.I)
-_ESC_RE = re.compile(r"\\\\|\\u([0-9a-fA-F]{4})|\\U([0-9a-fA-F]{8})")
-
-def non_english_script(ch):
-    """Script label ('Hangul', 'CJK', 'Cherokee', ...) when ch is a non-English-script character, else None."""
-    if ord(ch) < 0x80: return None
-    if ch not in _SCRIPT_CACHE:
-        label, cat, cp = None, unicodedata.category(ch), ord(ch)
-        if cat == "Cn":
-            label = "Unassigned"
-        elif cat[0] not in "PZC":
-            name = unicodedata.name(ch, "")
-            first = name.split(" ")[0]
-            hit = next((l for lo, hi, l in _NON_ENGLISH_RANGES if lo <= cp <= hi), None)
-            if hit is None:
-                hit = next((w for w in re.split(r"[ -]", name) if w in NON_ENGLISH_SCRIPT_WORDS), None)
-            if hit is None and cat[0] in "LMN" and first not in ENGLISH_COMPATIBLE_FIRST_WORDS:
-                hit = first or "Unnamed"
-            if hit: label = hit if hit in ("CJK", "Katakana") else hit.title()
-        _SCRIPT_CACHE[ch] = label
-    return _SCRIPT_CACHE[ch]
-
-def non_english_hits(text):
-    """[(index, char, script)] of every non-English-script character in text."""
-    return [(i, c, s) for i, c in enumerate(text) for s in (non_english_script(c),) if s]
-
-def _decode_escapes(line):
-    """Decodes \\uXXXX / \\UXXXXXXXX (JSON strings, double-quoted YAML/TOML strings) so escaped Hangul is still seen;
-    '\\\\' stays. Callers decide WHERE the format interprets escapes (_yaml_decode_lines, _toml_decode)."""
-    line = _ESC_PAIR_RE.sub(lambda m: chr(0x10000 + ((int(m.group(1), 16) - 0xD800) << 10) + int(m.group(2), 16) - 0xDC00), line)
-    def one(m):
-        if m.group(0) == "\\\\": return m.group(0)
-        try: return chr(int(m.group(1) or m.group(2), 16))
-        except (ValueError, OverflowError): return m.group(0)
-    return _ESC_RE.sub(one, line)
-
-_YAML_BLOCK_INDICATOR_RE = re.compile(r"[|>](?:[+-][1-9]?|[1-9][+-]?)?$")
-_YAML_KEY_RE = re.compile(r"^(?:[ \t]*-[ \t]+)*[ \t]*(?:[^\s'\"#\[\]{},-][^:#]*?|-[^\s:][^:#]*?):(?=[ \t]|$)[ \t]*")
-_YAML_ITEM_RE = re.compile(r"^(?:[ \t]*-[ \t]+)+")
-_YAML_COMPLEX_KEY_RE = re.compile(r"^((?:[ \t]*-[ \t]+)*[ \t]*)\?(?:[ \t]|$)")
-
-def _flow_scan(v, depth, quote=None):
-    """(depth, open quote) of a flow collection after the text v: '[' and '{' open and ']' and '}' close outside quoted
-    scalars and comments. open quote: the quote of a scalar that continues on the next line."""
-    prev, i = " ", 0
-    while i < len(v) and depth:
-        c = v[i]
-        if quote:
-            if quote == '"' and c == "\\":
-                i += 2; continue
-            if c == quote:
-                if quote == "'" and v[i + 1:i + 2] == "'":
-                    i += 2; continue
-                quote = None
-        elif c == "#" and prev in " \t":
-            break
-        elif c in "\"'" and prev in " \t[{,:":
-            quote = c
-        elif c in "[{":
-            depth += 1
-        elif c in "]}":
-            depth -= 1
-        prev, i = c, i + 1
-    return depth, quote
-
-def _yaml_decode_value(v, start=True):
-    """(value, open quote, open flow): decodes \\u escapes only inside double-quoted scalars of one YAML value (a quoted
-    scalar starts a value, also after a tag or anchor). A flow collection that opens at a value start is decoded strictly
-    to the end of the line; open flow is its (depth, open quote) when it continues on the next line. Plain scalars,
-    single-quoted scalars and comments keep backslashes literally. open quote: the quote of a scalar that continues on
-    the next line."""
-    out, i = [], 0
-    while i < len(v):
-        c = v[i]
-        if c in " \t":
-            out.append(c); i += 1; continue
-        if c == "#" and (i == 0 or v[i - 1] in " \t"):
-            out.append(v[i:]); break
-        if start and c in "!&":
-            j = i
-            while j < len(v) and v[j] not in " \t": j += 1
-            out.append(v[i:j]); i = j; continue
-        if start and c in "[{":
-            flow = _flow_scan(v[i + 1:], 1)
-            return "".join(out) + _decode_escapes(v[i:]), None, flow if flow[0] else None
-        if start and c in "\"'":
-            end = _quoted_end(v[i:])
-            span = v[i:] if end < 0 else v[i:i + end + 1]
-            out.append(_decode_escapes(span) if c == '"' else span)
-            if end < 0: return "".join(out), c, None
-            i += len(span); start = False; continue
-        out.append(c); i += 1
-        start = c in "[{," or (c == ":" and v[i:i + 1] in (" ", "\t", ""))
-    return "".join(out), None, None
-
-def _yaml_decode_lines(lines):
-    """Lines as a YAML reader sees them for the \\u rule: escapes are decoded in double-quoted scalars only, including their
-    continuation lines; the content of a '|' / '>' block scalar (the lines indented deeper than its key) and everything in
-    plain or single-quoted scalars stays as written. A key starts a block scalar only when its value, comment removed, is
-    the block indicator. Two forms these line rules do not model are decoded strictly instead (fail closed): a flow
-    collection that opens at a value start, up to the line where it closes, and a complex-key entry ('?' and the lines
-    indented deeper than it)."""
-    out, block_indent, quote, flow, key_indent = [], None, None, None, None
-    for ln in lines:
-        if flow:
-            out.append(_decode_escapes(ln))
-            flow = _flow_scan(ln, *flow)
-            flow = flow if flow[0] else None
-            continue
-        if quote:
-            end = _quoted_end(quote + ln)
-            head = ln if end < 0 else ln[:end]
-            head = _decode_escapes(head) if quote == '"' else head
-            if end < 0:
-                out.append(head); continue
-            tail, quote, flow = _yaml_decode_value(ln[end:], start=False)
-            out.append(head + tail); continue
-        indent = len(ln) - len(ln.lstrip(" \t"))
-        if block_indent is not None:
-            if not ln.strip() or indent > block_indent:
-                out.append(ln); continue
-            block_indent = None
-        if key_indent is not None:
-            if not ln.strip() or indent > key_indent:
-                out.append(_decode_escapes(ln)); continue
-            key_indent = None
-        complex_key = _YAML_COMPLEX_KEY_RE.match(ln)
-        if complex_key:
-            key_indent = len(complex_key.group(1))
-            out.append(_decode_escapes(ln)); continue
-        key = _YAML_KEY_RE.match(ln)
-        m = key or _YAML_ITEM_RE.match(ln)
-        cut = m.end() if m else 0
-        value, quote, flow = _yaml_decode_value(ln[cut:])
-        out.append(ln[:cut] + value)
-        if key and _YAML_BLOCK_INDICATOR_RE.match(_strip_comment(ln[cut:])):
-            block_indent = len(ln) - len(ln.lstrip(" \t-"))
-    return out
-
-def _toml_decode(text):
-    """text with \\u / \\U escapes decoded inside TOML basic strings ("..." and \"\"\"...\"\"\") only; literal strings
-    ('...' and \'\'\'...\'\'\') and comments keep backslashes literally (TOML does not interpret escapes there)."""
-    out, i, n = [], 0, len(text)
-    while i < n:
-        c = text[i]
-        if c == "#":
-            j = text.find("\n", i); j = n if j < 0 else j
-            out.append(text[i:j]); i = j; continue
-        if c in "\"'":
-            delim = c * 3 if text.startswith(c * 3, i) else c
-            j = i + len(delim)
-            while j < n:
-                if c == '"' and text[j] == "\\": j += 2; continue
-                if text.startswith(delim, j):
-                    j += len(delim)
-                    while len(delim) == 3 and text.startswith(c, j): j += 1  # up to two extra quotes belong to the string
-                    break
-                if len(delim) == 1 and text[j] == "\n": break
-                j += 1
-            j = min(j, n)
-            span = text[i:j]
-            out.append(_decode_escapes(span) if c == '"' else span); i = j; continue
-        out.append(c); i += 1
-    return "".join(out)
-
-def _excerpt(s, i, width=24):
-    lo, hi = max(0, i - width), min(len(s), i + width)
-    return ("..." if lo else "") + s[lo:hi].strip() + ("..." if hi < len(s) else "")
-
-def _finding(rel, line, where, hits, probe):
-    return "%s:%s%s [%s]: \"%s\"" % (rel, line if line else "?", " (%s)" % where if where else "",
-                                     "/".join(sorted({h[2] for h in hits})), _excerpt(probe, hits[0][0]))
-
-def _front_end(lines):
-    """1-based line number of the closing '---' of a frontmatter block, 0 when there is none."""
-    if lines and lines[0].strip() == "---":
-        for i, ln in enumerate(lines[1:], 2):
-            if ln.strip() == "---": return i
-    return 0
-
-def english_text_findings(text, rel, frontmatter=False, decode=None):
-    """One finding string per line of text with non-English-script characters. frontmatter: label lines before the
-    closing '---' as 'frontmatter' and the rest as 'body'; the frontmatter lines are read as YAML. decode: where \\u escapes
-    are decoded before scanning: 'yaml' (double-quoted scalars only), 'toml' (basic strings only), 'strict' or True
-    (everywhere; used for JSON that does not parse), None/False (never: Markdown bodies, scripts, plain text)."""
-    lines = text.split("\n")
-    fend = _front_end(lines) if frontmatter else 0
-    mode = "strict" if decode is True else decode or None
-    if mode == "yaml": probes = _yaml_decode_lines(lines)
-    elif mode == "toml": probes = _toml_decode(text).split("\n")
-    elif mode == "strict": probes = [_decode_escapes(x) for x in lines]
-    else: probes = list(lines)
-    if fend: probes[:fend] = _yaml_decode_lines(lines[:fend])
-    out = []
-    for i, probe in enumerate(probes, 1):
-        hits = non_english_hits(probe)
-        if hits: out.append(_finding(rel, i, ("frontmatter" if i <= fend else "body") if frontmatter and fend else "", hits, probe))
-    return out
-
-def _json_strings(node, matchers, path=(), matcher=False):
-    """(string, is_matcher) for every string (dict keys included) of a parsed JSON value, in document order. A string is
-    a matcher when the dict-key path above it ends with one of matchers (tuples of keys)."""
-    if isinstance(node, str):
-        yield node, matcher
-    elif isinstance(node, list):
-        for x in node: yield from _json_strings(x, matchers, path, matcher)
-    elif isinstance(node, dict):
-        for k, v in node.items():
-            yield k, matcher
-            p = path + (k,)
-            yield from _json_strings(v, matchers, p, matcher or any(p[-len(m):] == m for m in matchers))
-
-def english_json_findings(raw, rel, matcher_keys=()):
-    """(violations, review): findings per JSON string with line numbers. Strings under the key paths matcher_keys (run-output
-    matchers) go to review. Invalid JSON is scanned as plain text, matchers included (strict)."""
-    try:
-        data = json.loads(raw)
-    except ValueError:
-        return english_text_findings(raw, rel, decode="strict"), []
-    lines = [_decode_escapes(x) for x in raw.split("\n")]
-    viol, review, cursor = [], [], 0
-    for text, is_matcher in _json_strings(data, matcher_keys):
-        hits = non_english_hits(text)
-        if not hits: continue
-        i = hits[0][0]
-        run = 1
-        while run < 6 and any(h[0] == i + run for h in hits): run += 1
-        needle = text[i:i + run]
-        at = next((n for n in range(cursor, len(lines)) if needle in lines[n]), None)
-        if at is None: at = next((n for n in range(len(lines)) if needle in lines[n]), None)
-        if at is not None: cursor = at
-        seg_start = text.rfind("\n", 0, i) + 1
-        seg_end = text.find("\n", i)
-        seg = text[seg_start:seg_end if seg_end >= 0 else len(text)]
-        f = _finding(rel, None if at is None else at + 1, "", [(h[0] - seg_start,) + h[1:] for h in hits], seg)
-        (review if is_matcher else viol).append(f)
-    return viol, review
 
 # Binary assets are skipped, never read as text. Text that decodes (UTF-8 or UTF-16 with BOM) is always scanned, whatever its
 # extension or first bytes say. Data that does not decode is binary only when its leading bytes match a known format
@@ -594,119 +364,34 @@ BINARY_EXTENSIONS = frozenset(""".png .jpg .jpeg .gif .webp .bmp .ico .icns .tif
 .jar .woff .woff2 .ttf .otf .eot .mp3 .mp4 .m4a .wav .ogg .flac .mov .webm .avi .sqlite .sqlite3 .db .xlsx .xls .docx .doc
 .pptx .ppt .pyc .so .dylib .dll .exe .class .wasm .bin .npy .parquet""".split())
 
-def _is_binary_format(data, fp):
-    head = data[:16]
-    if any(head.startswith(sig) for sig in BINARY_SIGNATURES): return True
-    if head[:4] == b"RIFF" and data[8:12] in (b"WEBP", b"WAVE", b"AVI "): return True
-    return head[4:8] == b"ftyp"
 
-def read_scannable(fp):
-    """(text, note): text is None for supported binary formats (note 'binary') and for unreadable or undecodable files
-    (note = problem)."""
-    try:
-        with open(fp, "rb") as f: data = f.read()
-    except OSError as e:
-        return None, "cannot read: %s" % e
-    for bom, enc in ((codecs.BOM_UTF16_LE, "utf-16"), (codecs.BOM_UTF16_BE, "utf-16")):
-        if data.startswith(bom):
-            try: return data.decode(enc), None
-            except UnicodeDecodeError: return None, "not valid UTF-16 text, cannot verify English-only"
-    try: return data.decode("utf-8-sig"), None  # text that decodes is always scanned (a text file may start with 'true' or 'ID3')
-    except UnicodeDecodeError: pass
-    if _is_binary_format(data, fp) or os.path.splitext(fp)[1].lower() in BINARY_EXTENSIONS: return None, "binary"
-    return None, ("not valid UTF-8 text and not a supported binary format (known signature or extension), "
-                  "cannot verify English-only")
 
-UnitTree = collections.namedtuple("UnitTree", "files outside cycles")
 
-def _skip_dirs(dp, names):
-    """The ignore of the agent scan: folders named in SKIP_DIRS."""
-    return {n for n in names if n in SKIP_DIRS and os.path.isdir(os.path.join(dp, n))}
 
-def unit_tree(path, ignore=None):
-    """What shutil.copytree(path, dst, ignore=ignore) reaches with symlinks=False, as three lists of relative paths
-    (forward slashes) in walk order: top-down, a folder's files sorted, then its subfolders sorted. ignore: a
-    shutil.ignore_patterns callable applied at every depth to folders and files; default SKILL_IGNORE, what a skill run
-    does not install.
-    files: every path the copy holds. An internal folder link is walked and each alias is listed under its own path; file
-    links are listed, and so is a dangling link whose target path is inside the unit.
-    outside: links whose real path leaves the unit. Never walked, never read.
-    cycles: folder links whose real path is a folder on their own path from the unit root, the root included. Never
-    walked: a copy through them would never end."""
-    ignore = ignore or shutil.ignore_patterns(*SKILL_IGNORE)
-    root = os.path.realpath(path)
-    tree, above = UnitTree([], [], []), {path: {root}}
-    rel = lambda p: os.path.relpath(p, path).replace(os.sep, "/")
-    for dp, dn, fn in os.walk(path, followlinks=True):
-        skip, up = ignore(dp, dn + fn), above.pop(dp)
-        for p in (os.path.join(dp, f) for f in sorted(fn) if f not in skip):
-            (tree.files if _within(root, os.path.realpath(p)) else tree.outside).append(rel(p))
-        walk = []
-        for d in sorted(x for x in dn if x not in skip):
-            p = os.path.join(dp, d)
-            real = os.path.realpath(p)
-            if not _within(root, real): tree.outside.append(rel(p))
-            elif os.path.islink(p) and real in up: tree.cycles.append(rel(p))
-            else:
-                walk.append(d); above[p] = up | {real}
-        dn[:] = walk
-    return tree
+ENGLISH_RULES = "english-only.rules.json"
+PARITY_SKILL_RULES = "parity-skill.rules.json"
+PARITY_AGENT_RULES = "parity-agent.rules.json"
+ROW_RULE_FILES = (ENGLISH_RULES, PARITY_SKILL_RULES, PARITY_AGENT_RULES)  # rows built where the eva functions run
 
-LINK_OUT = "%s (link) resolves outside the unit folder, so its content cannot be verified English-only"
-LINK_CYCLE = "%s (link) points back at a folder on its own path (a cycle), so a copy of the unit would never end"
-LINK_DANGLING = "%s (link) points at a path that does not exist (dangling), so a copy of the unit would fail"
-LINK_LOOP = "%s (link) resolves in a loop of links that never reaches a target (a resolution loop), so a copy of the unit would fail"
-WRAPPER_OUT = "%s resolves outside the agent folder, so it is not read"
+def _family_bundle(bundle, fname):
+    """bundle when it holds the rule file fname, else the default bundle, so a fixture bundle without the English or
+    parity rules still gets those rows (fail closed)."""
+    if bundle is not None and fname in bundle.files():
+        return bundle
+    return rule_runner.default_bundle()
 
-def _tree_view(tree, top=""):
-    """(files, link findings) of a unit_tree under the folder top ("" is the whole unit): one LINK_OUT finding per
-    outside link and one LINK_CYCLE finding per cycle, a link named top included."""
-    pre = top and top + "/"
-    return ([r for r in tree.files if r.startswith(pre)],
-            [LINK_OUT % r for r in tree.outside if (r + "/").startswith(pre)]
-            + [LINK_CYCLE % r for r in tree.cycles if (r + "/").startswith(pre)])
+def _english_groups(bundle=None):
+    """[(rule id, applies_to, group spec, scripts)] of the script_denylist group rules, in rule order."""
+    b = _family_bundle(bundle, ENGLISH_RULES)
+    return [(r.id, r.applies_to, r.check.group, r.check.scripts) for r in b.rules
+            if r.file == ENGLISH_RULES and getattr(r.check, "group", None) is not None and "repository" not in r.applies_to]
 
-def _decode_mode(rel):
-    """Escape format of a tool or wrapper file by extension: TOML basic strings or YAML double-quoted scalars."""
-    ext = os.path.splitext(rel)[1].lower()
-    return "toml" if ext == ".toml" else "yaml" if ext in (".yaml", ".yml") else None
+def english_scan(path, bundle=None):
+    """Full English-only scan of the skill or agent folder at path (kind from detect_kind), built from the English rules
+    of bundle (default: the default bundle), so the skill_eval gates and the rows share one source."""
+    return script_denylist.scan_unit(path, detect_kind(path), _english_groups(bundle))
 
-def _scan_file(path, rel, frontmatter=False, decode=None):
-    """(findings, status): status 'scanned', 'binary' or 'missing'. decode: see english_text_findings."""
-    fp = os.path.join(path, rel)
-    if not os.path.isfile(fp): return [], "missing"
-    text, note = read_scannable(fp)
-    if text is None:
-        return ([] if note == "binary" else ["%s:? %s" % (rel, note)]), ("binary" if note == "binary" else "scanned")
-    if rel.endswith(".json"): return english_json_findings(text, rel)[0], "scanned"
-    return english_text_findings(text, rel, frontmatter=frontmatter, decode=decode), "scanned"
-
-def _json_group(path, rels, key):
-    """(violations, review, n_scanned) for JSON files rels; matcher keys OUTPUT_MATCHER_KEYS[key] go to review."""
-    viol, review, n = [], [], 0
-    for rel in rels:
-        fp = os.path.join(path, rel)
-        if not os.path.isfile(fp): continue
-        text, note = read_scannable(fp)
-        n += 1
-        if text is None:
-            viol.append("%s:? %s" % (rel, note)); continue
-        v, rv = english_json_findings(text, rel, OUTPUT_MATCHER_KEYS[key])
-        viol += v; review += rv
-    return viol, review, n
-
-class EnglishScan:
-    """groups: ordered [(check id, label, findings, scanned count or None when nothing to scan)]; review: findings in
-    output matchers (needs-review); violations: flat list of every FAIL-level finding."""
-    def __init__(self, kind):
-        self.kind, self.groups, self.review = kind, [], []
-    def add(self, cid, label, findings, scanned):
-        self.groups.append((cid, label, findings, scanned))
-    @property
-    def violations(self):
-        return [f for _, _, fs, _ in self.groups for f in fs]
-
-def english_scan(path):
+def _legacy_english_scan(path):
     """Full English-only scan of the skill or agent folder at path (kind from detect_kind)."""
     kind = detect_kind(path)
     s = EnglishScan(kind)
@@ -763,6 +448,14 @@ def english_violations(path):
     return english_scan(path).violations
 
 def english_eval_problems(skill_dir):
+    """(violations, review) for the files of the english-evals rule (evals/evals.json and evals/trigger_evals.json);
+    skill_eval validate uses it."""
+    rid, _, spec, scripts = next(g for g in _english_groups() if g[0] == "english-evals")
+    with script_denylist.using(scripts):
+        _, v, _, r = script_denylist.group_scan(skill_dir, spec)
+    return v, r
+
+def _legacy_english_eval_problems(skill_dir):
     """(violations, review) for evals/evals.json and evals/trigger_evals.json only; skill_eval validate uses it."""
     v, r, _ = _json_group(skill_dir, ("evals/evals.json", "evals/trigger_evals.json"), "evals")
     return v, r
@@ -803,11 +496,13 @@ def review_sources(path):
         if os.path.isfile(fp) and _within(root, os.path.realpath(fp)): out.append(rel)
     return list(dict.fromkeys(out))
 
-def _show_findings(findings):
-    return "; ".join(findings[:ENGLISH_MAX_SHOWN]) + ("; (+%d more)" % (len(findings) - ENGLISH_MAX_SHOWN)
-                                                      if len(findings) > ENGLISH_MAX_SHOWN else "")
 
-def add_english_checks(r, path, scan=None):
+def add_english_checks(r, path, scan=None, bundle=None):
+    """Adds the English-only rows (category 'language') to report r from rules/english-only.rules.json of bundle
+    (default: the default bundle). scan is accepted for older callers; the rules scan the unit themselves."""
+    _family_bundle(bundle, ENGLISH_RULES).apply(r, only=(ENGLISH_RULES,))
+
+def _legacy_add_english_checks(r, path, scan=None):
     """Adds the English-only rows (category 'language') to report r: FAIL groups plus the matcher review item."""
     s = scan or english_scan(path)
     for cid, label, findings, n in s.groups:
@@ -927,6 +622,11 @@ def _leaf_paths(node, prefix=""):
     return [prefix[:-1]] if prefix else []
 
 def codex_policy(path):
+    """(problems, allow_implicit_invocation, unverified) for agents/openai.yaml, from targets/codex.json (see
+    engine/primitives/parity.py codex_policy). A missing file is not a problem."""
+    return parity_primitive.codex_policy(path, parity_primitive.target("codex"))
+
+def _legacy_codex_policy(path):
     """(problems, allow_implicit_invocation, unverified) for agents/openai.yaml. allow is True/False when the file declares
     policy.allow_implicit_invocation as an unquoted boolean, else None. unverified: every other field of the file as a
     dotted path. Only policy.allow_implicit_invocation is a verified Codex field (design 2.2); the rest of the Codex
@@ -956,7 +656,12 @@ def codex_policy(path):
 def _skill_core(meta):
     return ["%s: non-empty string required" % k for k in ("name", "description") if not _nonempty_str(meta.get(k))]
 
-def add_parity_checks_skill(r, path):
+def add_parity_checks_skill(r, path, bundle=None, dedupe=True):
+    """Adds the skill parity rows (category 'parity', required) to report r from rules/parity-skill.rules.json.
+    dedupe False keeps the folder cause that name-matches-folder reports in check (A3 D2)."""
+    _family_bundle(bundle, PARITY_SKILL_RULES).apply(r, only=(PARITY_SKILL_RULES,), dedupe=dedupe)
+
+def _legacy_add_parity_checks_skill(r, path):
     """Adds the skill parity rows (category 'parity', required) to report r."""
     raw, meta, err = _frontmatter_of(os.path.join(path, "SKILL.md"))
     typed = set(yaml_typed_keys(raw)) if raw is not None and meta else set()
@@ -1051,6 +756,12 @@ def _wrapper_common(meta_name, meta_desc, name, desc, body):
     return p
 
 def agent_wrapper_states(path):
+    """{tool: {"rel", "problems", "caps", "names"}} for the four wrappers of an agent folder, from targets/*.json (see
+    engine/primitives/parity.py wrapper_states). caps: capability set the wrapper grants (None when it cannot be
+    determined, and always for Codex and Hermes). problems: why the wrapper itself is unusable."""
+    return parity_primitive.wrapper_states(path, parity_primitive.targets())
+
+def _legacy_agent_wrapper_states(path):
     """{tool: {"rel", "problems", "caps"}} for the four wrappers of an agent folder. caps: capability set the wrapper
     grants (None when it cannot be determined, and always for Codex and Hermes). problems: why the wrapper itself is unusable."""
     raw, meta, _ = _frontmatter_of(os.path.join(path, "AGENT.md"))
@@ -1140,7 +851,11 @@ def agent_wrapper_states(path):
                 elif not ctext.strip(): p.append("wrappers/hermes/config.yaml is empty (remove it or fill it)")
     return out
 
-def add_parity_checks_agent(r, path):
+def add_parity_checks_agent(r, path, bundle=None):
+    """Adds the agent parity rows (category 'parity', required) to report r from rules/parity-agent.rules.json."""
+    _family_bundle(bundle, PARITY_AGENT_RULES).apply(r, only=(PARITY_AGENT_RULES,))
+
+def _legacy_add_parity_checks_agent(r, path):
     """Adds the agent parity rows (category 'parity', required) to report r."""
     _, meta, _ = _frontmatter_of(os.path.join(path, "AGENT.md"))
     meta = meta or {}
@@ -1207,16 +922,18 @@ def add_parity_checks_agent(r, path):
           fix + "Until a Hermes permission format is verified and implemented in add_parity_checks_agent (eva.py) this row "
           "fails for every agent by design; see the README section on multi-tool parity.", must=True)
 
-def add_parity_checks(r, path):
+def add_parity_checks(r, path, bundle=None, dedupe=True):
     kind = detect_kind(path)
-    if kind == "skill": add_parity_checks_skill(r, path)
-    elif kind == "agent": add_parity_checks_agent(r, path)
+    if kind == "skill": add_parity_checks_skill(r, path, bundle, dedupe)
+    elif kind == "agent": add_parity_checks_agent(r, path, bundle)
 
 def parity_report(path):
-    """A Report holding only the parity rows of the skill or agent folder at path (never raises)."""
+    """A Report holding only the parity rows of the skill or agent folder at path (never raises). The rows keep every
+    name cause, so parity_status, parity_violations and the skill_eval gates give the A2 result; only check rows drop
+    the folder cause that name-matches-folder reports (A3 D2)."""
     kind = detect_kind(path)
     r = Report(path, kind or "unknown")
-    add_parity_checks(r, path)
+    add_parity_checks(r, path, dedupe=False)
     return r
 
 def parity_status(path_or_report):
@@ -1382,7 +1099,8 @@ def _toc_first(text):
 
 # ---------- schema-backed shape checks (schemas/*.schema.json) ----------
 SCHEMA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schemas")
-SHAPE_ROWS = ("evals-valid", "field-types")  # rows that a default-bundle rule now decides (rules/skill-*.rules.json)
+SHAPE_ROWS = ("evals-valid", "field-types",  # rows that a default-bundle rule now decides (rules/skill-*.rules.json)
+              "name-format", "name-matches-folder", "name-reserved")  # rules/naming.rules.json (A3)
 DISAGREE = "rule and eva.py disagree"
 _PER_ERROR_KEYS = ("value", "repr", "key", "key_ascii", "path_reason", "type", "got", "error", "dup_index")
 _SHAPES = {}
@@ -1682,7 +1400,7 @@ def _legacy_evals_errors(path, name):
     if dup: e.append("duplicate ids %s" % dup)
     return len(items), e
 
-def check_skill(path):
+def check_skill(path, bundle=None):
     r = Report(path, "skill")
     fp = os.path.join(path, "SKILL.md")
     raw, rerr = read_text(fp)
@@ -1825,8 +1543,8 @@ def check_skill(path):
           "\"expected_output\": ..., \"files\" (optional), \"assertions\" (optional)}]}.", must=True)
     r.add("evals-count", "evaluation", n >= MIN_EVALS, "%d eval cases (need >= %d)" % (n, MIN_EVALS),
           "실제 사용자 요청처럼 쓴 테스트 케이스를 %d개 이상 두세요(경계 상황 1개 이상 포함)." % MIN_EVALS, must=True)
-    add_english_checks(r, path)
-    add_parity_checks(r, path)
+    add_english_checks(r, path, bundle=bundle)
+    add_parity_checks(r, path, bundle)
     return r
 
 # ---------- agents (slated to move to the separate "agent master"; kept here until then) ----------
@@ -1888,7 +1606,7 @@ def load_scenarios(path):
                 out.append((f, data, scenario_errors(data)))
     return out
 
-def check_agent(path):
+def check_agent(path, bundle=None):
     r = Report(path, "agent")
     raw, rerr = read_text(os.path.join(path, "AGENT.md"))
     meta, body, ferr = parse_frontmatter_ex(raw) if raw is not None else (None, "", rerr)
@@ -1935,20 +1653,21 @@ def check_agent(path):
     multi = [f for f, s in objs if isinstance(s.get("turns"), list) and len(s["turns"]) >= 2]
     r.add("multi-turn-scenario", "context", bool(multi),
           "multi-turn scenarios: %s" % multi, "turns가 2개 이상이고 앞 턴 정보를 참조하는 시나리오를 추가하세요.")
-    add_english_checks(r, path)
-    add_parity_checks(r, path)
+    add_english_checks(r, path, bundle=bundle)
+    add_parity_checks(r, path, bundle)
     return r
 
 def check(path, bundle=None):
     """The built-in rows, then the rows of bundle (default: the cached default bundle, which raises
     rule_runner.BundleError when broken, so a direct caller such as loop.py fails closed)."""
     kind = detect_kind(path)
-    if kind == "skill": r = check_skill(path)
-    elif kind == "agent": r = check_agent(path)
+    bundle = rule_runner.default_bundle() if bundle is None else bundle
+    if kind == "skill": r = check_skill(path, bundle)
+    elif kind == "agent": r = check_agent(path, bundle)
     else:
         r = Report(path, "unknown")
         r.add("frontmatter", "structure", False, "no SKILL.md or AGENT.md", "폴더에 SKILL.md 또는 AGENT.md를 넣으세요.")
-    (rule_runner.default_bundle() if bundle is None else bundle).apply(r)
+    bundle.apply(r, skip=ROW_RULE_FILES)
     _merge_shape_rows(r)
     return r
 
@@ -2467,7 +2186,7 @@ def build_index(root):
                     "description": meta.get("description", ""), "path": os.path.relpath(u, root),
                     "verdict": rep.verdict, "score": rep.score,
                     "english": english_state(rep),
-                    "parity": {t: st["status"] for t, st in parity_status(rep).items()}})
+                    "parity": {t: st["status"] for t, st in parity_status(u).items()}})
     md = ["# INDEX", "", "| kind | name | version | verdict | score | english | parity | path | description |",
           "|---|---|---|---|---|---|---|---|---|"]
     for e in reg:
@@ -2509,6 +2228,8 @@ def main(argv=None):
     if not getattr(a, "transcript", None):
         try:  # before any check(), so a broken bundle prints no unit row (plan.md:581)
             bundle = rule_runner.default_bundle() if getattr(a, "rules", None) is None else rule_runner.load_bundle(a.rules)
+            if not set(ROW_RULE_FILES) <= bundle.files():
+                rule_runner.default_bundle()  # the English and parity rows then come from it (_family_bundle)
         except rule_runner.BundleError as e:
             print("bundle error: %s" % e, file=sys.stderr)
             return 2

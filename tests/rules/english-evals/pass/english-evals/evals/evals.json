@@ -1,0 +1,10 @@
+{
+ "skill_name": "english-evals",
+ "evals": [
+  {
+   "id": 1,
+   "prompt": "Count the words in a.txt.",
+   "expected_output": "The word count."
+  }
+ ]
+}

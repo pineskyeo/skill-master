@@ -1,0 +1,13 @@
+---
+name: typed-metadata
+description: Counts words in one text file. Use when the user asks for a word count.
+metadata:
+  version: 1.0
+---
+# Word Count
+## Inputs
+- path
+## Outputs
+- count
+## Example
+Input a.txt, output 3.

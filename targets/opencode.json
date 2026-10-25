@@ -1,0 +1,38 @@
+{
+  "$comment": "OpenCode target (unit A3, plan.md:673). The permission key list was read from the OpenCode agents doc on 2026-10-19 and ends in '...', so it stays complete false: the permission row is REVIEW and never PASS (gates.md G3).",
+  "tool": "opencode",
+  "label": "OpenCode",
+  "engine": null,
+  "docs": [
+    {"url": "https://opencode.ai/docs/agents/", "section": "OpenCode agents and permissions", "verified": "2026-10-19", "note": "inputs/agent-master-skills.md section 9"},
+    {"url": "https://opencode.ai/docs/skills/", "section": "skills name and metadata rules", "verified": null, "note": "inputs/design.md section 2.3 lists it with no date"}
+  ],
+  "skill": {
+    "name_pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+    "folder": "exact",
+    "metadata": "strings",
+    "autoinvoke_key": "opencode/autoinvoke",
+    "autoinvoke_values": ["true", "false"],
+    "ok": "SKILL.md satisfies the OpenCode rules (name regex, folder name, string metadata)"
+  },
+  "invocation": {"metadata_key": "opencode/autoinvoke", "value": "false"},
+  "wrapper": {
+    "path": "wrappers/opencode/{name}.md",
+    "format": "frontmatter",
+    "required": ["description"],
+    "fields": {"name": {"kind": "string"}, "mode": {"kind": "enum", "values": ["primary", "subagent", "all"]}, "model": {"kind": "string"}, "permission": {"kind": "permission"}},
+    "forbidden": {},
+    "unknown_keys": "allow",
+    "extra_files": []
+  },
+  "permissions": {
+    "compare": "classes",
+    "grants": {"read": "read", "edit": "write", "glob": "read", "grep": "read", "list": "read", "bash": "shell", "task": "delegate", "external_directory": null, "webfetch": "web_fetch", "websearch": "web_search", "lsp": "read", "skill": "skill"},
+    "actions": ["allow", "ask", "deny"],
+    "granting": ["allow", "ask"],
+    "derive": {},
+    "unrestrictable": [],
+    "complete": false,
+    "fixed": null
+  }
+}

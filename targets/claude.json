@@ -1,0 +1,33 @@
+{
+  "$comment": "Claude Code target (unit A3, plan.md:673). Every value is the legacy eva.py constant it replaces; tests/test_rule_targets.py pins each one.",
+  "tool": "claude",
+  "label": "Claude Code",
+  "engine": "claude",
+  "docs": [
+    {"url": "https://code.claude.com/docs/en/sub-agents", "section": "Claude Code sub-agents", "verified": "2026-10-19", "note": "inputs/agent-master-skills.md section 9"},
+    {"url": "https://code.claude.com/docs/en/skills", "section": "skills frontmatter reference", "verified": null, "note": "cited at eva.py HOST_SKILL_FIELDS; no dated record in the repository or the plan inputs"}
+  ],
+  "skill": {
+    "reserved_words": ["anthropic", "claude"],
+    "name_max": 64,
+    "description_max": 1024,
+    "forbidden_chars": "<>",
+    "ok": "SKILL.md satisfies the Claude Code rules (fields, reserved words, limits)"
+  },
+  "invocation": {"key": "disable-model-invocation", "honored": true},
+  "wrapper": {
+    "path": "wrappers/claude/{name}.md",
+    "format": "frontmatter",
+    "required": ["name", "description"],
+    "fields": {"tools": {"kind": "tools"}, "model": {"kind": "string"}},
+    "forbidden": {},
+    "unknown_keys": "allow",
+    "extra_files": []
+  },
+  "permissions": {
+    "compare": "names",
+    "derive": {},
+    "unrestrictable": [],
+    "fixed": null
+  }
+}

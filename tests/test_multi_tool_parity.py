@@ -222,7 +222,8 @@ class TestSkillParity(E.SkillMixin, unittest.TestCase):
         self.assertTrue(row(r, "name-matches-folder")["passed"])
         self.assertIn("parity-skill-opencode", ids(r))
         r = self.skill(raw=E.GOOD_FM.format(name="other-name", extra="", body=""), name="word-count")
-        self.assertIn("must equal the folder name", row(r, "parity-skill-opencode")["reason"])
+        self.assertFalse(row(r, "name-matches-folder")["passed"])
+        self.assertNotIn("must equal the folder name", row(r, "parity-skill-opencode")["reason"])
 
     def test_opencode_metadata_values_must_be_real_strings(self):
         for extra in ("metadata:\n  version: 1.0\n", "metadata:\n  beta: yes\n", "metadata:\n  released: 2025-01-01\n"):
@@ -354,7 +355,7 @@ class TestAgentParity(AgentBase, unittest.TestCase):
     def test_unparsable_wrappers_fail(self):
         cases = {"wrappers/claude/code-scout.md": ("no frontmatter at all\n", "frontmatter unusable"),
                  "wrappers/opencode/code-scout.md": ("---\ndescription: x\n", "frontmatter unusable"),
-                 "wrappers/codex/code-scout.toml": ("[agent]\nname = 'x'\n", "strict flat-TOML reader"),
+                 "wrappers/codex/code-scout.toml": ("[agent]\nname = 'x'\n", "keys ['agent.name'] are not in the recorded"),
                  "wrappers/hermes/SOUL.md": ("   \n", "is empty")}
         for rel, (text, frag) in cases.items():
             d, r = self.agent(replace={rel: text})
@@ -364,7 +365,7 @@ class TestAgentParity(AgentBase, unittest.TestCase):
 
     def test_toml_edge_cases_are_failures_not_guesses(self):
         for text, frag in (('name = "code-scout"\nname = "x"\n', "duplicate key"), ('name = code-scout\n', "unsupported value"),
-                           ('[mcp_servers.x]\ncommand = "y"\n', "tables are not supported"),
+                           ('[mcp_servers.x]\ncommand = "y"\n', "'mcp_servers.x.command'"),
                            ('name = "code-scout"\ndescription = "x"\ndeveloper_instructions = "a\nb"\n', "unterminated string")):
             d, r = self.agent(replace={"wrappers/codex/code-scout.toml": text})
             self.only(r, "parity-wrapper-codex"); self.assertIn(frag, row(r, "parity-wrapper-codex")["reason"], text)

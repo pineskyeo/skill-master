@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Skill Master per-tool target",
+  "description": "targets/<tool>.json, read by engine/primitives/parity.py (unit A3, plan.md:673). One closed object per tool: the wrapper path template with {name}, the required and optional wrapper keys, the enums, the permission derive table, the capability classes the tool cannot restrict, the recorded doc URLs with their verified dates, and whether an engine exists. A missing or invalid target fails the bundle load when a parity rule needs it.",
+  "type": "object",
+  "required": ["tool", "label", "engine", "docs", "skill", "invocation", "wrapper", "permissions"],
+  "additionalProperties": false,
+  "properties": {
+    "$comment": {"type": "string"},
+    "tool": {"enum": ["claude", "codex", "opencode", "hermes"]},
+    "label": {"type": "string", "minLength": 1},
+    "engine": {"enum": ["claude", "codex", null]},
+    "docs": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/doc"}},
+    "skill": {"type": "object"},
+    "invocation": {"type": "object"},
+    "wrapper": {"$ref": "#/$defs/wrapper"},
+    "permissions": {"$ref": "#/$defs/permissions"}
+  },
+  "allOf": [
+    {"if": {"properties": {"tool": {"const": "claude"}}}, "then": {"properties": {"skill": {"$ref": "#/$defs/skill-claude"}, "invocation": {"$ref": "#/$defs/invocation-claude"}}}},
+    {"if": {"properties": {"tool": {"const": "codex"}}}, "then": {"properties": {"skill": {"$ref": "#/$defs/skill-codex"}, "invocation": {"$ref": "#/$defs/invocation-codex"}}}},
+    {"if": {"properties": {"tool": {"const": "opencode"}}}, "then": {"properties": {"skill": {"$ref": "#/$defs/skill-opencode"}, "invocation": {"$ref": "#/$defs/invocation-opencode"}, "permissions": {"required": ["grants", "actions", "granting", "complete"]}}}},
+    {"if": {"properties": {"tool": {"const": "hermes"}}}, "then": {"properties": {"skill": {"$ref": "#/$defs/skill-hermes"}, "invocation": {"$ref": "#/$defs/invocation-hermes"}}}}
+  ],
+  "$defs": {
+    "text": {"type": "string", "minLength": 1},
+    "date": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+    "texts": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/text"}},
+    "class": {"enum": ["read", "write", "shell", "web_fetch", "web_search", "delegate", "skill"]},
+    "doc": {
+      "type": "object",
+      "required": ["url", "section", "verified", "note"],
+      "additionalProperties": false,
+      "properties": {
+        "url": {"type": "string", "pattern": "^https://[^\\s]+$"},
+        "section": {"$ref": "#/$defs/text"},
+        "verified": {"anyOf": [{"$ref": "#/$defs/date"}, {"type": "null"}]},
+        "note": {"$ref": "#/$defs/text"}
+      }
+    },
+    "skill-claude": {
+      "type": "object",
+      "required": ["reserved_words", "name_max", "description_max", "forbidden_chars", "ok"],
+      "additionalProperties": false,
+      "properties": {
+        "reserved_words": {"$ref": "#/$defs/texts"},
+        "name_max": {"type": "integer", "minimum": 1},
+        "description_max": {"type": "integer", "minimum": 1},
+        "forbidden_chars": {"$ref": "#/$defs/text"},
+        "ok": {"$ref": "#/$defs/text"}
+      }
+    },
+    "skill-codex": {
+      "type": "object",
+      "required": ["tool_file", "verified_fields"],
+      "additionalProperties": false,
+      "properties": {"tool_file": {"$ref": "#/$defs/text"}, "verified_fields": {"$ref": "#/$defs/texts"}}
+    },
+    "skill-opencode": {
+      "type": "object",
+      "required": ["name_pattern", "folder", "metadata", "autoinvoke_key", "autoinvoke_values", "ok"],
+      "additionalProperties": false,
+      "properties": {
+        "name_pattern": {"type": "string", "x-python-regex": true},
+        "folder": {"const": "exact"},
+        "metadata": {"const": "strings"},
+        "autoinvoke_key": {"$ref": "#/$defs/text"},
+        "autoinvoke_values": {"$ref": "#/$defs/texts"},
+        "ok": {"$ref": "#/$defs/text"}
+      }
+    },
+    "skill-hermes": {
+      "type": "object",
+      "required": ["metadata_key", "ok"],
+      "additionalProperties": false,
+      "properties": {"metadata_key": {"$ref": "#/$defs/text"}, "ok": {"$ref": "#/$defs/text"}}
+    },
+    "invocation-claude": {
+      "type": "object", "required": ["key", "honored"], "additionalProperties": false,
+      "properties": {"key": {"$ref": "#/$defs/text"}, "honored": {"const": true}}
+    },
+    "invocation-codex": {
+      "type": "object", "required": ["tool_file", "field", "value"], "additionalProperties": false,
+      "properties": {"tool_file": {"$ref": "#/$defs/text"}, "field": {"$ref": "#/$defs/text"}, "value": {"type": "boolean"}}
+    },
+    "invocation-opencode": {
+      "type": "object", "required": ["metadata_key", "value"], "additionalProperties": false,
+      "properties": {"metadata_key": {"$ref": "#/$defs/text"}, "value": {"$ref": "#/$defs/text"}}
+    },
+    "invocation-hermes": {
+      "type": "object", "required": ["verified"], "additionalProperties": false,
+      "properties": {"verified": {"const": false}}
+    },
+    "field": {
+      "type": "object",
+      "required": ["kind"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"enum": ["string", "boolean", "enum", "tools", "permission"]},
+        "values": {"$ref": "#/$defs/texts"}
+      },
+      "if": {"properties": {"kind": {"const": "enum"}}},
+      "then": {"required": ["values"]},
+      "else": {"not": {"required": ["values"]}}
+    },
+    "wrapper": {
+      "type": "object",
+      "required": ["path", "format", "required", "fields", "forbidden", "extra_files"],
+      "additionalProperties": false,
+      "if": {"properties": {"format": {"const": "text"}}},
+      "then": {"not": {"required": ["unknown_keys"]}},
+      "else": {"required": ["unknown_keys"]},
+      "properties": {
+        "path": {"type": "string", "pattern": "^wrappers/(claude|codex|opencode|hermes)/[A-Za-z{}._-]+$"},
+        "format": {"enum": ["frontmatter", "toml", "text"]},
+        "required": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/text"}},
+        "fields": {"type": "object", "additionalProperties": {"$ref": "#/$defs/field"}},
+        "forbidden": {"type": "object", "additionalProperties": {"$ref": "#/$defs/text"}},
+        "unknown_keys": {"enum": ["allow", "fail"]},
+        "extra_files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "optional", "non_empty"],
+            "additionalProperties": false,
+            "properties": {"path": {"$ref": "#/$defs/text"}, "optional": {"type": "boolean"}, "non_empty": {"type": "boolean"}}
+          }
+        }
+      }
+    },
+    "permissions": {
+      "type": "object",
+      "required": ["compare", "derive", "unrestrictable", "fixed"],
+      "additionalProperties": false,
+      "if": {"properties": {"compare": {"const": "classes"}}},
+      "then": {"required": ["grants", "actions", "granting", "complete"]},
+      "else": {"not": {"required": ["complete"]}},
+      "properties": {
+        "compare": {"enum": ["names", "classes", "none"]},
+        "grants": {"type": "object", "additionalProperties": {"anyOf": [{"$ref": "#/$defs/class"}, {"type": "null"}]}},
+        "actions": {"$ref": "#/$defs/texts"},
+        "granting": {"$ref": "#/$defs/texts"},
+        "derive": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["key", "off", "verified", "evidence"],
+            "additionalProperties": false,
+            "properties": {"key": {"$ref": "#/$defs/text"}, "off": {"type": "array"}, "verified": {"type": "boolean"}, "evidence": {"$ref": "#/$defs/text"}}
+          }
+        },
+        "unrestrictable": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/class"}},
+        "complete": {"type": "boolean"},
+        "fixed": {"enum": [null, "fail"]}
+      }
+    }
+  }
+}

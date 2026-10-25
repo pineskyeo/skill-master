@@ -1,0 +1,19 @@
+{
+ "skill_name": "matcher-skill",
+ "evals": [
+  {
+   "id": 1,
+   "prompt": "Count the words in a.txt.",
+   "expected_output": "The word count.",
+   "assertions": [
+    {
+     "text": "matches",
+     "check": {
+      "type": "regex",
+      "pattern": "\uac00\ub098"
+     }
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,106 @@
+{
+  "ruleset": "english-only",
+  "version": "1.0.0",
+  "rules": [
+    {
+      "id": "english-skill-md",
+      "applies_to": ["skill"],
+      "category": "language",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "pinesky 2026-10-19 18:38 KST: all skill and agent content is English only (inputs/skillmaster-static-assessment.md section 4.1, notes/english-rule-plan.md)", "verified": "2026-10-19"},
+      "check": {"op": "script_denylist", "data": "data/scripts.json", "group": {"mode": "main", "file": "SKILL.md", "label": "SKILL.md (frontmatter and body)"}},
+      "message": {"pass": "{label} has only English-script text", "fail": "{count} finding(s) with non-English text in {label}: {findings}", "na": "nothing to scan in {label}"},
+      "fix": "Rewrite the text in English (owner rule: all skill and agent content is English only). Task input data that must stay non-English belongs in evals/files/, which is not scanned."
+    },
+    {
+      "id": "english-bundled-files",
+      "applies_to": ["skill"],
+      "category": "language",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "pinesky 2026-10-19 18:38 KST: all skill and agent content is English only (inputs/skillmaster-static-assessment.md section 4.1, notes/english-rule-plan.md)", "verified": "2026-10-19"},
+      "check": {"op": "script_denylist", "data": "data/scripts.json", "group": {"mode": "tree", "top": "", "ignore": {"patterns": ["evals", "__pycache__", "*-workspace", ".git", "FEEDBACK.md", "FEEDBACK.json"]}, "exclude": ["SKILL.md", "agents/openai.yaml"], "frontmatter_md": false, "label": "installed files other than SKILL.md and agents/openai.yaml ({binary} binary skipped)"}},
+      "message": {"pass": "{label} has only English-script text", "fail": "{count} finding(s) with non-English text in {label}: {findings}", "na": "nothing to scan in {label}"},
+      "fix": "Rewrite the text in English (owner rule: all skill and agent content is English only). Task input data that must stay non-English belongs in evals/files/, which is not scanned."
+    },
+    {
+      "id": "english-evals",
+      "applies_to": ["skill"],
+      "category": "language",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "pinesky 2026-10-19 18:38 KST: all skill and agent content is English only (inputs/skillmaster-static-assessment.md section 4.1, notes/english-rule-plan.md)", "verified": "2026-10-19"},
+      "check": {"op": "script_denylist", "data": "data/scripts.json", "group": {"mode": "json", "files": ["evals/evals.json", "evals/trigger_evals.json"], "matchers": [["check", "pattern"], ["check", "input_regex"], ["check", "rows"]], "label": "evals/evals.json, evals/trigger_evals.json"}},
+      "message": {"pass": "{label} has only English-script text", "fail": "{count} finding(s) with non-English text in {label}: {findings}", "na": "nothing to scan in {label}"},
+      "fix": "Rewrite the text in English (owner rule: all skill and agent content is English only). Task input data that must stay non-English belongs in evals/files/, which is not scanned."
+    },
+    {
+      "id": "english-tool-files",
+      "applies_to": ["skill"],
+      "category": "language",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "pinesky 2026-10-19 18:38 KST: all skill and agent content is English only (inputs/skillmaster-static-assessment.md section 4.1, notes/english-rule-plan.md)", "verified": "2026-10-19"},
+      "check": {"op": "script_denylist", "data": "data/scripts.json", "group": {"mode": "files", "files": ["agents/openai.yaml"], "label": "agents/openai.yaml"}},
+      "message": {"pass": "{label} has only English-script text", "fail": "{count} finding(s) with non-English text in {label}: {findings}", "na": "nothing to scan in {label}"},
+      "fix": "Rewrite the text in English (owner rule: all skill and agent content is English only). Task input data that must stay non-English belongs in evals/files/, which is not scanned."
+    },
+    {
+      "id": "english-agent-md",
+      "applies_to": ["agent"],
+      "category": "language",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "pinesky 2026-10-19 18:38 KST: all skill and agent content is English only (inputs/skillmaster-static-assessment.md section 4.1, notes/english-rule-plan.md)", "verified": "2026-10-19"},
+      "check": {"op": "script_denylist", "data": "data/scripts.json", "group": {"mode": "main", "file": "AGENT.md", "label": "AGENT.md (frontmatter and body)"}},
+      "message": {"pass": "{label} has only English-script text", "fail": "{count} finding(s) with non-English text in {label}: {findings}", "na": "nothing to scan in {label}"},
+      "fix": "Rewrite the text in English (owner rule: all skill and agent content is English only). Task input data that must stay non-English belongs in evals/files/, which is not scanned."
+    },
+    {
+      "id": "english-scenarios",
+      "applies_to": ["agent"],
+      "category": "language",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "pinesky 2026-10-19 18:38 KST: all skill and agent content is English only (inputs/skillmaster-static-assessment.md section 4.1, notes/english-rule-plan.md)", "verified": "2026-10-19"},
+      "check": {"op": "script_denylist", "data": "data/scripts.json", "group": {"mode": "tree-json", "top": "scenarios", "ignore": {"dirs": ["__pycache__", ".git"]}, "matchers": [["must_include"]], "label": "scenarios/ (JSON contents and file names)"}},
+      "message": {"pass": "{label} has only English-script text", "fail": "{count} finding(s) with non-English text in {label}: {findings}", "na": "nothing to scan in {label}"},
+      "fix": "Rewrite the text in English (owner rule: all skill and agent content is English only). Task input data that must stay non-English belongs in evals/files/, which is not scanned."
+    },
+    {
+      "id": "english-wrappers",
+      "applies_to": ["agent"],
+      "category": "language",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "pinesky 2026-10-19 18:38 KST: all skill and agent content is English only (inputs/skillmaster-static-assessment.md section 4.1, notes/english-rule-plan.md)", "verified": "2026-10-19"},
+      "check": {"op": "script_denylist", "data": "data/scripts.json", "group": {"mode": "tree", "top": "wrappers", "ignore": {"dirs": ["__pycache__", ".git"]}, "exclude": [], "frontmatter_md": true, "label": "wrappers/ ({binary} binary skipped)"}},
+      "message": {"pass": "{label} has only English-script text", "fail": "{count} finding(s) with non-English text in {label}: {findings}", "na": "nothing to scan in {label}"},
+      "fix": "Rewrite the text in English (owner rule: all skill and agent content is English only). Task input data that must stay non-English belongs in evals/files/, which is not scanned."
+    },
+    {
+      "id": "english-output-matchers",
+      "applies_to": ["skill", "agent"],
+      "category": "language",
+      "severity": "review",
+      "na_must": false,
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "pinesky 2026-10-19 18:38 KST: all skill and agent content is English only; run-output matchers need a recorded review (notes/english-rule-plan.md)", "verified": "2026-10-19"},
+      "check": {"op": "script_denylist", "data": "data/scripts.json", "review_of": ["english-evals", "english-scenarios"]},
+      "message": {"review": "run-output matchers ({keys}) contain non-English text: {findings}", "na": "no non-English text in run-output matchers"},
+      "fix": "Confirm that the task really requires non-English output. Matchers are exempt from FAIL because run output may be Korean; if it is not required, rewrite the matcher in English or with \\u escapes."
+    },
+    {
+      "id": "english-ruleset",
+      "applies_to": ["repository"],
+      "category": "language",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "pinesky 2026-10-19 18:38 KST: rule messages, fixes, schemas, targets and policy are English too (inputs/skillmaster-static-assessment.md section 4.1, plan.md:675)", "verified": "2026-10-19"},
+      "check": {"op": "script_denylist", "data": "data/scripts.json", "group": {"mode": "repository", "folders": ["rules", "schemas", "targets", "policy"], "label": "rules/, schemas/, targets/ and policy/"}},
+      "message": {"pass": "{label} have only English-script text", "fail": "{count} finding(s) with non-English text in {label}: {findings}", "na": "nothing to scan in {label}"},
+      "fix": "Write every rule message and fix, schema, target and policy string in English."
+    }
+  ]
+}
