@@ -75,8 +75,8 @@ def validate_submission(sub, items):
     return {"source": "blind human labels (label_blind.py)", "blind": True, "examples": ex, "skipped": []}, None
 
 
-PAGE = r"""<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>블라인드 라벨링 — __TITLE__</title><style>
+PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Blind labeling — __TITLE__</title><style>
 body{font-family:-apple-system,"Apple SD Gothic Neo",sans-serif;max-width:960px;margin:0 auto;padding:16px;background:#f6f7f9;color:#222}
 .card{background:#fff;border-radius:10px;padding:16px;margin:14px 0;box-shadow:0 1px 3px #0002}.card.done{border-left:6px solid #2a7}
 .tag{display:inline-block;font-size:12px;padding:2px 8px;border-radius:9px;background:#eef;margin-right:4px}
@@ -85,8 +85,8 @@ pre{white-space:pre-wrap;word-break:break-word;background:#f2f2f2;padding:8px;bo
 button{font-size:15px;padding:6px 14px;margin-right:6px;border-radius:6px;border:1px solid #888;background:#fff;cursor:pointer}
 button.sel{background:#335;color:#fff}textarea{width:100%;min-height:44px;margin-top:8px}
 #bar{position:sticky;top:0;background:#fff;padding:10px;z-index:9;box-shadow:0 1px 3px #0002}</style></head><body>
-<div id="bar"><b>블라인드 라벨링</b> · <span id="pt"></span> <button id="jump">다음 미완료로</button> <button id="sub">저장(제출)</button> <span id="subst"></span></div>
-<div class="card"><p>각 항목에서 AI 결과가 <b>채점 기준 문장</b>을 만족하는지 직접 보고 <b>통과 / 불통과</b>를 고르세요. 채점기의 판정은 보여주지 않습니다. 모든 항목에 답해야 저장할 수 있습니다. 답은 이 브라우저(localStorage)에 남습니다.</p></div>
+<div id="bar"><b>Blind labeling</b> · <span id="pt"></span> <button id="jump">Next unanswered</button> <button id="sub">Save (submit)</button> <span id="subst"></span></div>
+<div class="card"><p>For each item, read the AI result yourself and choose <b>Pass / Fail</b>: does it meet the <b>rubric statement</b>? Automatic grading results are not shown. You can save only after you answer every item. Your answers stay in this browser (localStorage).</p></div>
 <div id="list"></div>
 <script id="data" type="application/json">__DATA__</script>
 <script>
@@ -94,25 +94,25 @@ const D=JSON.parse(document.getElementById('data').textContent),K='skill_eval_bl
 let S={};try{S=JSON.parse(localStorage.getItem(K)||'{}')}catch(e){S={}}
 const el=(t,a,x)=>{const e=document.createElement(t);if(a)for(const k in a)e.setAttribute(k,a[k]);if(x!=null)e.textContent=x;return e};
 const left=()=>D.items.filter(i=>typeof (S[i.id]||{}).human_passed!=='boolean');
-const prog=()=>{pt.textContent=`${D.items.length-left().length} / ${D.items.length} 완료`;sub.disabled=left().length>0};
+const prog=()=>{pt.textContent=`${D.items.length-left().length} / ${D.items.length} done`;sub.disabled=left().length>0};
 const save=()=>{localStorage.setItem(K,JSON.stringify(S));prog()};
 D.items.forEach((it,i)=>{const c=el('div',{class:'card',id:'c'+i});c.append(el('div',null,`#${i+1} / ${D.items.length}`));
- [`과제 ${it.case} (${it.case_name||''})`,it.arm==='on'?'스킬 사용':'스킬 없음',it.run,it.pressure?'압박 과제':'일반 과제'].forEach(t=>c.append(el('span',{class:'tag'},t)));
- c.append(el('h4',null,'사용자 요청'),el('pre',null,(it.pressure_context?'[압박 상황] '+it.pressure_context+'\n\n':'')+it.prompt));
- if(it.expected_output){const d=el('details');d.append(el('summary',null,'기대 결과 보기'),el('pre',null,it.expected_output));c.append(d)}
- c.append(el('h4',null,'채점 기준 문장'),el('div',{class:'rubric'},it.item),el('h4',null,'AI 결과 (최종 메시지)'),el('pre',null,it.output||'(빈 메시지)'));
- const tc=el('details');tc.append(el('summary',null,`도구 호출 기록 (${it.tool_calls.length}건)`),el('pre',null,it.tool_calls.map((x,j)=>(j+1)+'. '+x.tool+': '+JSON.stringify(x.input)).join('\n')));c.append(tc);
- const b=el('div'),m=el('textarea',{placeholder:'메모 (선택)'}),btns={};
+ [`Case ${it.case} (${it.case_name||''})`,it.arm==='on'?'Skill on':'Skill off',it.run,it.pressure?'Pressure case':'Normal case'].forEach(t=>c.append(el('span',{class:'tag'},t)));
+ c.append(el('h4',null,'User request'),el('pre',null,(it.pressure_context?'[Pressure context] '+it.pressure_context+'\n\n':'')+it.prompt));
+ if(it.expected_output){const d=el('details');d.append(el('summary',null,'Show expected result'),el('pre',null,it.expected_output));c.append(d)}
+ c.append(el('h4',null,'Rubric statement'),el('div',{class:'rubric'},it.item),el('h4',null,'AI result (final message)'),el('pre',null,it.output||'(empty message)'));
+ const tc=el('details');tc.append(el('summary',null,`Tool calls (${it.tool_calls.length})`),el('pre',null,it.tool_calls.map((x,j)=>(j+1)+'. '+x.tool+': '+JSON.stringify(x.input)).join('\n')));c.append(tc);
+ const b=el('div'),m=el('textarea',{placeholder:'Note (optional)'}),btns={};
  const paint=()=>{const v=(S[it.id]||{}).human_passed;btns.t.className=v===true?'sel':'';btns.f.className=v===false?'sel':'';c.className='card'+(typeof v==='boolean'?' done':'')};
- [['t',true,'통과 (기준 만족)'],['f',false,'불통과 (기준 불만족)']].forEach(([k,v,t])=>{const x=el('button',{type:'button'},t);x.onclick=()=>{S[it.id]=Object.assign(S[it.id]||{},{human_passed:v});save();paint()};btns[k]=x;b.append(x)});
+ [['t',true,'Pass (meets the rubric)'],['f',false,'Fail (does not meet the rubric)']].forEach(([k,v,t])=>{const x=el('button',{type:'button'},t);x.onclick=()=>{S[it.id]=Object.assign(S[it.id]||{},{human_passed:v});save();paint()};btns[k]=x;b.append(x)});
  m.value=(S[it.id]||{}).note||'';m.oninput=()=>{S[it.id]=Object.assign(S[it.id]||{},{note:m.value});save()};
- c.append(el('h4',null,'당신의 판단'),b,m);list.append(c);paint()});
+ c.append(el('h4',null,'Your judgment'),b,m);list.append(c);paint()});
 prog();
-jump.onclick=()=>{const l=left();if(!l.length)alert('모두 완료했습니다.');else document.getElementById('c'+D.items.indexOf(l[0])).scrollIntoView({behavior:'smooth'})};
-sub.onclick=async()=>{const l=left();if(l.length){alert(`아직 ${l.length}개 항목에 답하지 않았습니다.`);return}
+jump.onclick=()=>{const l=left();if(!l.length)alert('All items are answered.');else document.getElementById('c'+D.items.indexOf(l[0])).scrollIntoView({behavior:'smooth'})};
+sub.onclick=async()=>{const l=left();if(l.length){alert(`${l.length} item(s) still have no answer.`);return}
  const answers={};D.items.forEach(i=>{answers[i.id]={human_passed:S[i.id].human_passed,note:S[i.id].note||''}});
- subst.textContent='저장 중…';try{const r=await fetch('/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({answers})});
- const j=await r.json();subst.textContent=j.ok?`저장 완료 (${j.n}개: ${j.file})`:`저장 실패: ${j.error}`}catch(e){subst.textContent='저장 실패: 서버(label_blind.py serve)에 연결할 수 없습니다.'}};
+ subst.textContent='Saving…';try{const r=await fetch('/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({answers})});
+ const j=await r.json();subst.textContent=j.ok?`Saved (${j.n} items: ${j.file})`:`Save failed: ${j.error}`}catch(e){subst.textContent='Save failed: cannot reach the server (label_blind.py serve).'}};
 </script></body></html>"""
 
 

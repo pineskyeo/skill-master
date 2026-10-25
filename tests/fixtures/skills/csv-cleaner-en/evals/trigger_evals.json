@@ -1,0 +1,22 @@
+[
+  {"query": "orders.csv has identical rows in it several times. Remove the duplicate lines and save the result to a new file", "should_trigger": true},
+  {"query": "Can you dedupe customers_export.csv? Some rows show up two or three times.", "should_trigger": true},
+  {"query": "Every cell in sales_q3.csv has spaces before and after the value, so pandas groupby does not work. Please clean up the spaces", "should_trigger": true},
+  {"query": "Before I start the analysis, clean up data/raw_leads.csv. Drop the duplicate rows and remove the leading and trailing spaces in the cells too", "should_trigger": true},
+  {"query": "survey_responses.csv has trailing spaces in every column and some submissions are duplicated. Clean it up before I load it.", "should_trigger": true},
+  {"query": "Remove the duplicates from inventory.csv and make inventory_clean.csv", "should_trigger": true},
+  {"query": "This csv came out of the ERP and values have spaces around them, like ' Seoul '. Remove only the spaces", "should_trigger": true},
+  {"query": "Remove the exact duplicate lines from transactions_2025.csv and write the result to transactions_dedup.csv", "should_trigger": true},
+  {"query": "Before I open members.csv in Excel, keep only one of each set of exactly identical rows and delete the rest", "should_trigger": true},
+  {"query": "My CSV treats ' apple ' and 'apple' as different values because of stray whitespace. Fix the file so they match.", "should_trigger": true},
+  {"query": "Sum qty per order_id in orders.csv", "should_trigger": false},
+  {"query": "Convert report.xlsx to a CSV file", "should_trigger": false},
+  {"query": "Compare old.csv and new.csv and show only the rows that changed", "should_trigger": false},
+  {"query": "In customers.csv, merge customers with the same email into one line. The name spellings differ slightly", "should_trigger": false},
+  {"query": "Write a Python function that strips whitespace from every string in a list", "should_trigger": false},
+  {"query": "Change the date format in sales.csv from 2025/01/03 to 2025-01-03", "should_trigger": false},
+  {"query": "This JSON file has duplicate entries in its items array; remove them", "should_trigger": false},
+  {"query": "In products.csv, fill rows with an empty price with 0", "should_trigger": false},
+  {"query": "Merge jan.csv, feb.csv and mar.csv into one file", "should_trigger": false},
+  {"query": "Read visits.csv and draw a bar chart of visits per weekday", "should_trigger": false}
+]

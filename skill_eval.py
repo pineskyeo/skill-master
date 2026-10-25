@@ -3,7 +3,7 @@
 
 File formats follow Anthropic skill-creator (references/schemas.md, scripts/aggregate_benchmark.py,
 scripts/run_eval.py) and agentskills.io (evaluating-skills, optimizing-descriptions); deviations are listed
-in README.md ("스킬 평가 하네스"). Python 3.9 standard library only.
+in the README.md section on the skill-eval harness. Python 3.9 standard library only.
 
 Safety: no model or CLI is ever executed unless the command line has --live AND a finite --budget-usd, the approval
 gates pass, and the cost estimate fits the budget. Without --live every command is a dry run: it prints the
@@ -49,14 +49,14 @@ DEFAULT_BUILDER_MODEL = "claude-opus-5-5"
 # (~/.claude/cache/changelog.md: "Available via `/effort`, `--effort`"). Codex: values accepted by the Codex plugin
 # runtime (~/.claude/plugins/cache/openai-codex/codex/1.0.4/skills/codex-cli-runtime/SKILL.md: none, minimal, low,
 # medium, high, xhigh). The `codex exec` spelling `-c model_reasoning_effort=<level>` is NOT verified from a primary
-# source in this repo (추정): check `codex exec --help` / the Codex config docs before a live run.
+# source in this repo (UNVERIFIED): check `codex exec --help` / the Codex config docs before a live run.
 CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 CODEX_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
-CODEX_EFFORT_CONFIG = "model_reasoning_effort=%s"  # (추정) config key, see above
+CODEX_EFFORT_CONFIG = "model_reasoning_effort=%s"  # (UNVERIFIED) config key, see above
 CODEX_ADMIN_SKILLS = os.path.join("/etc", "codex", "skills")  # admin-scope skills: load in every Codex call
 GRADER_ENGINES = ("claude", "codex")
 # Codex grader price per million tokens (input, output). OpenAI/Codex prices are not verified from a primary source
-# here, so the most expensive row of PRICES is used as a conservative assumption (추정: not shown to be an upper
+# here, so the most expensive row of PRICES is used as a conservative assumption (UNVERIFIED: not shown to be an upper
 # bound of the real price). Override with --price grader=IN,OUT. Every Codex grader call is charged at least its
 # worst-case bound (assumed tokens x WORST_CASE_FACTOR x this price): Codex has no per-call cap.
 CODEX_GRADER_ASSUMED_PRICE = max(PRICES.values(), key=lambda p: p[0] + p[1])
@@ -156,7 +156,7 @@ def cents_floor(x):
     return math.floor(x * 100 + 1e-9) / 100.0
 
 def slug(text, n=40):
-    s = re.sub(r"[^0-9A-Za-z가-힣]+", "-", text or "").strip("-").lower()
+    s = re.sub(r"[^0-9A-Za-z\uAC00-\uD7A3]+", "-", text or "").strip("-").lower()
     return s[:n].strip("-")
 
 # ---------- eval set ----------
@@ -356,7 +356,7 @@ NON_SUBSCRIPTION_ENV = API_KEY_ENV + PROVIDER_ENV
 # Not refused, but removed from every child: Claude runs authenticate only with the existing Keychain login of the
 # unchanged config dir, the same login `claude auth status` verified. An exported setup-token would replace it.
 IGNORED_AUTH_ENV = ("CLAUDE_CODE_OAUTH_TOKEN",)
-# Account switching (2026-10-16, README "Subscription auth" > "계정 자동 전환"). skill_eval itself still never passes a
+# Account switching (2026-10-16, README "Subscription auth", account auto-switch). skill_eval itself still never passes a
 # token (IGNORED_AUTH_ENV above is scrubbed first). Every `claude` child gets an explicit caller marker; the ~/bin/claude
 # account shim (claude-accts v5) then may, only on a usage-limit error from acct0, retry once on ~/.claude-acctN with
 # that account's Keychain token, which the shim alone injects (and CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 so the eval
@@ -415,11 +415,11 @@ def switch_account_config_dirs(home=None, environ=None):
             if re.match(r"^\.claude-acct[1-9][0-9]{0,2}$", n) and os.path.isdir(os.path.join(home, n))]
 # `--json` and the method values "claude.ai" / "api_key" are from the Claude Code changelog
 # (~/.claude/cache/changelog.md: "Added `configDirectory` to the output of `claude auth status --json`", "it now
-# reports `api_key`"). The JSON key that holds the method is not documented there (추정), so every string value under
+# reports `api_key`"). The JSON key that holds the method is not documented there (UNVERIFIED), so every string value under
 # a key named like auth/method/source/provider is classified, and anything unrecognized fails closed.
 CLAUDE_AUTH_STATUS_CMD = ["claude", "auth", "status", "--json"]
 # Recognized subscription method values (normalized: lowercase alphanumerics). "claude.ai" is from the changelog;
-# "oauth"/"oauth_token" (setup-token) and "subscription" are (추정) spellings, accepted only under a method-like key.
+# "oauth"/"oauth_token" (setup-token) and "subscription" are (UNVERIFIED) spellings, accepted only under a method-like key.
 CLAUDE_SUBSCRIPTION_METHODS = ("claudeai", "oauth", "oauthtoken", "claudeaioauth", "subscription")
 CODEX_SUBSCRIPTION_MODES = ("chatgpt",)  # ~/.codex/auth.json "auth_mode" (value seen on this machine, 2026-10-15)
 BILLING = "subscription"
@@ -517,7 +517,7 @@ def codex_auth_problems():
     return []
 
 # Claude settings files that can supply auth (apiKeyHelper, env). Isolated runs use --setting-sources project,local:
-# <cwd>/.claude/settings.json and settings.local.json; whether ancestors of the cwd are also read is not verified (추정),
+# <cwd>/.claude/settings.json and settings.local.json; whether ancestors of the cwd are also read is UNVERIFIED,
 # so every ancestor is checked too. Managed sources always apply. From https://code.claude.com/docs/en/managed-settings
 # (read 2026-10-15): managed-settings.json plus every non-hidden *.json in managed-settings.d/ next to it
 # (/Library/Application Support/ClaudeCode/ on macOS, /etc/claude-code/ on Linux and WSL); the macOS configuration
@@ -527,7 +527,7 @@ CLAUDE_SETTINGS_FILES = ("settings.json", "settings.local.json")
 CLAUDE_MANAGED_SETTINGS = ("/Library/Application Support/ClaudeCode/managed-settings.json",
                            "/etc/claude-code/managed-settings.json")
 # Where macOS stores a configuration profile's managed preferences for the domain: the standard macOS location, not
-# named on the Claude Code pages (추정). Parsed with plistlib when present; an unreadable file fails closed.
+# named on the Claude Code pages (UNVERIFIED). Parsed with plistlib when present; an unreadable file fails closed.
 CLAUDE_MDM_PLIST_DIR = "/Library/Managed Preferences"
 CLAUDE_MDM_DOMAIN = "com.anthropic.claudecode"
 CLAUDE_REMOTE_SETTINGS = "remote-settings.json"
@@ -582,7 +582,7 @@ def claude_settings_auth_problems(paths):
     """API-key auth, provider routing or a non-Keychain token configured in any of these Claude settings files:
     apiKeyHelper or a NON_SUBSCRIPTION_ENV / IGNORED_AUTH_ENV entry in "env" (key names only, values never read into
     messages). Env scrubbing removes CLAUDE_CODE_OAUTH_TOKEN from the shell env only; a settings "env" entry would be
-    set by the CLI itself after scrubbing (whether it then overrides the Keychain login is not verified, 추정), so it
+    set by the CLI itself after scrubbing (whether it then overrides the Keychain login is UNVERIFIED), so it
     is refused. A file that exists but cannot be parsed fails closed."""
     out = []
     for p in paths:
@@ -1136,7 +1136,7 @@ class CodexEngine(Engine):
     """codex exec --json (https://learn.chatgpt.com/docs/non-interactive-mode). Skill on: copied to
     <workdir>/.agents/skills/<name>/ (https://learn.chatgpt.com/docs/build-skills: Codex scans .agents/skills from
     the cwd up to the repo root). `-m <model>` is not on those pages (unverified); it is added only with --codex-model.
-    Trigger detection is (추정): Codex documents no skill-invocation event, so a run counts as triggered when an
+    Trigger detection is (UNVERIFIED): Codex documents no skill-invocation event, so a run counts as triggered when an
     item mentions .../skills/<name>/SKILL.md."""
     name, skills_rel = "codex", ".agents/skills"
     EFFORTS = CODEX_EFFORTS
@@ -1175,7 +1175,7 @@ class CodexEngine(Engine):
             if hits: out.append("%s skills folder %s has %s" % (label, d, sorted(hits)))
         return out
     def after_run(self, root):
-        """The copy must be unchanged. If Codex rewrote it (token refresh, 추정), the refreshed login is deleted with
+        """The copy must be unchanged. If Codex rewrote it (token refresh, UNVERIFIED), the refreshed login is deleted with
         the sandbox and the real auth.json may hold a superseded token: stop and tell the user to check."""
         want, p = self._auth_digest.pop(root, None), os.path.join(root, "codex_home", "auth.json")
         if want is None: return []
@@ -1701,7 +1701,7 @@ def extract_json_object(text):
 class CodexGrader(LLMGrader):
     """Grader and blind pairwise judge through `codex exec --json --sandbox read-only` (Codex is never an eval target
     here). Model: the Codex CLI default unless --grader-model is given; reasoning effort via `-c
-    model_reasoning_effort=<level>` (spelling 추정, see CODEX_EFFORT_CONFIG). Runs in a fresh temp folder with the
+    model_reasoning_effort=<level>` (spelling UNVERIFIED, see CODEX_EFFORT_CONFIG). Runs in a fresh temp folder with the
     same isolated HOME / CODEX_HOME as a Codex run (CodexEngine.sandbox_env: read-only auth.json copy, removed and
     verified gone after the call; see CODEX_GRADER_NOTE for the readability risk). The answer is the final agent
     message, which must be one JSON object (the schema is in the prompt; `--output-schema` is not used: unverified).
@@ -1991,7 +1991,7 @@ def preflight(spec, engines, run_root=None, home=None):
       (project skills are discovered from the cwd upward);
     - claude: a same-named copy in ~/.claude/skills (incl. synced/) or a plugin. --setting-sources project,local
       should hide user skills (docs: the "user" source loads ~/.claude/skills), but whether the CLI flag hides already
-      downloaded claude.ai synced skills and plugin skills is not verified (추정), so a same-named copy still blocks;
+      downloaded claude.ai synced skills and plugin skills is UNVERIFIED, so a same-named copy still blocks;
     - any API-key variable (API_KEY_ENV) in the environment: subscription auth only;
     - claude (Keychain login, shared config dir): a claude.ai synced skill the post-run init check could not see
       (`user-invocable: false`, claude_undetectable_skill_problems). Other synced and plugin skills are left to the
@@ -2048,7 +2048,7 @@ def preflight(spec, engines, run_root=None, home=None):
 # ---------- running ----------
 def eval_dir_name(case):
     d = "eval-%s-%s" % (case["id"], case["name"]) if case["name"] != str(case["id"]) else "eval-%s" % case["id"]
-    if not re.match(r"^[0-9A-Za-z가-힣._-]+$", d) or ".." in d:  # names come from safe_name() or slug(); defense in depth
+    if not re.match(r"^[0-9A-Za-z\uAC00-\uD7A3._-]+$", d) or ".." in d:  # names come from safe_name() or slug(); defense in depth
         raise EvalError("eval directory name %r is not a safe path component" % d)
     return d
 
@@ -3262,7 +3262,7 @@ def build_parser():
             s.add_argument("--grader-model", default=None,
                            help="default: %s for --grader-engine claude, the CLI default model for codex"
                                 % DEFAULT_GRADER_MODEL)
-            s.add_argument("--grader-effort", help="grader effort: claude %s, codex %s (codex: -c %s, 추정)"
+            s.add_argument("--grader-effort", help="grader effort: claude %s, codex %s (codex: -c %s, UNVERIFIED)"
                            % ("|".join(CLAUDE_EFFORTS), "|".join(CODEX_EFFORTS), CODEX_EFFORT_CONFIG % "<level>"))
             s.add_argument("--price", action="append", help="KEY=IN,OUT USD/MTok; KEY = engine name, model id or 'grader'")
             s.add_argument("--tokens", action="append", help="KIND=IN,OUT assumed tokens per call; KIND exec|trigger|grader|pairwise")
