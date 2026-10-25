@@ -2,6 +2,10 @@
 """Eva (에바): SKILL.md skill evaluator (agent checks are slated to move to a separate "agent master").
 stdlib only, Python 3.9+."""
 import argparse, codecs, collections, json, os, posixpath, re, shlex, shutil, sys, unicodedata
+from engine.loaders import (TomlError, _DQ_ESCAPES, _DQ_HEX, _TOML_BARE_KEY_RE, _TOML_ESCAPES, _TOML_FLOAT_RE, _TOML_INT_RE,
+                            _TomlReader, _YAML_TYPED_RE, _block_scalar, _plain_scalar_error, _quoted_end, _scalar,
+                            _strip_comment, _unquote, parse_flat_toml, parse_frontmatter_ex, yaml_typed_keys)
+from engine import rule_runner
 
 PASS_THRESHOLD = 0.8
 CATEGORY_FLOOR = 0.5  # every category with applicable checks needs >=1 pass and pass rate >= this
@@ -149,243 +153,6 @@ def desc_task_verbs(desc):
     return out
 
 # ---------- frontmatter (minimal YAML subset) ----------
-def _quoted_end(v):
-    """Index of the quote closing the quoted scalar that starts at v[0], or -1 if unterminated.
-    YAML: in "..." a backslash escapes the next character; in '...' a quote is escaped by doubling it ('')."""
-    q, i = v[0], 1
-    while i < len(v):
-        if q == '"' and v[i] == "\\":
-            i += 2; continue
-        if v[i] == q:
-            if q == "'" and v[i + 1:i + 2] == "'":
-                i += 2; continue
-            return i
-        i += 1
-    return -1
-
-def _strip_comment(v):
-    """Drop a YAML comment: a '#' at the start of the value or preceded by whitespace (outside quotes)
-    starts a comment, so 'k: #x' is an empty (null) value, as in YAML."""
-    v = v.strip()
-    if v and v[0] in "\"'":
-        end = _quoted_end(v)
-        if end > 0 and re.match(r"^\s+#", v[end + 1:]):
-            return v[:end + 1]
-        return v
-    if v.startswith("#"):
-        return ""
-    m = re.search(r"\s#", v)
-    return v[:m.start()].rstrip() if m else v
-
-# YAML 1.1 double-quoted escapes (PyYAML ScalarScanner.ESCAPE_REPLACEMENTS / ESCAPE_CODES)
-_DQ_ESCAPES = {"0": "\0", "a": "\a", "b": "\b", "t": "\t", "\t": "\t", "n": "\n", "v": "\v", "f": "\f", "r": "\r",
-               "e": "\x1b", " ": " ", '"': '"', "/": "/", "\\": "\\", "N": "\x85", "_": "\xa0",
-               "L": " ", "P": " "}
-_DQ_HEX = {"x": 2, "u": 4, "U": 8}
-
-def _unquote(v):
-    """(value, error) of a complete quoted scalar v (as returned by _strip_comment)."""
-    if v[0] == "'":
-        return v[1:-1].replace("''", "'"), None
-    out, i, s = [], 0, v[1:-1]
-    while i < len(s):
-        c = s[i]
-        if c != "\\":
-            out.append(c); i += 1; continue
-        e = s[i + 1:i + 2]
-        if e in _DQ_ESCAPES:
-            out.append(_DQ_ESCAPES[e]); i += 2
-        elif e in _DQ_HEX and re.match(r"^[0-9A-Fa-f]{%d}$" % _DQ_HEX[e], s[i + 2:i + 2 + _DQ_HEX[e]]):
-            code = int(s[i + 2:i + 2 + _DQ_HEX[e]], 16)
-            if code > 0x10FFFF:  # chr() would raise (PyYAML itself crashes with OverflowError/ValueError here)
-                return None, "escape '\\%s%s' is beyond U+10FFFF" % (e, s[i + 2:i + 2 + _DQ_HEX[e]])
-            out.append(chr(code)); i += 2 + _DQ_HEX[e]
-        else:
-            return None, "invalid escape '\\%s' in double-quoted value" % e
-    return "".join(out), None
-
-def _scalar(v):
-    """Python value of one scalar: None for empty/comment-only, unquoted string, inline list, or plain string."""
-    v = _strip_comment(v)
-    if not v:
-        return None
-    if v[0] in "\"'" and _quoted_end(v) == len(v) - 1:
-        return _unquote(v)[0]
-    if v.startswith("[") and v.endswith("]"):
-        return [_scalar(x) for x in v[1:-1].split(",") if x.strip()]
-    return v
-
-def _plain_scalar_error(v):
-    """Why an unquoted value is not a valid YAML plain scalar for this subset (None if fine).
-    A real YAML loader would reject or reinterpret these, so the frontmatter must quote them."""
-    v = _strip_comment(v)
-    if not v:
-        return None
-    if v[0] in "\"'":
-        end = _quoted_end(v)
-        if end < 0:
-            return "unterminated %s-quoted value (multi-line quoted values are not supported here)" % v[0]
-        if end != len(v) - 1:
-            return "unexpected text after the closing %s quote" % v[0]
-        return _unquote(v)[1]
-    if v.startswith("[") and v.endswith("]"):
-        return None
-    if ": " in v or v.endswith(":"):
-        return "':' inside an unquoted value is a YAML mapping indicator; quote the value"
-    if v[0] in "@`":
-        return "'%s' is a reserved YAML indicator; quote the value" % v[0]
-    if v[0] in "&*!%{|>" or v == "-" or v.startswith("- ") or v.startswith("["):
-        return "value starts with YAML syntax '%s' not supported here; quote the value" % v[0]
-    return None
-
-def _block_scalar(style, lines, eof=False):
-    """Value of a '>'/'|' block scalar (style '>', '|', '>-', '|-') from its raw lines, as PyYAML scans it
-    (ScalarScanner.scan_block_scalar): indentation from the first non-empty line, '#' lines are content,
-    folding joins adjacent non-indented lines with a space, clip chomping keeps one final newline, '-' strips it.
-    eof: the last line ends the frontmatter text. skill-creator's quick_validate loads the text between '---\n' and
-    '\n---', so a block that is the last line has no line break and clip adds none. Returns (value, error)."""
-    no_break = eof and bool(lines) and bool(lines[-1].strip())
-    while lines and not lines[-1].strip():
-        lines = lines[:-1]  # trailing empty lines only matter for '+' (keep), which is not supported
-    first = next((l for l in lines if l.strip()), None)
-    if first is None:
-        return "", None
-    indent = len(first) - len(first.lstrip(" "))
-    chunks, breaks, line_break, prev_text = [], [], "", None
-    for ln in lines:
-        if len(ln) - len(ln.lstrip(" ")) >= indent and ln.strip():
-            text = ln[indent:]
-            if prev_text is not None:
-                if style[0] == ">" and prev_text[:1] not in (" ", "\t") and text[:1] not in (" ", "\t"):
-                    if not breaks: chunks.append(" ")
-                else:
-                    chunks.append(line_break)
-            chunks.extend(breaks); breaks = []
-            chunks.append(text); line_break = "\n"; prev_text = text
-        elif not ln.strip():
-            if prev_text is None: chunks.append("\n")  # leading empty lines are kept
-            else: breaks.append("\n")
-        else:
-            return None, "line less indented than the block scalar's first line"
-    if not style.endswith("-") and not no_break:
-        chunks.append(line_break)
-    return "".join(chunks), None
-
-def parse_frontmatter_ex(text):
-    """Returns (meta dict or None, body, error). Supports scalars, inline lists, '- item' lists,
-    one level of 'key: value' nesting, '>'/'|' blocks. Opening and closing lines must be exactly '---';
-    every top-level line must be 'key: value' (a mapping) with unique keys. Indentation must use spaces
-    (YAML forbids tabs) and unquoted values must be valid YAML plain scalars (see _plain_scalar_error).
-    ' #' starts a comment, as in YAML; inside a '>'/'|' block an indented '#' line is content."""
-    lines = text.splitlines()
-    if not lines or lines[0] != "---":
-        return None, text, "first line must be exactly '---'"
-    end = None
-    for i in range(1, len(lines)):
-        if lines[i] == "---":
-            end = i; break
-    if end is None:
-        return None, text, "closing '---' line not found"
-    meta, key, block, block_lines, block_start, closed = {}, None, None, [], 0, False
-    def err(n, msg): return None, text, "frontmatter line %d: %s" % (n, msg)
-    def finish_block(eof=False):
-        v, e = _block_scalar(block, block_lines, eof)
-        if e: return err(block_start, e)
-        meta[key] = v
-        return None
-    for n, ln in enumerate(lines[1:end], 2):
-        if block is not None and (not ln.strip() or ln[0] == " "):
-            block_lines.append(ln); continue  # block content, '#' lines included
-        if block is not None:
-            bad = finish_block()
-            if bad: return bad
-            block, closed = None, True  # an indented line after this would continue nothing
-        if not ln.strip() or ln.lstrip().startswith("#"):
-            continue
-        if ln[0] in " \t":
-            if key is None:
-                return err(n, "indented line without a parent key")
-            if closed:
-                return err(n, "indented line after the block scalar of '%s' ended" % key)
-            if "\t" in ln[:len(ln) - len(ln.lstrip())]:
-                return err(n, "tab in indentation (YAML allows spaces only)")
-            s = ln.strip()
-            if meta[key] is not None and not isinstance(meta[key], (list, dict)):
-                return err(n, "key '%s' already has a scalar value; nested lines not allowed" % key)
-            elif s.startswith("- "):
-                if isinstance(meta[key], dict):
-                    return err(n, "key '%s' mixes '- item' list and 'key: value' mapping" % key)
-                pe = _plain_scalar_error(s[2:])
-                if pe: return err(n, pe)
-                if meta[key] is None: meta[key] = []
-                meta[key].append(_scalar(s[2:]))
-            elif re.match(r"^[A-Za-z_][\w./-]*:\s+\S", s):
-                if isinstance(meta[key], list):
-                    return err(n, "key '%s' mixes '- item' list and 'key: value' mapping" % key)
-                if meta[key] is None: meta[key] = {}
-                k2, v2 = s.split(":", 1)
-                if k2.strip() in meta[key]:
-                    return err(n, "duplicate key '%s.%s'" % (key, k2.strip()))
-                pe = _plain_scalar_error(v2)
-                if pe: return err(n, pe)
-                meta[key][k2.strip()] = _scalar(v2)
-            else:
-                return err(n, "expected '- item' or 'key: value' under '%s'" % key)
-            continue
-        m = re.match(r"^([A-Za-z_][\w-]*):(?:\s+(.*))?$", ln)
-        if not m:
-            return err(n, "expected 'key: value' (frontmatter must be a mapping)")
-        key, val = m.group(1), _strip_comment(m.group(2) or "")
-        if key in meta:
-            return err(n, "duplicate key '%s'" % key)
-        closed = False
-        if val in (">", "|", ">-", "|-"):
-            meta[key] = ""; block, block_lines, block_start = val, [], n
-        elif val == "":
-            meta[key] = None
-        else:
-            pe = _plain_scalar_error(val)
-            if pe: return err(n, pe)
-            meta[key] = _scalar(val)
-    if block is not None:
-        bad = finish_block(eof=True)
-        if bad: return bad
-    return meta, "\n".join(lines[end + 1:]), None
-
-# YAML 1.1 implicit types (what PyYAML's safe_load resolves): an unquoted value matching these is
-# loaded as bool/null/int/float/date, not a string.
-_YAML_TYPED_RE = re.compile(
-    r"^(?:yes|Yes|YES|no|No|NO|true|True|TRUE|false|False|FALSE|on|On|ON|off|Off|OFF"
-    r"|~|null|Null|NULL"
-    r"|[-+]?(?:0|[1-9][0-9_]*)|[-+]?0[0-7_]+|[-+]?0x[0-9a-fA-F_]+|[-+]?0b[01_]+"
-    r"|[-+]?[1-9][0-9_]*(?::[0-5]?[0-9])+(?:\.[0-9_]*)?"
-    r"|[-+]?[0-9][0-9_]*\.[0-9_]*(?:[eE][-+][0-9]+)?|\.[0-9_]+(?:[eE][-+][0-9]+)?"
-    r"|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN)"
-    r"|\d{4}-\d\d-\d\d|\d{4}-\d\d?-\d\d?(?:[Tt]|[ \t]+)\d\d?:\d\d:\d\d.*)$")
-
-def yaml_typed_keys(text):
-    """Dotted keys ('name', 'metadata.version') whose unquoted value a YAML loader types as non-string."""
-    lines = text.splitlines()
-    if not lines or lines[0] != "---" or "---" not in lines[1:]:
-        return []
-    out, parent, block = [], None, False
-    for ln in lines[1:lines.index("---", 1)]:
-        if not ln.strip() or ln.lstrip().startswith("#"):
-            continue
-        if ln[0] == " ":
-            m = re.match(r"^\s+(?:-\s+(.*)|([A-Za-z_][\w./-]*):\s+(.*))$", ln)
-            if not block and parent and m:
-                v = m.group(1) if m.group(1) is not None else m.group(3)
-                if _YAML_TYPED_RE.match(_strip_comment(v)):
-                    out.append(parent + ("[]" if m.group(1) is not None else "." + m.group(2)))
-            continue
-        m = re.match(r"^([A-Za-z_][\w-]*):(?:\s+(.*))?$", ln)
-        if m:
-            parent, v = m.group(1), _strip_comment(m.group(2) or "")
-            block = v in (">", "|", ">-", "|-")
-            if v and _YAML_TYPED_RE.match(v):
-                out.append(parent)
-    return out
 
 def parse_frontmatter(text):
     """Returns (meta dict or None, body)."""
@@ -1107,179 +874,6 @@ PARITY_BUILDER_RULE = (
     "a string; do not put Hermes keys (metadata.hermes) in the frontmatter; do not use disable-model-invocation unless "
     "metadata 'opencode/autoinvoke: \"false\"' and agents/openai.yaml 'policy: allow_implicit_invocation: false' are "
     "also set; keep agents/openai.yaml valid if it exists. The loop stops if the parity check fails.")
-
-class TomlError(ValueError):
-    pass
-
-_TOML_BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
-_TOML_ESCAPES = {"b": "\b", "t": "\t", "n": "\n", "f": "\f", "r": "\r", '"': '"', "\\": "\\"}
-_TOML_INT_RE = re.compile(r"[+-]?(?:0|[1-9](?:_?[0-9])*)$")
-_TOML_FLOAT_RE = re.compile(r"[+-]?(?:0|[1-9](?:_?[0-9])*)(?:\.[0-9](?:_?[0-9])*)?(?:[eE][+-]?[0-9](?:_?[0-9])*)?$")
-
-class _TomlReader:
-    """Strict reader for the flat TOML subset a wrapper needs (see parse_flat_toml)."""
-    def __init__(self, text):
-        self.s, self.i, self.line = text, 0, 1
-    def fail(self, msg):
-        raise TomlError("line %d: %s" % (self.line, msg))
-    def peek(self, n=1):
-        return self.s[self.i:self.i + n]
-    def skip_blank(self):
-        while self.i < len(self.s) and self.s[self.i] in " \t": self.i += 1
-    def newline(self):
-        if self.peek(2) == "\r\n": self.i += 2
-        elif self.peek() == "\n": self.i += 1
-        else: self.fail("expected end of line")
-        self.line += 1
-    def at_eol(self):
-        return self.i >= len(self.s) or self.peek() == "\n" or self.peek(2) == "\r\n"
-    def comment(self):
-        """Consume an optional comment up to (not including) the end of line."""
-        if self.peek() == "#":
-            while not self.at_eol():
-                c = self.s[self.i]
-                if c == "\r" or (ord(c) < 0x20 and c != "\t") or ord(c) == 0x7F: self.fail("control character in comment")
-                self.i += 1
-    def parse(self):
-        out = {}
-        while self.i < len(self.s):
-            self.skip_blank()
-            if self.i >= len(self.s): break
-            c = self.peek()
-            if c == "#": self.comment()
-            if self.at_eol():
-                if self.i < len(self.s): self.newline()
-                continue
-            if c == "[": self.fail("tables are not supported (flat key = value files only)")
-            m = _TOML_BARE_KEY_RE.match(self.s, self.i)
-            if not m:
-                self.fail("quoted keys are not supported" if c in "\"'" else "expected a bare key, got %r" % c)
-            key = m.group(0); self.i = m.end(); self.skip_blank()
-            if self.peek() == ".": self.fail("dotted key '%s.' is not supported" % key)
-            if self.peek() != "=": self.fail("expected '=' after key '%s'" % key)
-            self.i += 1; self.skip_blank()
-            if key in out: self.fail("duplicate key '%s'" % key)
-            out[key] = self.value()
-            self.skip_blank(); self.comment()
-            if not self.at_eol(): self.fail("unexpected text after the value of '%s'" % key)
-            if self.i < len(self.s): self.newline()
-        return out
-    def value(self):
-        c, three = self.peek(), self.peek(3)
-        if three == '"""': return self.ml_basic()
-        if three == "'''": return self.ml_literal()
-        if c == '"': return self.basic()
-        if c == "'": return self.literal()
-        if c == "[": return self.array()
-        if c == "{": self.fail("inline tables are not supported")
-        m = re.match(r"[^\s,#\]\[{}]+", self.s[self.i:])
-        if not m: self.fail("missing value")
-        tok = m.group(0); self.i += len(tok)
-        if tok == "true": return True
-        if tok == "false": return False
-        if _TOML_INT_RE.match(tok): return int(tok.replace("_", ""))
-        if _TOML_FLOAT_RE.match(tok): return float(tok.replace("_", ""))
-        self.fail("unsupported value %r (strings must be quoted; dates, times, hex, inf and nan are not supported)" % tok[:20])
-    def escape(self):
-        e = self.peek()
-        if e in _TOML_ESCAPES:
-            self.i += 1; return _TOML_ESCAPES[e]
-        if e in ("u", "U"):
-            n = 4 if e == "u" else 8
-            hexs = self.s[self.i + 1:self.i + 1 + n]
-            if not re.match(r"^[0-9A-Fa-f]{%d}$" % n, hexs): self.fail("invalid \\%s escape" % e)
-            code = int(hexs, 16)
-            if code > 0x10FFFF or 0xD800 <= code <= 0xDFFF: self.fail("\\%s%s is not a Unicode scalar value" % (e, hexs))
-            self.i += 1 + n; return chr(code)
-        self.fail("invalid escape '\\%s'" % e)
-    def ctl(self, c, multiline):
-        if c == "\r" and multiline and self.peek(2) == "\r\n": return False
-        if (ord(c) < 0x20 and c != "\t" and not (multiline and c == "\n")) or ord(c) == 0x7F:
-            self.fail("control character U+%04X in string" % ord(c))
-        return True
-    def basic(self):
-        self.i += 1; out = []
-        while True:
-            if self.i >= len(self.s) or self.s[self.i] in "\n": self.fail("unterminated string")
-            c = self.s[self.i]
-            if c == '"': self.i += 1; return "".join(out)
-            self.ctl(c, False)
-            self.i += 1
-            out.append(self.escape() if c == "\\" else c)
-    def literal(self):
-        self.i += 1; j = self.s.find("'", self.i)
-        body = self.s[self.i:j] if j >= 0 else None
-        if body is None or "\n" in body: self.fail("unterminated literal string")
-        for c in body: self.ctl(c, False)
-        self.i = j + 1; return body
-    def _trim_first_newline(self):
-        if self.peek(2) == "\r\n": self.i += 2; self.line += 1
-        elif self.peek() == "\n": self.i += 1; self.line += 1
-    def ml_basic(self):
-        self.i += 3; self._trim_first_newline(); out = []
-        while True:
-            if self.i >= len(self.s): self.fail("unterminated multi-line string")
-            if self.peek(3) == '"""':
-                n = 0
-                while self.peek() == '"': n += 1; self.i += 1
-                if n > 5: self.fail("too many quotes at the end of a multi-line string")
-                return "".join(out) + '"' * (n - 3)
-            c = self.s[self.i]
-            if c == "\r" and self.peek(2) == "\r\n": self.i += 1; continue
-            if c == "\r": self.fail("lone carriage return in string")
-            self.ctl(c, True); self.i += 1
-            if c == "\n": self.line += 1
-            if c != "\\": out.append(c); continue
-            j = self.i
-            while j < len(self.s) and self.s[j] in " \t": j += 1
-            if self.s[j:j + 1] == "\n" or self.s[j:j + 2] == "\r\n":  # line-ending backslash trims the whitespace after it
-                while j < len(self.s) and self.s[j] in " \t\r\n":
-                    if self.s[j] == "\n": self.line += 1
-                    j += 1
-                self.i = j; continue
-            out.append(self.escape())
-    def ml_literal(self):
-        self.i += 3; self._trim_first_newline(); out = []
-        while True:
-            if self.i >= len(self.s): self.fail("unterminated multi-line literal string")
-            if self.peek(3) == "'''":
-                n = 0
-                while self.peek() == "'": n += 1; self.i += 1
-                if n > 5: self.fail("too many quotes at the end of a multi-line string")
-                return "".join(out) + "'" * (n - 3)
-            c = self.s[self.i]
-            if c == "\r" and self.peek(2) == "\r\n": self.i += 1; continue
-            if c == "\r": self.fail("lone carriage return in string")
-            self.ctl(c, True); self.i += 1
-            if c == "\n": self.line += 1
-            out.append(c)
-    def array(self):
-        self.i += 1; out = []
-        while True:
-            while True:
-                self.skip_blank()
-                if self.peek() == "#": self.comment()
-                if self.peek(2) == "\r\n" or self.peek() == "\n": self.newline(); continue
-                break
-            if self.i >= len(self.s): self.fail("unterminated array")
-            if self.peek() == "]": self.i += 1; return out
-            out.append(self.value())
-            while True:
-                self.skip_blank()
-                if self.peek() == "#": self.comment()
-                if self.peek(2) == "\r\n" or self.peek() == "\n": self.newline(); continue
-                break
-            if self.i >= len(self.s): self.fail("unterminated array")
-            if self.peek() == ",": self.i += 1
-            elif self.peek() != "]": self.fail("expected ',' or ']' in array")
-
-def parse_flat_toml(text):
-    """Strict flat-TOML reader (stdlib only; Python 3.9 has no tomllib). Returns {key: value}; raises TomlError on anything
-    it cannot parse. Supported: comments, bare keys, basic and literal strings (single and multi-line, all TOML escapes),
-    integers, floats, booleans, arrays of those. Rejected: tables, arrays of tables, dotted or quoted keys, inline tables,
-    dates and times, duplicate keys, control characters, invalid or surrogate escapes, trailing text, a BOM, a lone CR."""
-    if text.startswith("\ufeff"): raise TomlError("line 1: a byte order mark is not allowed")
-    return _TomlReader(text).parse()
 
 def _norm_ws(s):
     return " ".join(str(s).split())
@@ -2137,12 +1731,16 @@ def check_agent(path):
     add_parity_checks(r, path)
     return r
 
-def check(path):
+def check(path, bundle=None):
+    """The built-in rows, then the rows of bundle (default: the cached default bundle, which raises
+    rule_runner.BundleError when broken, so a direct caller such as loop.py fails closed)."""
     kind = detect_kind(path)
-    if kind == "skill": return check_skill(path)
-    if kind == "agent": return check_agent(path)
-    r = Report(path, "unknown")
-    r.add("frontmatter", "structure", False, "no SKILL.md or AGENT.md", "폴더에 SKILL.md 또는 AGENT.md를 넣으세요.")
+    if kind == "skill": r = check_skill(path)
+    elif kind == "agent": r = check_agent(path)
+    else:
+        r = Report(path, "unknown")
+        r.add("frontmatter", "structure", False, "no SKILL.md or AGENT.md", "폴더에 SKILL.md 또는 AGENT.md를 넣으세요.")
+    (rule_runner.default_bundle() if bundle is None else bundle).apply(r)
     return r
 
 def find_units(root):
@@ -2655,23 +2253,48 @@ def main(argv=None):
         s = sp.add_parser(n); s.add_argument("path"); s.add_argument("--json", action="store_true")
         if n == "check": s.add_argument("--transcript")
         if n == "feedback": s.add_argument("--round", type=int)
+        if n in ("check", "check-all"):
+            s.add_argument("--rules", metavar="DIR", help="run a non-default rule bundle (fixtures); never gives PASS")
+    s = sp.add_parser("schema-check"); s.add_argument("schema"); s.add_argument("instance")
+    s.add_argument("--unit", metavar="DIR", help="unit root for x-path-exists")
     a = p.parse_args(argv)
-    if a.cmd == "check":
-        r = grade_transcript(a.path, a.transcript) if a.transcript else check(a.path)
+    if a.cmd == "schema-check":
+        from engine import schema
+        return schema.cli(a.schema, a.instance, a.unit)
+    if getattr(a, "transcript", None) and a.rules is not None:
+        p.error("--rules cannot be combined with --transcript")
+    if not getattr(a, "transcript", None):
+        try:  # before any check(), so a broken bundle prints no unit row (plan.md:581)
+            bundle = rule_runner.default_bundle() if getattr(a, "rules", None) is None else rule_runner.load_bundle(a.rules)
+        except rule_runner.BundleError as e:
+            print("bundle error: %s" % e, file=sys.stderr)
+            return 2
+    if a.cmd == "check" and a.transcript:
+        r = grade_transcript(a.path, a.transcript)
         print(json.dumps(r.to_dict(), ensure_ascii=False, indent=2)) if a.json else print_report(r)
+        return EXIT_CODES[r.verdict]
+    if a.cmd == "check":
+        r = check(a.path, bundle)
+        if a.json:
+            print(json.dumps(dict(r.to_dict(), ruleset_sha256=bundle.sha256), ensure_ascii=False, indent=2))
+        else:
+            print_report(r)
+            print("ruleset_sha256 %s" % bundle.sha256)
         return EXIT_CODES[r.verdict]
     if a.cmd == "check-all":
         units = find_units(a.path)
         if not units:
             print("no SKILL.md/AGENT.md units found under %s" % a.path, file=sys.stderr)
             return 1
-        reps = [check(u) for u in units]
+        reps = [check(u, bundle) for u in units]
         if a.json:
-            print(json.dumps([r.to_dict() for r in reps], ensure_ascii=False, indent=2))
+            print(json.dumps([dict(r.to_dict(), ruleset_sha256=bundle.sha256) for r in reps], ensure_ascii=False, indent=2))
         else:
             for r in reps: print("[%s] %.2f %s" % (r.verdict, r.score, r.path))
             print("total=%d pass=%d review=%d fail=%d" % (len(reps), sum(r.verdict == "PASS" for r in reps),
                   sum(r.verdict == "REVIEW" for r in reps), sum(r.verdict == "FAIL" for r in reps)))
+            print("ruleset_sha256 %s" % bundle.sha256)
+            if not bundle.default: print("bundle non-default %s" % bundle.display)
         verdicts = {r.verdict for r in reps}
         return EXIT_CODES["FAIL"] if "FAIL" in verdicts else EXIT_CODES["REVIEW"] if "REVIEW" in verdicts else 0
     if a.cmd == "feedback":

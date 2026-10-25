@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Skill Master rule file",
+  "description": "Every rules.json and *.rules.json of a bundle is validated against this schema by engine/rule_runner.py; a rule file's own $schema value never selects the schema. The op enum lists the 16 ops unit A1 implements. script_denylist, heading_present, description_heuristics, local_refs and generated_up_to_date stay out until their primitives exist. Selectors: frontmatter:<pointer>, json:<relpath>#<pointer>, toml:<relpath>#<pointer>, yaml:<relpath>#<pointer>, markdown:<relpath>, text:<relpath>, glob:<pattern>, path:basename; {key} in a relpath takes a top-level frontmatter string. Custom schema keywords for the schema op: x-python-regex (true: the string compiles with Python re), x-unique-by (key: object items with that key have distinct values), x-count-where ({where, min, max}: number of items valid under where), x-le ([a, b]: a <= b when both are numbers), x-path-exists (unit: a relative path to a regular file inside the unit), x-yaml-string (true: the frontmatter scalar is not typed by YAML 1.1).",
+  "type": "object",
+  "required": ["ruleset", "version", "rules"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {"type": "string"},
+    "ruleset": {"$ref": "#/$defs/name"},
+    "version": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"},
+    "rules": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/rule"}, "x-unique-by": "id"}
+  },
+  "$defs": {
+    "name": {"type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$", "maxLength": 64},
+    "rule": {
+      "type": "object",
+      "required": ["id", "applies_to", "category", "severity", "protects", "source", "check", "message", "fix"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/name"},
+        "applies_to": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["skill", "agent"]}},
+        "category": {"enum": ["structure", "single-task", "io", "evaluation", "language", "parity", "goal", "tool-use", "context"]},
+        "severity": {"enum": ["fail", "soft", "review"]},
+        "protects": {"type": "array", "uniqueItems": true, "items": {"enum": ["claude", "codex", "opencode", "hermes"]}},
+        "source": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["url", "section", "verified"],
+              "additionalProperties": false,
+              "properties": {
+                "url": {"type": "string", "pattern": "^https://[^\\s]+$"},
+                "section": {"type": "string", "minLength": 1},
+                "verified": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}
+              }
+            },
+            {
+              "type": "object",
+              "required": ["house"],
+              "additionalProperties": false,
+              "properties": {"house": {"type": "string", "minLength": 1}}
+            }
+          ]
+        },
+        "check": {"$ref": "#/$defs/node"},
+        "message": {"type": "string", "minLength": 1},
+        "fix": {"type": "string", "minLength": 1}
+      }
+    },
+    "node": {
+      "type": "object",
+      "required": ["op"],
+      "properties": {
+        "op": {"enum": ["schema", "equals", "subset", "set_equals", "contains_text", "regex", "not_regex", "file_exists", "file_absent", "count", "max_bytes", "max_lines", "all", "any", "not", "when"]}
+      },
+      "allOf": [
+        {"if": {"properties": {"op": {"const": "schema"}}}, "then": {"$ref": "#/$defs/op-schema"}},
+        {"if": {"properties": {"op": {"enum": ["equals", "subset", "set_equals"]}}}, "then": {"$ref": "#/$defs/op-pair"}},
+        {"if": {"properties": {"op": {"const": "contains_text"}}}, "then": {"$ref": "#/$defs/op-contains-text"}},
+        {"if": {"properties": {"op": {"enum": ["regex", "not_regex"]}}}, "then": {"$ref": "#/$defs/op-regex"}},
+        {"if": {"properties": {"op": {"enum": ["file_exists", "file_absent"]}}}, "then": {"$ref": "#/$defs/op-file"}},
+        {"if": {"properties": {"op": {"const": "count"}}}, "then": {"$ref": "#/$defs/op-count"}},
+        {"if": {"properties": {"op": {"enum": ["max_bytes", "max_lines"]}}}, "then": {"$ref": "#/$defs/op-max"}},
+        {"if": {"properties": {"op": {"enum": ["all", "any"]}}}, "then": {"$ref": "#/$defs/op-list"}},
+        {"if": {"properties": {"op": {"const": "not"}}}, "then": {"$ref": "#/$defs/op-not"}},
+        {"if": {"properties": {"op": {"const": "when"}}}, "then": {"$ref": "#/$defs/op-when"}}
+      ]
+    },
+    "selector": {"type": "string", "pattern": "^(frontmatter|json|toml|yaml|markdown|text|glob|path):"},
+    "normalize": {"type": "array", "uniqueItems": true, "items": {"enum": ["strip", "nfkc"]}},
+    "relpath": {"type": "string", "minLength": 1},
+    "count": {"type": "integer", "minimum": 0},
+    "operand": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["sel"],
+          "additionalProperties": false,
+          "properties": {"sel": {"$ref": "#/$defs/selector"}, "normalize": {"$ref": "#/$defs/normalize"}}
+        },
+        {"type": "object", "required": ["value"], "additionalProperties": false, "properties": {"value": true}}
+      ]
+    },
+    "op-schema": {
+      "type": "object",
+      "required": ["op", "sel", "schema"],
+      "additionalProperties": false,
+      "properties": {
+        "op": true,
+        "sel": {"$ref": "#/$defs/selector"},
+        "normalize": {"$ref": "#/$defs/normalize"},
+        "schema": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*\\.schema\\.json$"}
+      }
+    },
+    "op-pair": {
+      "type": "object",
+      "required": ["op", "left", "right"],
+      "additionalProperties": false,
+      "properties": {"op": true, "left": {"$ref": "#/$defs/operand"}, "right": {"$ref": "#/$defs/operand"}}
+    },
+    "op-contains-text": {
+      "type": "object",
+      "required": ["op", "sel", "text"],
+      "additionalProperties": false,
+      "properties": {
+        "op": true,
+        "sel": {"$ref": "#/$defs/selector"},
+        "normalize": {"$ref": "#/$defs/normalize"},
+        "text": {"type": "string", "minLength": 1}
+      }
+    },
+    "op-regex": {
+      "type": "object",
+      "required": ["op", "sel", "pattern"],
+      "additionalProperties": false,
+      "properties": {
+        "op": true,
+        "sel": {"$ref": "#/$defs/selector"},
+        "normalize": {"$ref": "#/$defs/normalize"},
+        "pattern": {"type": "string", "x-python-regex": true}
+      }
+    },
+    "op-file": {
+      "type": "object",
+      "required": ["op", "path"],
+      "additionalProperties": false,
+      "properties": {"op": true, "path": {"$ref": "#/$defs/relpath"}}
+    },
+    "op-count": {
+      "type": "object",
+      "required": ["op", "sel"],
+      "additionalProperties": false,
+      "anyOf": [{"required": ["min"]}, {"required": ["max"]}],
+      "x-le": ["min", "max"],
+      "properties": {
+        "op": true,
+        "sel": {"$ref": "#/$defs/selector"},
+        "normalize": {"$ref": "#/$defs/normalize"},
+        "min": {"$ref": "#/$defs/count"},
+        "max": {"$ref": "#/$defs/count"}
+      }
+    },
+    "op-max": {
+      "type": "object",
+      "required": ["op", "path", "max"],
+      "additionalProperties": false,
+      "properties": {"op": true, "path": {"$ref": "#/$defs/relpath"}, "max": {"$ref": "#/$defs/count"}}
+    },
+    "op-list": {
+      "type": "object",
+      "required": ["op", "of"],
+      "additionalProperties": false,
+      "properties": {"op": true, "of": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/node"}}}
+    },
+    "op-not": {
+      "type": "object",
+      "required": ["op", "check"],
+      "additionalProperties": false,
+      "properties": {"op": true, "check": {"$ref": "#/$defs/node"}}
+    },
+    "op-when": {
+      "type": "object",
+      "required": ["op", "if", "then"],
+      "additionalProperties": false,
+      "properties": {"op": true, "if": {"$ref": "#/$defs/node"}, "then": {"$ref": "#/$defs/node"}}
+    }
+  }
+}

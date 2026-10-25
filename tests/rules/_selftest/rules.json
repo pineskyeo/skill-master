@@ -1,0 +1,22 @@
+{
+  "$schema": "../../../schemas/rules.schema.json",
+  "ruleset": "selftest",
+  "version": "1.0.0",
+  "rules": [
+    {
+      "id": "selftest-name-matches-folder",
+      "applies_to": ["skill", "agent"],
+      "category": "structure",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "Rule fixture selftest of unit A1 (plan.md lines 562 and 584): proves tests/test_rule_fixtures.py before any real rule exists."},
+      "check": {
+        "op": "equals",
+        "left": {"sel": "frontmatter:#/name", "normalize": ["strip", "nfkc"]},
+        "right": {"sel": "path:basename", "normalize": ["nfkc"]}
+      },
+      "message": "name '{left}' must equal the folder name '{right}'",
+      "fix": "Rename the folder or the frontmatter name so they are identical."
+    }
+  ]
+}
