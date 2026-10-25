@@ -764,7 +764,11 @@ class TestToolCoverage(T.Base):
 
     def test_registration_does_not_know_about_coverage(self):
         import inspect
-        for fn in (se.register, se.approve, se.approval_ok, se.gate_hash):
+        fns = (se.register, se._register_with, se.registration_record, se.registration_hash, se.registration_verdict,
+               se.approve, se._approve_with, se.approve_show, se.approvals_data, se.approval_record, se.approval_verdict,
+               se.approval_ok, se.gate_hash)
+        assert_record_readers_listed(self, fns)
+        for fn in fns:
             src = inspect.getsource(fn)
             for word in ("tool_coverage", "coverage", "parity", "opencode", "hermes"):
                 self.assertNotIn(word, src, (fn.__name__, word))
@@ -775,6 +779,29 @@ class TestToolCoverage(T.Base):
         se.load_eval_set(E.p("golden", "skills", "csv-cleaner"))
         after = {f: open(os.path.join(base, f), "rb").read() for f in before}
         self.assertEqual(before, after)
+
+RECORD_FILES = ("approvals.json", "registration.json")
+
+
+def record_file_functions():
+    """Qualified names of the skill_eval functions and methods whose source names approvals.json or registration.json."""
+    import inspect
+    own = lambda o: getattr(o, "__module__", None) == se.__name__
+    fns = [f for _, f in inspect.getmembers(se, inspect.isfunction) if own(f)]
+    for _, c in inspect.getmembers(se, inspect.isclass):
+        if own(c): fns += [getattr(f, "__func__", f) for f in vars(c).values()]
+    return {f.__qualname__ for f in fns if inspect.isfunction(f) and any(n in inspect.getsource(f) for n in RECORD_FILES)}
+
+
+def assert_record_readers_listed(case, fns):
+    """A source guard over a hand-written function list also covers every function that reads or writes the records."""
+    found = record_file_functions()
+    case.assertLessEqual({"approvals_data", "_approve_with", "registration_verdict", "_register_with"}, found,
+                         "control: the scan finds the known readers and writers")
+    case.assertEqual(found - {f.__qualname__ for f in fns}, set(),
+                     "skill_eval functions that read or write approvals.json or registration.json are missing from the "
+                     "guard's list")
+
 
 if __name__ == "__main__":
     unittest.main()

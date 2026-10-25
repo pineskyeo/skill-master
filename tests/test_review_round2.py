@@ -88,8 +88,7 @@ class TestRuleReviewBoundToContent(P.CliBase):
         root = os.path.join(self.tmp, label); ws = os.path.join(root, "ws"); os.makedirs(ws)
         d = T.make_skill(root, evals=before if rel == "evals/evals.json" else None,
                          extra_files=None if rel == "evals/evals.json" else {rel: before})
-        T.wjson(os.path.join(ws, "approvals.json"),
-                {"rule_review": {"sha256": se.rule_review_hash(d), "by": "tester", "at": "2026-10-19T00:00:00+09:00"}})
+        self.assertEqual(se.approve("rule_review", se.load_eval_set(d)[0], ws)["sha256"], se.rule_review_hash(d))
         self.assertEqual(self.cli("validate", d, "--workspace", ws)[0], 0, label)
         fp = os.path.join(d, *rel.split("/"))
         if rel == "evals/evals.json": T.wjson(fp, after)
@@ -228,9 +227,9 @@ class TestRuleReviewCoversAgentSources(P.AgentBase, unittest.TestCase):
         d, _ = self.agent(md=md)
         if scenario is not None: E.wtext(os.path.join(d, "scenarios", "01.json"), json.dumps(scenario, indent=1))
         self.ws = os.path.join(self.tmp, "ws"); os.makedirs(self.ws)
-        T.wjson(os.path.join(self.ws, "approvals.json"),
-                {"rule_review": {"sha256": se.rule_review_hash(d), "by": "tester", "at": "2026-10-19T00:00:00+09:00"}})
         self.spec, _ = se.load_eval_set(d)
+        T.install_test_approver(self)
+        self.assertEqual(se.approve("rule_review", self.spec, self.ws)["sha256"], se.rule_review_hash(d))
         self.assertEqual(se.rule_review_problems(self.spec, self.ws), [])
         return d
 

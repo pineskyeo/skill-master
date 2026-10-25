@@ -126,8 +126,7 @@ class TestCodexReviewReachesTheRuleReviewGate(P.CliBase):
         _, out, _ = self.cli("validate", d, "--workspace", self.ws)
         self.assertIn("RULE REVIEW NOT RECORDED", out); self.assertIn("review: needs-review: [codex] " + READ_ONLY, out)
         os.makedirs(self.ws)
-        T.wjson(os.path.join(self.ws, "approvals.json"),
-                {"rule_review": {"sha256": se.rule_review_hash(d), "by": "tester", "at": "2026-10-19T00:00:00+09:00"}})
+        self.assertEqual(se.approve("rule_review", spec, self.ws)["sha256"], se.rule_review_hash(d))
         self.assertEqual(se.rule_review_problems(spec, self.ws), [])
         self.assertIn("rule review decision recorded for these exact findings", self.cli("validate", d, "--workspace", self.ws)[1])
         self.agent_dir(P.AGENT_MD.replace("[glob, grep, read_file]", "[glob, grep, read_file, bash]"))

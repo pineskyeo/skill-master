@@ -1,15 +1,91 @@
 """skill_eval.py tests. Every engine and grader here is mocked: subprocess is patched to fail for the whole module,
-so no claude/codex CLI and no model is ever called."""
-import contextlib, io, json, os, shutil, subprocess, sys, tempfile, unittest
+so no claude/codex CLI and no model is ever called. The human gate signs with a throwaway test key through
+keygen_runner, which starts only /usr/bin/ssh-keygen on files under the test-key folder."""
+import atexit, contextlib, io, json, os, re, shutil, subprocess, sys, tempfile, unittest
 from unittest import mock
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 import eva, skill_eval as se
 
 _patches = []
+REAL_POPEN = subprocess.Popen  # captured before any setUpModule patches subprocess
 
 def _forbidden(*a, **k):
     raise AssertionError("subprocess must not be called in skill_eval tests: %r" % (a[:1],))
+
+TEST_PRINCIPAL = "test-approver"
+TEST_PASSPHRASE = "throwaway-test-passphrase"
+TEST_START_PID = 4242
+TEST_PROCS = {TEST_START_PID: (1, "python3", "/usr/bin/python3"), 1: (0, "launchd", "/sbin/launchd")}
+NO_IDENTITIES = (1, b"The agent has no identities.\n", b"")
+AGENT_ENV = {"SSH_AUTH_SOCK": "/tmp/gate-test-agent.sock"}  # never a real socket: ssh_add is always faked
+
+def keygen_runner(root, calls=None):
+    """The approver's runner in tests: /usr/bin/ssh-keygen only, every -f inside root, started with the Popen captured
+    at import, so the module-wide subprocess patch stays strict."""
+    from engine import approvals
+    root = os.path.realpath(root)
+    def run(argv, input=None, new_session=True, timeout=30, env=None):
+        if argv[0] != approvals.SSH_KEYGEN: raise AssertionError("test runner refuses %r" % (argv[0],))
+        for i, x in enumerate(argv):
+            if x == "-f" and not os.path.realpath(argv[i + 1]).startswith(root + os.sep):
+                raise AssertionError("test runner refuses -f %s outside %s" % (argv[i + 1], root))
+        if calls is not None: calls.append(list(argv))
+        p = REAL_POPEN(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                       env=approvals.KEYGEN_ENV if env is None else env, start_new_session=new_session)
+        try:
+            out, err = p.communicate(input, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            p.kill(); p.communicate(); raise
+        return p.returncode, out, err
+    return run
+
+def make_key(folder, name, passphrase):
+    """A throwaway ed25519 key (bcrypt rounds 1, so tests stay fast); returns (private key path, 'type base64')."""
+    from engine import approvals
+    path = os.path.join(folder, name)
+    p = REAL_POPEN([approvals.SSH_KEYGEN, "-q", "-t", "ed25519", "-a", "1", "-N", passphrase, "-C", name, "-f", path],
+                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=approvals.KEYGEN_ENV)
+    _, err = p.communicate(timeout=30)
+    if p.returncode != 0: raise AssertionError("ssh-keygen could not make a test key: %r" % err)
+    with open(path + ".pub", encoding="ascii") as f: kt, b64 = f.read().split()[:2]
+    return path, "%s %s" % (kt, b64)
+
+def signers_line(principal, pub):
+    return '%s namespaces="skill-master-approval" %s\n' % (principal, pub)
+
+_KEYS = {}
+
+def shared_keys():
+    """One throwaway approver key and signers file per test process, under /tmp, removed at exit."""
+    if not _KEYS:
+        d = tempfile.mkdtemp(prefix="gate-keys-", dir="/tmp")
+        atexit.register(shutil.rmtree, d, True)
+        key, pub = make_key(d, "approver", TEST_PASSPHRASE)
+        signers = os.path.join(d, "allowed_signers")
+        with open(signers, "w", encoding="ascii") as f: f.write(signers_line(TEST_PRINCIPAL, pub))
+        _KEYS.update(dir=d, key=key, pub=pub, signers=signers)
+    return _KEYS
+
+def type_challenge(prompt):
+    m = re.search(r"type ([A-Z0-9]{6}) to sign", prompt)
+    return m.group(1) + "\n" if m else "\n"
+
+def gate_approver(**kw):
+    from engine import approvals
+    k = shared_keys()
+    args = dict(signers=k["signers"], key=k["key"], home=k["dir"], environ=AGENT_ENV, read_proc=approvals.table_reader(TEST_PROCS),
+                start_pid=TEST_START_PID, ssh_add=lambda: NO_IDENTITIES, read_line=type_challenge, write=lambda s: None,
+                run=keygen_runner(k["dir"]), passphrase=TEST_PASSPHRASE)
+    args.update(kw)
+    return approvals.Approver(**args)
+
+def install_test_approver(case, **kw):
+    """Every in-process approve, register and --live start in this case signs with the test key; the TTY probe reads true."""
+    from engine import approvals
+    for pt in (mock.patch.object(approvals, "is_tty", lambda fd: True),
+               mock.patch.dict(se.APPROVER, {"it": gate_approver(**kw)})):
+        pt.start(); case.addCleanup(pt.stop)
 
 def setUpModule():
     for name in ("run", "Popen", "call", "check_call", "check_output"):
@@ -158,6 +234,7 @@ class Base(unittest.TestCase):
         ms = mock.patch.object(se, "CLAUDE_MANAGED_SETTINGS", (self.managed,)); ms.start(); self.addCleanup(ms.stop)
         self.mdm = os.path.join(self.tmp, "mdm")  # never the machine's real /Library/Managed Preferences
         mp = mock.patch.object(se, "CLAUDE_MDM_PLIST_DIR", self.mdm); mp.start(); self.addCleanup(mp.stop)
+        install_test_approver(self)
     def tearDown(self): shutil.rmtree(self.tmp)
     def spec(self, **kw):
         spec, problems = se.load_eval_set(make_skill(self.tmp, **kw))
@@ -531,9 +608,9 @@ class TestApprovalsAndRegistration(Base):
     def test_hash_bound_approvals(self):
         spec, _ = self.spec()
         self.assertFalse(se.approval_ok("eval_set", spec, self.ws))
-        with self.assertRaises(se.EvalError): se.approve("requirements", spec, self.ws, "pinesky")
+        with self.assertRaises(se.EvalError): se.approve("requirements", spec, self.ws)
         os.makedirs(self.ws); write(os.path.join(self.ws, "requirements.md"), "goal")
-        se.approve("requirements", spec, self.ws, "pinesky"); se.approve("eval_set", spec, self.ws, "pinesky")
+        se.approve("requirements", spec, self.ws); se.approve("eval_set", spec, self.ws)
         self.assertTrue(se.approval_ok("requirements", spec, self.ws)); self.assertTrue(se.approval_ok("eval_set", spec, self.ws))
         wjson(os.path.join(spec["skill_dir"], "evals", "trigger_evals.json"), TRIGGERS[::-1])
         self.assertFalse(se.approval_ok("eval_set", spec, self.ws))  # edit invalidates approval
@@ -545,11 +622,11 @@ class TestApprovalsAndRegistration(Base):
         self.assertEqual(problems, [])
         self.assertIn(("files:evals/files/in.csv", os.path.join(spec["skill_dir"], "evals", "files", "in.csv")),
                       se.eval_set_files(spec["skill_dir"]))
-        se.approve("eval_set", spec, self.ws, "me")
+        se.approve("eval_set", spec, self.ws)
         self.assertTrue(se.approval_ok("eval_set", spec, self.ws))
         write(os.path.join(spec["skill_dir"], "evals", "files", "in.csv"), "a,b\n1,3\n")
         self.assertFalse(se.approval_ok("eval_set", spec, self.ws))  # fixture edit invalidates approval
-        se.approve("eval_set", spec, self.ws, "me")
+        se.approve("eval_set", spec, self.ws)
         os.remove(os.path.join(spec["skill_dir"], "evals", "files", "in.csv"))
         self.assertFalse(se.approval_ok("eval_set", spec, self.ws))
 
@@ -570,8 +647,8 @@ class TestApprovalsAndRegistration(Base):
     def test_register_with_problems_needs_approval(self):
         spec = self.run_report(True)
         with self.assertRaises(se.EvalError): se.register(spec, self.ws)
-        se.approve("registration", spec, self.ws, "pinesky")
-        self.assertEqual(se.register(spec, self.ws)["approval"]["by"], "pinesky")
+        se.approve("registration", spec, self.ws)
+        self.assertEqual(se.register(spec, self.ws)["approval"]["principal"], TEST_PRINCIPAL)
 
 class TestLoop(Base):
     def spec(self, **kw):
@@ -640,8 +717,8 @@ class TestCLI(Base):
         rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "100", "--engines", "claude")
         self.assertEqual(rc, 2); self.assertIn("gate requirements not approved", err)
         os.makedirs(self.ws); write(os.path.join(self.ws, "requirements.md"), "goal")
-        self.cli("approve", d, "--workspace", self.ws, "--gate", "requirements", "--by", "pinesky")
-        self.cli("approve", d, "--workspace", self.ws, "--gate", "eval_set", "--by", "pinesky")
+        self.cli("approve", d, "--workspace", self.ws, "--gate", "requirements")
+        self.cli("approve", d, "--workspace", self.ws, "--gate", "eval_set")
         rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "100")
         self.assertEqual(rc, 2); self.assertIn("--strict-budget (default)", err)  # round 6: default engines include codex
         rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "100", "--no-strict-budget")
@@ -654,7 +731,7 @@ class TestCLI(Base):
     def approved_skill(self, **kw):
         d = make_skill(self.tmp, **kw)
         os.makedirs(self.ws, exist_ok=True); write(os.path.join(self.ws, "requirements.md"), "goal")
-        for g in ("requirements", "eval_set"): self.cli("approve", d, "--workspace", self.ws, "--gate", g, "--by", "me")
+        for g in ("requirements", "eval_set"): self.cli("approve", d, "--workspace", self.ws, "--gate", g)
         return d
 
     def test_live_run_with_mocked_exec(self):
@@ -725,7 +802,7 @@ class TestCLI(Base):
             rc, _, err = self.cli(cmd, d, "--workspace", self.ws, "--live", "--budget-usd", "100", "--engines", "claude", *extra)
             self.assertEqual(rc, 2, cmd); self.assertIn("gate requirements not approved", err)
         write(os.path.join(self.ws, "requirements.md"), "goal")
-        for g in ("requirements", "eval_set"): self.cli("approve", d, "--workspace", self.ws, "--gate", g, "--by", "me")
+        for g in ("requirements", "eval_set"): self.cli("approve", d, "--workspace", self.ws, "--gate", g)
         # 2000 golden examples x (12000 x 2 + 800 x 10) / 1e6 = $64 > $10
         rc, _, err = self.cli("calibrate", d, "--workspace", self.ws, "--live", "--budget-usd", "10", "--golden", gp)
         self.assertEqual(rc, 2); self.assertIn("estimate $64.00 exceeds budget $10.00", err)

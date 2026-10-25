@@ -6,15 +6,18 @@ scripts/run_eval.py) and agentskills.io (evaluating-skills, optimizing-descripti
 in the README.md section on the skill-eval harness. Python 3.9 standard library only.
 
 Safety: no model or CLI is ever executed unless the command line has --live AND a finite --budget-usd, the approval
-gates pass, and the cost estimate fits the budget. Without --live every command is a dry run: it prints the
+gates pass, the cost estimate fits the budget, and a person signs the start at a terminal (engine/approvals.py,
+references/approval-gates.md). Without --live every command is a dry run: it prints the
 plan and the estimated cost. Engines and graders take an injectable exec_fn so tests run fully mocked.
 Auth is subscription only (Claude Code claude.ai OAuth, Codex ChatGPT login; README "Subscription auth"): API-key
 variables are refused and scrubbed from every child, and costs are API-equivalent (usage x API prices), not spend.
 
 Usage: python3 skill_eval.py <validate|estimate|plan|run|grade|calibrate|report|approve|register|snapshot|loop> <skill> ...
+       python3 skill_eval.py <approver-check|check-builtin-plugins>
        (also reachable as: python3 eva.py eval <subcommand> ...)
 """
 import argparse, csv, datetime, errno, hashlib, json, math, mmap, os, platform, random, re, shlex, shutil, subprocess, sys, tempfile, time
+from engine import approvals
 
 LAYERS = ("static", "llm", "human")
 BASELINES = {"none": "without_skill", "old": "old_skill"}  # skill-creator configuration names
@@ -325,6 +328,12 @@ def full_prompt(case):
 
 # ---------- engines ----------
 _LIVE = {"on": False}
+
+def enable_live(grant):
+    """The only way main() turns live mode on: a --live start signed and verified at the human gate."""
+    if not (isinstance(grant, approvals.Grant) and grant.kind == "live"):
+        raise EvalError("live mode needs a --live start signed at the human gate")
+    _LIVE["on"] = True
 
 def live_exec(cmd, cwd, timeout, env=None):
     """The only place a real CLI is started. Refuses unless main() enabled live mode (--live + --budget-usd + gates)."""
@@ -1955,9 +1964,12 @@ def rule_review_problems(spec, ws):
     exactly these findings and the bytes of eva.review_sources: changing a matcher, a metadata field, AGENT.md or a Codex or
     OpenCode wrapper invalidates the decision."""
     items = rule_review_items(spec["skill_dir"])
-    if not items or approval_ok("rule_review", spec, ws): return []
-    return ["rule review not recorded: %d finding(s) need a human decision (%s); read them with `validate`, then run `approve "
-            "--gate rule_review --by NAME` (the decision is bound to these exact findings)" % (len(items), "; ".join(i[:200] for i in items))]
+    if not items: return []
+    v = approval_verdict("rule_review", spec, ws)
+    if v.status == "approved": return []
+    return ["rule review not recorded%s: %d finding(s) need a human decision (%s); read them with `validate`, then run "
+            "`approve --gate rule_review` at a terminal (the signed decision is bound to these exact findings)"
+            % ("" if v.status == "missing" else " (%s)" % v.status, len(items), "; ".join(i[:200] for i in items))]
 
 def eval_set_files(skill_dir):
     """[(label, path)] covered by the eval_set approval: evals.json, trigger_evals.json and every evals[].files fixture."""
@@ -1970,19 +1982,64 @@ def eval_set_files(skill_dir):
                    for f in (c.get("files") if isinstance(c.get("files"), list) else []) if isinstance(f, str)})
     return out + [("files:" + f, os.path.join(skill_dir, f)) for f in refs]
 
-def approval_ok(gate, spec, ws):
-    a = (rjson(os.path.join(ws, "approvals.json"), {}) or {}).get(gate)
-    h = gate_hash(gate, spec, ws)
-    return bool(a and h and a.get("sha256") == h)
+APPROVER = {"it": approvals.cli_approver()}  # the human gate (engine/approvals.py); in-process tests replace it
 
-def approve(gate, spec, ws, by):
-    h = gate_hash(gate, spec, ws)
-    if not h: raise EvalError("nothing to approve for %s (file missing)" % gate)
+def approvals_data(ws):
+    """approvals.json as a dict, {} when the file is absent; EvalError when it is JSON but not an object."""
     fp = os.path.join(ws, "approvals.json")
-    data = rjson(fp, {}) or {}
-    data[gate] = {"sha256": h, "by": by, "at": now_iso()}
-    wjson(fp, data)
-    return data[gate]
+    data = rjson(fp, {})
+    if not isinstance(data, dict): raise EvalError("%s is not a JSON object (it holds %s)" % (fp, json.dumps(data)[:40]))
+    return data
+
+def approval_record(gate, spec, ws):
+    """(record, verdict) of one approvals.json gate, read once."""
+    try: rec = approvals_data(ws).get(gate)
+    except EvalError as ex: return None, approvals.Verdict("invalid", None, str(ex))
+    return rec, APPROVER["it"].verdict(rec, "approve", gate, spec["skill_name"], gate_hash(gate, spec, ws))
+
+def approval_verdict(gate, spec, ws):
+    return approval_record(gate, spec, ws)[1]
+
+def approval_ok(gate, spec, ws):
+    return approval_verdict(gate, spec, ws).status == "approved"
+
+def approval_label(v):
+    if v.status == "approved": return "approved by %s" % v.principal
+    if v.status == "missing": return "NOT APPROVED"
+    return "NOT APPROVED (%s)" % (v.status + (": " + v.reason if v.status == "invalid" else ""))
+
+def approve(gate, spec, ws):
+    return _approve_with(gate, lambda: (spec, ws))
+
+def _approve_with(gate, load):
+    """Signs gate_hash(gate) at the human gate, then writes only that key of approvals.json."""
+    st = {}
+    def prepare():
+        spec, ws = load()
+        h = gate_hash(gate, spec, ws)
+        if not h: raise EvalError("nothing to approve for %s (file missing)" % gate)
+        try: approvals_data(ws)
+        except ValueError as ex: raise EvalError("%s/approvals.json is not valid JSON (%s); nothing was signed" % (ws, ex))
+        except EvalError as ex: raise EvalError("%s; nothing was signed" % ex)
+        st.update(ws=ws)
+        return approvals.Prepared(spec["skill_name"], h, approve_show(gate, spec, ws))
+    grant = APPROVER["it"].sign("approve", gate, prepare)
+    data = approvals_data(st["ws"])
+    data[gate] = grant.record
+    wjson(os.path.join(st["ws"], "approvals.json"), data)
+    return grant.record
+
+def approve_show(gate, spec, ws):
+    """What the person approves, printed before the challenge."""
+    if gate == "requirements": return ["requirements: %s" % os.path.join(ws, "requirements.md")]
+    if gate == "eval_set":
+        return ["eval set file %s: %s" % (label, sha256_files(p)[:12] if os.path.isfile(p) else "<missing>")
+                for label, p in eval_set_files(spec["skill_dir"])]
+    if gate == "rule_review": return ["rule review finding: " + x[:300] for x in rule_review_items(spec["skill_dir"])]
+    m = re.match(r"iteration-(\d+)$", gate)
+    n = int(m.group(1)) if m else (iterations(ws) or [None])[-1]
+    g = rjson(os.path.join(ws, "iteration-%s" % n, "gate.json")) or {}
+    return ["iteration-%s gate problems: %s" % (n, g.get("problems") or "none recorded")]
 
 def preflight(spec, engines, run_root=None, home=None):
     """Read-only, blocks --live (fail closed). Runs execute in per-run sandboxes under run_root (README "Eval
@@ -2874,17 +2931,47 @@ def registration_record(spec, ws):
                         "registering" % (n, (m.get("skill_sha256") or "<unrecorded>")[:12], now_skill[:12]))
     if not m.get("eval_set_sha256") or m["eval_set_sha256"] != now_evals:
         raise EvalError("iteration-%d used a different eval set than the one on disk; re-run the eval" % n)
-    if gate["needs_approval"] and not approval_ok("registration", spec, ws):
-        raise EvalError("iteration-%d has problems %s; registration needs `approve --gate registration`" % (n, gate["problems"]))
+    approval = "auto"
+    if gate["needs_approval"]:
+        approval, v = approval_record("registration", spec, ws)
+        if v.status != "approved":
+            raise EvalError("iteration-%d has problems %s; registration needs `approve --gate registration` (%s)"
+                            % (n, gate["problems"], "missing" if v.status == "missing" else "%s: %s" % (v.status, v.reason)))
     return {"skill_name": spec["skill_name"], "skill_path": spec["skill_dir"], "iteration": n,
             "benchmark_sha256": gate_hash("iteration-%d" % n, spec, ws), "skill_sha256": now_skill,
             "eval_set_sha256": now_evals,
             "skill_md_sha256": sha256_files(os.path.join(spec["skill_dir"], "SKILL.md")), "registered_at": now_iso(),
-            "approval": (rjson(os.path.join(ws, "approvals.json"), {}) or {}).get("registration") if gate["needs_approval"] else "auto"}
+            "approval": approval}
 
-def register(spec, ws, by=None):
-    rec = registration_record(spec, ws)
-    wjson(os.path.join(ws, "registration.json"), rec)
+REGISTRATION_SIGNED = ("skill_name", "iteration", "benchmark_sha256", "skill_sha256", "eval_set_sha256", "skill_md_sha256")
+
+def registration_hash(rec):
+    """What a register signature covers: the identity fields of the registration record."""
+    if not all(k in rec for k in REGISTRATION_SIGNED): return None
+    return hashlib.sha256(json.dumps({k: rec[k] for k in REGISTRATION_SIGNED}, sort_keys=True,
+                                     separators=(",", ":")).encode("utf-8")).hexdigest()
+
+def registration_verdict(spec, ws):
+    rec = rjson(os.path.join(ws, "registration.json"))
+    if not isinstance(rec, dict): return APPROVER["it"].verdict(None, "register", "registration", spec["skill_name"], None)
+    return APPROVER["it"].verdict(rec.get("signed"), "register", "registration", spec["skill_name"], registration_hash(rec))
+
+def register(spec, ws):
+    return _register_with(lambda: (spec, ws))
+
+def _register_with(load):
+    st = {}
+    def prepare():
+        spec, ws = load()
+        rec = registration_record(spec, ws)
+        st.update(rec=rec, ws=ws)
+        return approvals.Prepared(spec["skill_name"], registration_hash(rec),
+                                  ["register %s=%s" % (k, rec[k]) for k in REGISTRATION_SIGNED] +
+                                  ["register approval: %s" % ("auto (clean gate)" if rec["approval"] == "auto" else
+                                                              "signed registration gate")])
+    grant = APPROVER["it"].sign("register", "registration", prepare)
+    rec = dict(st["rec"], signed=grant.record)
+    wjson(os.path.join(st["ws"], "registration.json"), rec)
     return rec
 
 class ClaudeBuilder:
@@ -3049,14 +3136,14 @@ def plan_text(spec, problems, a, engines, ws, est):
              sum(not q["should_trigger"] for q in trig))]
     L += ["validation problems (%d):" % len(problems)] + ["  - " + p for p in problems]
     import eva
+    rr = approval_verdict("rule_review", spec, ws) if rule_review_items(spec["skill_dir"]) else None
     L += ["rule review (English-only / parity needs-review findings): " + (
-              "none" if not rule_review_items(spec["skill_dir"]) else
-              "RECORDED" if approval_ok("rule_review", spec, ws) else "NOT RECORDED (blocks --live and the loop)"),
+              "none" if rr is None else "RECORDED (signed by %s)" % rr.principal if rr.status == "approved" else
+              "NOT RECORDED (%sblocks --live and the loop)" % ("" if rr.status == "missing" else rr.status + "; ")),
           "multi-tool parity (static, eva.py): " + eva.parity_line(eva.parity_status(spec["skill_dir"])),
           "tool coverage (dynamic): " + coverage_line(tool_coverage([e.name for e in engines]))]
     L += ["approval gates: requirements=%s, eval_set=%s" % (
-        "approved" if approval_ok("requirements", spec, ws) else "NOT APPROVED",
-        "approved" if approval_ok("eval_set", spec, ws) else "NOT APPROVED")]
+        approval_label(approval_verdict("requirements", spec, ws)), approval_label(approval_verdict("eval_set", spec, ws)))]
     L += ["preflight problems (block --live):"] + ["  - " + w for w in preflight(spec, [e.name for e in engines], a.run_root)]
     names = [e.name for e in engines]
     notes = claude_shared_skill_notes(claude_config_dir()) if "claude" in names else []
@@ -3176,7 +3263,10 @@ def check_live_gates(a, spec, problems, ws, n, engines, tokens, prices, budget_l
                  % (a.grader_model, ", ".join(same)))
     for x in rule_review_problems(spec, ws): fail(x)
     for g in ("requirements", "eval_set"):
-        if not approval_ok(g, spec, ws): fail("gate %s not approved (write %s/requirements.md, then `approve --gate %s`)" % (g, ws, g))
+        v = approval_verdict(g, spec, ws)
+        if v.status != "approved":
+            fail("gate %s not approved%s (write %s/requirements.md, then `approve --gate %s` at a terminal)"
+                 % (g, "" if v.status == "missing" else " (%s)" % v.status, ws, g))
     live_est = live_estimate(a, spec, ws, n, engines, tokens, prices, iterations_left)
     if live_est["unpriced_models"]: fail("no price for %s; pass --price" % live_est["unpriced_models"])
     if a.cmd in ("run", "loop"):
@@ -3228,6 +3318,17 @@ def live_dry_run(a, spec, problems, ws, n, engines, tokens, prices):
                 print("claude --disallowedTools (with_skill and without_skill): Monitor PowerShell")
     print("live command: " + shlex.join(["python3", "skill_eval.py"] + [x for x in a.argv if x != "--dry-run"]))
     return 3 if fails else 0
+
+def live_plan_hash(a, spec, ws, builder_text=None):
+    """What a --live signature covers next to the budget: the exact command line, the workspace, the skill folder bytes,
+    the approved inputs, and the bytes of every file the command reads through its options."""
+    golden, old = getattr(a, "golden", None), getattr(a, "old_skill", None)
+    obj = {"format": 1, "argv": a.argv, "workspace": ws, "skill_sha256": skill_tree_hash(spec["skill_dir"]),
+           "eval_set_sha256": gate_hash("eval_set", spec, ws), "requirements_sha256": gate_hash("requirements", spec, ws),
+           "builder_prompt_sha256": hashlib.sha256(builder_text.encode("utf-8")).hexdigest() if builder_text else None,
+           "golden_sha256": sha256_files(golden) if golden else None,
+           "old_skill_sha256": skill_tree_hash(old) if old and os.path.isdir(old) else None}
+    return hashlib.sha256(json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("ascii")).hexdigest()
 
 def spec_counts(spec, a):
     """Counts from the eval set; a (argparse namespace) may override them for estimate/plan only (a=None: no overrides)."""
@@ -3294,12 +3395,14 @@ def build_parser():
             s.add_argument("--builder-model", default=DEFAULT_BUILDER_MODEL)
             s.add_argument("--max-iterations", type=int, default=MAX_AUTO_ITERATIONS)
             s.add_argument("--golden")
-    s = sp.add_parser("approve"); common(s, False)
-    s.add_argument("--gate", required=True); s.add_argument("--by", required=True)
+    s = sp.add_parser("approve", help="sign one gate at a terminal (engine/approvals.py; references/approval-gates.md)")
+    common(s, False); s.add_argument("--gate", required=True)
     s = sp.add_parser("register"); common(s, False)
     s = sp.add_parser("snapshot"); common(s, False)
     sp.add_parser("check-builtin-plugins", help="free: `claude --settings <launch settings> plugin list --json` and "
                   "the enabled state of every @builtin plugin (no model call; loaded skills are not shown)")
+    sp.add_parser("approver-check", help="the approver key needs a passphrase and is not loaded in ssh-agent; the "
+                  "approvers file lists it (~/.config/skill-master)")
     return p
 
 def main(argv=None):
@@ -3308,11 +3411,17 @@ def main(argv=None):
     if a.cmd == "check-builtin-plugins":
         rc, lines = builtin_plugin_check()
         print("\n".join(lines)); return rc
+    if a.cmd == "approver-check":
+        probs = APPROVER["it"].key_problems()
+        print("\n".join("approver-check: " + x for x in probs) if probs else "approver-check: OK"); return 1 if probs else 0
     a.argv = list(sys.argv[1:] if argv is None else argv)
     if hasattr(a, "grader_engine") and a.grader_model is None and a.grader_engine == "claude":
         a.grader_model = DEFAULT_GRADER_MODEL
     try:
         return _dispatch(a)
+    except approvals.Refused as ex:
+        print(str(ex), file=sys.stderr)
+        return 2
     except EvalError as ex:
         print("error: %s" % ex, file=sys.stderr)
         return 2
@@ -3320,6 +3429,14 @@ def main(argv=None):
         _LIVE["on"] = False
 
 def _dispatch(a):
+    if a.cmd in ("approve", "register"):  # the human gate runs before the eval set is read, the same for every fixture
+        def load():
+            spec, _ = load_eval_set(a.skill)
+            return spec, os.path.realpath(a.workspace) if a.workspace else default_workspace(spec)
+        if a.cmd == "approve":
+            rec = _approve_with(a.gate, load); print("approved %s sha256=%s" % (a.gate, rec["sha256"][:12])); return 0
+        rec = _register_with(load); print("registered %s iteration-%d (%s)" % (rec["skill_name"], rec["iteration"],
+                                          "auto" if rec["approval"] == "auto" else "approved")); return 0
     spec, problems = load_eval_set(a.skill)
     if a.cmd == "validate":  # before the workspace: an unsafe SKILL.md name is reported, not raised
         print("\n".join(problems) if problems else "eval set OK: %d cases, %d trigger queries" % (len(spec["cases"]), len(spec["triggers"] or [])))
@@ -3338,11 +3455,6 @@ def _dispatch(a):
             print(("RULE REVIEW NOT RECORDED: " + unrecorded[0]) if unrecorded else "rule review decision recorded for these exact findings")
         return 1 if problems else 3 if unrecorded else 0
     ws = os.path.realpath(a.workspace) if a.workspace else default_workspace(spec)
-    if a.cmd == "approve":
-        rec = approve(a.gate, spec, ws, a.by); print("approved %s sha256=%s" % (a.gate, rec["sha256"][:12])); return 0
-    if a.cmd == "register":
-        rec = register(spec, ws); print("registered %s iteration-%d (%s)" % (rec["skill_name"], rec["iteration"],
-                                        "auto" if rec["approval"] == "auto" else "approved")); return 0
     if a.cmd == "snapshot":
         dst = os.path.join(ws, "skill-snapshot")
         if os.path.exists(dst): raise EvalError("%s exists" % dst)
@@ -3369,7 +3481,7 @@ def _dispatch(a):
     if a.cmd == "loop" and a.builder:
         raise EvalError("--builder (shell command) is not supported: it would run outside the metered budget. Use "
                         "--builder-prompt FILE (one capped `claude -p` call per iteration, charged to --budget-usd)")
-    if a.cmd == "loop" and a.builder_prompt: read_builder_prompt(a)
+    builder_text = read_builder_prompt(a) if a.cmd == "loop" and a.builder_prompt else None
     engines = make_engines(a, spec)
     if a.baseline == "old" and not a.old_skill and os.path.isdir(os.path.join(ws, "skill-snapshot")):
         a.old_skill = os.path.join(ws, "skill-snapshot")
@@ -3403,6 +3515,15 @@ def _dispatch(a):
         if n is None or not os.path.isdir(os.path.join(ws, "iteration-%d" % n)): raise EvalError("no iterations in %s" % ws)
     if a.dry_run:
         return live_dry_run(a, spec, problems, ws, n, engines, tokens, prices)
+    def prepare():  # every gate that starts no process, before the person is asked to sign
+        report = []
+        check_live_gates(a, spec, problems, ws, n, engines, tokens, prices, a.budget_usd, report=report)
+        fails = [r for r in report if r not in (AUTH_STATUS_SKIPPED, CODEX_AUTH_SKIPPED)]
+        if fails: raise EvalError(fails[0])
+        return approvals.Prepared(spec["skill_name"], live_plan_hash(a, spec, ws, builder_text),
+                                  ["live command: " + shlex.join(["python3", "skill_eval.py"] + a.argv), "workspace: " + ws])
+    grant = APPROVER["it"].sign("live", a.cmd, prepare, budget_usd=a.budget_usd)
+    print("signed %s --live by %s (plan sha256 %s)" % (a.cmd, grant.record["principal"], grant.sha256[:12]), file=sys.stderr)
     check_live_gates(a, spec, problems, ws, n, engines, tokens, prices, a.budget_usd)
     if a.cmd in ("run", "loop"):
         for e in engines:
@@ -3411,7 +3532,10 @@ def _dispatch(a):
                 print("WARNING: " + NO_STRICT_WARNING % e.name, file=sys.stderr)
     budget = Budget(a.budget_usd)
     grader = make_grader(a.grader_engine, a.grader_model, a.grader_effort, budget=budget, prices=prices, tokens=tokens)
-    _LIVE["on"] = True
+    if live_plan_hash(a, spec, ws, builder_text) != grant.sha256:
+        raise EvalError("the command's inputs changed after signing (skill folder, eval set, requirements or a file named "
+                        "by an option); nothing was run, sign again")
+    enable_live(grant)
     if a.cmd == "run":
         n = run_iteration(spec, ws, engines, a.runs, a.baseline, a.old_skill, budget, prices, tokens=tokens,
                           run_root=a.run_root)
@@ -3424,8 +3548,8 @@ def _dispatch(a):
         wjson(os.path.join(ws, "iteration-%d" % n, "calibration.json"), cal)
         print("agreement %.2f kappa %.2f (n=%d)" % (cal["agreement"], cal["kappa"], cal["n"])); return 0
     if a.cmd == "loop":
-        builder = ClaudeBuilder(read_builder_prompt(a), a.builder_model, budget, prices,
-                                skill_name=spec["skill_name"]) if a.builder_prompt else None
+        builder = ClaudeBuilder(builder_text, a.builder_model, budget, prices,
+                                skill_name=spec["skill_name"]) if builder_text else None
         def precheck(spec_now, left):
             _, probs = load_eval_set(spec_now["skill_dir"])
             try:

@@ -307,7 +307,11 @@ class TestIndexAndGolden(E.SkillMixin, unittest.TestCase):
     def test_register_approve_and_hashing_do_not_run_eva_checks(self):
         """Registration and approvals are hash-bound; the English rule must not invalidate a registered skill."""
         import inspect
-        for fn in (se.register, se.approve, se.approval_ok, se.gate_hash, se.skill_tree_hash):
+        fns = (se.register, se._register_with, se.registration_record, se.registration_hash, se.registration_verdict,
+               se.approve, se._approve_with, se.approve_show, se.approvals_data, se.approval_record, se.approval_verdict,
+               se.approval_ok, se.gate_hash, se.skill_tree_hash)
+        P.assert_record_readers_listed(self, fns)
+        for fn in fns:
             src = inspect.getsource(fn)
             for name in ("eva.check", "check_skill", "check_agent", "english_"):
                 self.assertNotIn(name, src, (fn.__name__, name))

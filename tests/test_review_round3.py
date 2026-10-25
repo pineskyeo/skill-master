@@ -140,9 +140,14 @@ class TestRegistrationDecision(unittest.TestCase):
         self.ws = os.path.join(self.tmp, "csv-cleaner-workspace")
         self.spec, _ = se.load_eval_set(self.skill)
         self.it = os.path.join(self.ws, "iteration-%d" % se.iterations(self.ws)[-1])
+        T.install_test_approver(self)
 
     def decide(self):
         return se.registration_record(self.spec, self.ws)
+
+    def test_the_unsigned_golden_registration_approval_refuses(self):
+        with self.assertRaises(se.EvalError) as cm: self.decide()
+        self.assertIn("registration needs `approve --gate registration` (unsigned", str(cm.exception))
 
     def snapshot(self):
         out = {}
@@ -152,14 +157,16 @@ class TestRegistrationDecision(unittest.TestCase):
 
     def test_the_decision_reproduces_the_recorded_registration_and_writes_nothing(self):
         reg = se.rjson(os.path.join(self.ws, "registration.json"))
+        signed = se.approve("registration", self.spec, self.ws)  # golden's own record is unsigned (H1)
         before = self.snapshot()
         rec = self.decide()
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(rec["skill_path"], os.path.realpath(self.skill))
-        drop = ("registered_at", "skill_path")
+        drop = ("registered_at", "skill_path", "approval")
         self.assertEqual({k: v for k, v in rec.items() if k not in drop}, {k: v for k, v in reg.items() if k not in drop})
         self.assertTrue(se.rjson(os.path.join(self.it, "gate.json"))["needs_approval"])
-        self.assertNotEqual(rec["approval"], "auto")
+        self.assertEqual(rec["approval"], signed)
+        self.assertEqual(reg["approval"]["sha256"], signed["sha256"])
 
     def test_a_byte_change_to_an_installed_skill_file_refuses(self):
         append(os.path.join(self.skill, "scripts", "clean.py"), "\n")

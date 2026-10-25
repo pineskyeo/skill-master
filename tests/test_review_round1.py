@@ -133,7 +133,7 @@ class TestReviewDecision(P.CliBase):
         d = self.skill(); os.makedirs(self.ws, exist_ok=True)
         rc, out, _ = self.cli("validate", d, "--workspace", self.ws)
         self.assertEqual(rc, 3, out); self.assertIn("RULE REVIEW NOT RECORDED", out)
-        rc, out, _ = self.cli("approve", d, "--workspace", self.ws, "--gate", "rule_review", "--by", "tester")
+        rc, out, _ = self.cli("approve", d, "--workspace", self.ws, "--gate", "rule_review")
         self.assertEqual(rc, 0, out); self.assertIn("approved rule_review", out)
         rc, out, _ = self.cli("validate", d, "--workspace", self.ws)
         self.assertEqual(rc, 0, out); self.assertIn("rule review decision recorded", out)
@@ -142,7 +142,7 @@ class TestReviewDecision(P.CliBase):
         d = T.make_skill(self.tmp, evals=T.evals_doc(human=False)); os.makedirs(self.ws, exist_ok=True)
         rc, out, _ = self.cli("validate", d, "--workspace", self.ws); self.assertEqual(rc, 0, out)
         spec, _ = se.load_eval_set(d)
-        with self.assertRaises(se.EvalError) as cm: se.approve("rule_review", spec, self.ws, "tester")
+        with self.assertRaises(se.EvalError) as cm: se.approve("rule_review", spec, self.ws)
         self.assertIn("nothing to approve", str(cm.exception))
 
     def test_live_gate_refuses_until_recorded_and_the_decision_is_bound_to_the_findings(self):
@@ -159,7 +159,7 @@ class TestReviewDecision(P.CliBase):
             with self.assertRaises(se.EvalError) as cm:
                 se.check_live_gates(a, spec, problems, self.ws, None, [], se.DEFAULT_TOKENS, {}, 100.0)
         self.assertIn("rule review not recorded", str(cm.exception))
-        se.approve("rule_review", spec, self.ws, "tester")
+        se.approve("rule_review", spec, self.ws)
         self.assertEqual(messages(), [])
         doc = matcher_doc(pattern=KO + "x")
         se.wjson(os.path.join(d, "evals", "evals.json"), doc)
@@ -172,8 +172,9 @@ class TestReviewDecision(P.CliBase):
         self.assertIn("rule review (English-only / parity needs-review findings): NOT RECORDED", out)
 
 class TestRegisteredGoldenSkillKeepsItsMeaning(unittest.TestCase):
-    """Every recorded approval of a copy of the registered golden csv-cleaner still verifies, through library functions
-    only: standing order 3 forbids calling register or approve in P1. The registration decision itself is tested in
+    """Every recorded approval of a copy of the registered golden csv-cleaner still matches its gate hash, through
+    library functions only: standing order 3 forbids calling register or approve. The records predate signed approvals
+    (H1), so each reads unsigned and none counts as approved. The registration decision itself is tested in
     tests/test_review_round3.py (TestRegistrationDecision)."""
     def setUp(self):
         self.tmp = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, self.tmp)
@@ -183,11 +184,12 @@ class TestRegisteredGoldenSkillKeepsItsMeaning(unittest.TestCase):
         self.ws = os.path.join(self.tmp, "csv-cleaner-workspace")
         self.approvals = se.rjson(os.path.join(self.ws, "approvals.json"))
 
-    def test_every_recorded_approval_still_verifies(self):
+    def test_every_recorded_hash_still_matches_and_reads_unsigned(self):
         self.assertEqual(sorted(self.approvals), ["eval_set", "iteration-4", "registration", "requirements"])
         for gate, rec in self.approvals.items():
             self.assertEqual(se.gate_hash(gate, self.spec, self.ws), rec["sha256"], gate)
-            self.assertTrue(se.approval_ok(gate, self.spec, self.ws), gate)
+            self.assertEqual(se.approval_verdict(gate, self.spec, self.ws).status, "unsigned", gate)
+            self.assertFalse(se.approval_ok(gate, self.spec, self.ws), gate)
 
 class TestReviewStopsTheLoop(T.Base):
     def spec(self, **kw):
@@ -215,7 +217,7 @@ class TestReviewStopsTheLoop(T.Base):
     def test_a_recorded_decision_for_exactly_those_findings_lets_the_loop_continue(self):
         doc = matcher_doc()
         spec, _ = self.spec(evals=doc); os.makedirs(self.ws, exist_ok=True)
-        se.approve("rule_review", spec, self.ws, "tester")
+        se.approve("rule_review", spec, self.ws)
         def builder(it, sd):
             with open(os.path.join(sd, "SKILL.md"), "a", encoding="utf-8") as f: f.write("\nMore detail.\n")
             return 0
@@ -224,7 +226,7 @@ class TestReviewStopsTheLoop(T.Base):
 
     def test_a_changed_matcher_invalidates_the_recorded_decision(self):
         spec, _ = self.spec(evals=matcher_doc()); os.makedirs(self.ws, exist_ok=True)
-        se.approve("rule_review", spec, self.ws, "tester")
+        se.approve("rule_review", spec, self.ws)
         def builder(it, sd):
             self.edit_evals(spec, lambda doc: doc["evals"][0]["assertions"][0]["check"].update(pattern=KO + "!")); return 0
         r = self.loop(builder, spec)

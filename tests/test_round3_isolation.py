@@ -25,7 +25,7 @@ class Base(T.Base):
     def approved_skill(self, **kw):
         d = make_skill(self.tmp, **kw)
         os.makedirs(self.ws, exist_ok=True); write(os.path.join(self.ws, "requirements.md"), "goal")
-        for g in ("requirements", "eval_set"): self.cli("approve", d, "--workspace", self.ws, "--gate", g, "--by", "me")
+        for g in ("requirements", "eval_set"): self.cli("approve", d, "--workspace", self.ws, "--gate", g)
         return d
 
 class TestEvalNamePaths(Base):
