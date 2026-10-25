@@ -1,0 +1,16 @@
+{
+ "id": "s1",
+ "turns": [
+  {
+   "user": "Give an overview of the repository."
+  }
+ ],
+ "expected_tools": [
+  "read_file",
+  "bash"
+ ],
+ "must_include": [
+  "src"
+ ],
+ "expected_outcome": "An overview with file:line evidence."
+}

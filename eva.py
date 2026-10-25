@@ -6,6 +6,7 @@ from engine.loaders import (TomlError, _DQ_ESCAPES, _DQ_HEX, _TOML_BARE_KEY_RE, 
                             _TomlReader, _YAML_TYPED_RE, _block_scalar, _plain_scalar_error, _quoted_end, _scalar,
                             _strip_comment, _unquote, parse_flat_toml, parse_frontmatter_ex, yaml_typed_keys)
 from engine import rule_runner
+from engine.primitives import description_heuristics, heading_present, local_refs as refs_primitive
 from engine.primitives import parity as parity_primitive, script_denylist
 from engine.primitives.script_denylist import (ENGLISH_MAX_SHOWN, LINK_CYCLE, LINK_DANGLING, LINK_LOOP, LINK_OUT, WRAPPER_OUT,
                                                EnglishScan, UnitTree, _ESC_PAIR_RE, _ESC_RE, _YAML_BLOCK_INDICATOR_RE,
@@ -18,148 +19,31 @@ from engine.primitives.script_denylist import (ENGLISH_MAX_SHOWN, LINK_CYCLE, LI
 
 PASS_THRESHOLD = 0.8
 CATEGORY_FLOOR = 0.5  # every category with applicable checks needs >=1 pass and pass rate >= this
-SKILL_MAX_BYTES = 20000  # house proxy for the spec's "< 5000 tokens" body budget (tokens are not counted)
-SKILL_MAX_LINES = 500    # spec: "Keep your main SKILL.md under 500 lines" -> lines must be < 500
 NAME_MAX = 64
-# agentskills.io/specification: the only frontmatter fields (skills-ref and skill-creator quick_validate reject others)
-SKILL_FIELDS = ("name", "description", "license", "compatibility", "metadata", "allowed-tools")
-# Host-specific allowance (not in the agentskills.io spec): fields documented in the Claude Code skills frontmatter
-# reference (https://code.claude.com/docs/en/skills). Other hosts' validators (skills-ref, quick_validate) reject them.
-HOST_SKILL_FIELDS = ("argument-hint", "disable-model-invocation")
 EVAL_LAYERS = ("static", "llm", "human")  # optional evals[].layer: how the case is graded
 EVAL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")  # optional evals[].name: one safe path component (H)
 RESERVED_NAME_WORDS = ("anthropic", "claude")  # Claude skill authoring best practices: name "cannot contain"
-COMPATIBILITY_MAX = 500
-REF_TOC_LINES = 100  # Claude best practices: reference files longer than 100 lines get a table of contents
-MIN_EVALS = 3        # Claude best practices checklist: "At least three evaluations created"
 DESCRIPTION_MAX = 1024  # spec + best practices: description "Max 1024 characters"
-DESCRIPTION_MIN = 20    # house rule: the spec only requires non-empty
-# Spec: description "Should describe ... when to use it". Only an English trigger clause outside quotes/backticks
-# counts, followed by a substantive condition (DESC_WHEN_MIN_WORDS words, not only vague ones):
-#   - a sentence that starts with 'Use' / 'Used' / 'Invoke' / 'Trigger' (optionally 'this|the|it [skill|tool]', an '-ly' adverb,
-#     'for|to <task>') and then 'when'/'whenever' ('Use when ...', 'Use this skill when ...', 'Used when ...');
-#   - 'this skill' right after a use verb ('... use|using|invoke|trigger|read this skill when ...') or as the
-#     sentence subject of 'modal/be + use verb' ('This skill should be used|can be used|must be invoked|is used when ...');
-#   - a sentence 'Read this skill before|when ...'.
-# Not counted: a 'when' after any other words ('Counts words when files change', 'files loaded when',
-# 'hooks called when', 'Applies to X when', '..., used when', 'This skill counts words|is loaded|applies when',
-# 'Skip|Avoid this skill when', 'Config for this skill is used when'), negated clauses ('Do not use when', "Don't use
-# this skill when", 'Never use when', 'Cannot use this skill when', 'Avoid using this skill when'), 'Use this.',
-# Korean conditionals ('...할 때 사용한다') and quoted text. A '.', '!' or '?' directly followed by a capital letter
-# ('needed.The user ...') ends the condition but does not start a new trigger sentence.
-_DESC_USE_VERB = r"(?:used|invoked|triggered|read)"
-DESC_USE_START_RE = re.compile(
-    r"(?:use|used|invoke|trigger)(?:\s+(?:this|the|it))?(?:\s+(?:skill|tool))?(?:\s+[A-Za-z]+ly)?(?:\s+(?:for|to)\b[^;]{1,150}?)?"
-    r"\s+(?:when|whenever)\b([^;]*)", re.I)
-DESC_THIS_SKILL_OBJ_RE = re.compile(
-    r"\b(?:use|using|invoke|invoking|trigger|triggering|read|reading)\s+this\s+skill\s+(?:when|whenever)\b([^;]*)", re.I)
-DESC_THIS_SKILL_SUBJ_RE = re.compile(
-    r"this\s+skill\s+(?:(?:should|must|can|may|will|could|might|shall)\s+be|is)\s+%s\s+(?:when|whenever)\b([^;]*)"
-    % _DESC_USE_VERB, re.I)
-DESC_READ_RE = re.compile(r"read\s+this\s+skill\s+(?:before|when|whenever)\b([^;]*)", re.I)
-DESC_NEGATION_RE = re.compile(r"\b(?:not|never|cannot|avoid(?:s|ing)?|skip(?:s|ping)?|without)\b|n['’]t\b", re.I)
-DESC_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
-DESC_TIGHT_STOP_RE = re.compile(r"[.!?](?=[A-Z])")  # 'needed.The user': sentence end with no space after it
-DESC_WHEN_MIN_WORDS = 2
-DESC_WHEN_VAGUE = {"a", "an", "the", "it", "is", "are", "be", "this", "that", "there", "you", "user", "users", "someone",
-                   "needed", "need", "necessary", "appropriate", "required", "relevant", "useful", "helpful", "asked",
-                   "requested", "wanted", "desired", "possible", "applicable", "suitable", "something", "anything",
-                   "so", "as", "if", "or", "and", "in", "to", "of", "for"}
+# Thresholds the moved rows read are rule operands (rules/skill-*.rules.json); these names read them from the default
+# bundle for the callers that still use eva.<name>. DESCRIPTION_MAX, NAME_MAX and RESERVED_NAME_WORDS stay literals for
+# the A3 parity oracle and name_errors; tests/test_differential.py pins them to the operands.
+OPERANDS = {"SKILL_MAX_BYTES": ("size-limit", "max_bytes"), "SKILL_MAX_LINES": ("size-limit", "lines_below"),
+            "SKILL_FIELDS": ("frontmatter-fields", "fields"), "HOST_SKILL_FIELDS": ("frontmatter-fields", "host_fields"),
+            "COMPATIBILITY_MAX": ("compatibility-length", "max"), "REF_TOC_LINES": ("reference-toc", "toc_lines"),
+            "MIN_EVALS": ("evals-count", "min"), "DESCRIPTION_MIN": ("description-min-length", "min")}
 
-def desc_when_clause(desc):
-    """The condition text of the first substantive English trigger clause in desc ('the user wants a word count'
-    from 'Use when the user wants a word count.'), else None. Quoted text is blanked first (_unquoted)."""
-    for sent in DESC_SENTENCE_RE.split(_unquoted(desc)):
-        sent = sent.strip().lstrip("-*•(").strip()
-        for m in (DESC_USE_START_RE.match(sent), DESC_READ_RE.match(sent), DESC_THIS_SKILL_SUBJ_RE.match(sent),
-                  DESC_THIS_SKILL_OBJ_RE.search(sent)):
-            if m is None or DESC_NEGATION_RE.search(sent[:m.start(1)]):
-                continue
-            cond = " ".join(DESC_TIGHT_STOP_RE.split(m.group(1))[0].split()).rstrip(".!?")
-            words = re.findall(r"[A-Za-z][A-Za-z'-]*", cond)
-            if len(words) >= DESC_WHEN_MIN_WORDS and any(w.lower() not in DESC_WHEN_VAGUE for w in words):
-                return cond
-    return None
 
-# Best practices: "Always write in third person" (avoid "I can help you...", "You can use this...").
-# Explicit pronouns only, any letter case; quoted text ("fix my code", `my-app`) is the user's words, not the
-# description's voice, and is skipped (_unquoted). Korean often drops the subject, so pronoun-less first/second
-# person is not detected.
-_ROMAN_I_BEFORE = r"(?:phase|part|type|chapter|level|stage|class|tier|section|volume|vol\.?|appendix|war|step|grade|act|book|round|schedule|article|title|figure|table)"
-DESC_PERSON_RE = re.compile(
-    r"(?<![\w/.(-])(?-i:I)(?![\w/)-]|\.\w)"     # 'I', "I'm" (not 'I/O', 'I-II', '(I)')
-    r"|(?<![\w/.-])(?-i:i)(?=\s|['’])"          # lowercase pronoun 'i ' / "i'm" (not 'i.e.')
-    r"|(?<![\w/.-])(?:me|my|mine|we|our|ours|you|your|yours|yourself|yourselves)(?![\w/-])"
-    r"|(?<![\w/.-])(?-i:us|Us|uS)(?![\w/-])"    # all-caps 'US' is the country/acronym
-    r"|(?<!\w)(?:저는|제가|저희|나는|내가|우리는|우리가|우리의|당신|너는|네가|여러분)", re.I)
-_ROMAN_I_RE = re.compile(r"\b%s\s+I(?![\w/-])" % _ROMAN_I_BEFORE, re.I)
-_QUOTED_RE = re.compile(r"\"[^\"\n]*\"|“[^”\n]*”|‘[^’\n]*’|`[^`\n]*`|(?<![\w])'[^'\n]*'(?![\w])")
-
-def _unquoted(text):
-    """text with quoted spans ("...", '...', “...”, ‘...’, `...`) blanked out; apostrophes ("it's") are not quotes."""
-    return _QUOTED_RE.sub(lambda m: " " * len(m.group(0)), text)
-
-def desc_person_words(desc):
-    """First/second-person words in desc outside quotes, Roman numeral 'Phase I' style excluded."""
-    text = _unquoted(desc)
-    roman = {m.end() - 1 for m in _ROMAN_I_RE.finditer(text)}
-    return sorted(set(m.group(0) for m in DESC_PERSON_RE.finditer(text) if m.start() not in roman))
-
-# single-purpose (house heuristic, scored, not required): count the distinct English task verbs that open a
-# coordinated item ('Summarizes PDFs, cleans CSVs and sends emails' -> summarize, clean, send). An item starts at the
-# text start, after . ; : ! ? , ( ) or a joiner (and, or, then, also, plus, to, as well as, &), so swapping ';' for ','
-# or 'and' does not hide the list. Verbs come from TASK_VERBS in base, -s/-es/-ies or -ing form. Words that are often
-# nouns (AMBIGUOUS_TASK_VERBS: 'report', 'schedule', 'format') count only as '-ing' or right after 'to'.
-# Not counted: quoted text, sentences that are an English trigger clause (desc_when_clause: the 'Use when ...'
-# condition lists request phrasings, not the skill's tasks) or exclude uses ('Do NOT use for ...'), a verb followed by 'this' ('Read this skill'), hyphenated
-# compounds ('find-and-replace'), verbs outside the lexicon, and Korean verbs (only the phrases in MULTI_PURPOSE_RE).
-TASK_VERBS = """add aggregate analyze annotate archive audit automate backup benchmark build bundle calculate chart check
-clean classify code combine commit compare compile compose compress compute configure convert copy count crawl create crop
-debug decrypt delete deploy design detect diff draft draw edit email encrypt enrich estimate evaluate export extract fetch
-fill filter find fix forecast format generate grade import index inspect install label lint list load manage map merge
-migrate minify modify monitor move normalize notify optimize order organize parse patch plan plot post predict print process
-profile proofread publish query rank read rebase record refactor release remove rename render reorder repair replace report
-resize restore review rewrite rotate run sanitize scan scrape schedule score search send share sign simulate sort split
-summarize synthesize tag test track train transcribe transform translate trim update upload validate verify visualize
-watermark write""".split()
-AMBIGUOUS_TASK_VERBS = set("""report email chart plan index list record order tag label post profile map design draft query
-patch release schedule test code score print format process review track search update export import run rank estimate
-forecast benchmark""".split())
-SINGLE_PURPOSE_MAX_VERBS = 2  # 'Removes duplicate rows and trims whitespace' (2) passes; 3+ distinct task verbs fail
-MULTI_PURPOSE_RE = re.compile(r"\b(?:and also|as well as|plus)\b|그리고 또|뿐만 아니라", re.I)
-
-def _verb_forms(v):
-    f = {v, v + "s", v + "es", v + "ing"}
-    if v.endswith("e"): f.add(v[:-1] + "ing")
-    if v.endswith("y"): f.add(v[:-1] + "ies")
-    if re.search(r"[^aeiou][aeiou][bdgmnprt]$", v): f.add(v + v[-1] + "ing")  # split -> splitting
-    return f
-
-TASK_VERB_FORMS = {f: v for v in TASK_VERBS for f in _verb_forms(v)}
-TASK_TOKEN_RE = re.compile(r"[A-Za-z]+(?:[-/][A-Za-z]+)*|[.;:!?,()&]")
-# 'Do NOT use for PDFs, spreadsheets, or coding': a sentence that excludes uses lists what the skill does not do
-TASK_EXCLUSION_RE = re.compile(r"\b(?:do\s+not|don['’]t|never|not)\s+(?:use|trigger|invoke)\b|\bnot\s+for\b", re.I)
-TASK_JOINERS = {"and", "or", "then", "also", "plus", "to"}
-
-def desc_task_verbs(desc):
-    """Distinct task verbs (base form, in order) that open a coordinated item outside trigger sentences."""
-    out = []
-    for sent in DESC_SENTENCE_RE.split(_unquoted(desc)):
-        if desc_when_clause(sent) is not None or TASK_EXCLUSION_RE.search(sent):
-            continue
-        toks = TASK_TOKEN_RE.findall(re.sub(r"\bas\s+well\s+as\b", " and ", sent, flags=re.I))
-        start, after_to = True, False
-        for i, t in enumerate(toks):
-            w = t.lower()
-            if not w[0].isalpha():
-                start, after_to = True, False; continue
-            v = TASK_VERB_FORMS.get(w)
-            nxt = toks[i + 1].lower() if i + 1 < len(toks) else ""
-            if start and v and nxt != "this" and v not in out and \
-                    (v not in AMBIGUOUS_TASK_VERBS or w.endswith("ing") or after_to):
-                out.append(v)
-            start, after_to = w in TASK_JOINERS, w == "to"
-    return out
+def __getattr__(name):
+    if name not in OPERANDS:
+        raise AttributeError("module 'eva' has no attribute '%s'" % name)
+    rid, key = OPERANDS[name]
+    rule = next(r for r in rule_runner.default_bundle().rules if r.id == rid)
+    value = rule.node[key]
+    return tuple(value) if isinstance(value, list) else value
+# ---------- description heuristics (engine/primitives/description_heuristics.py, rules/data/description.json) ----------
+desc_when_clause = description_heuristics.when_clause
+desc_person_words = description_heuristics.person_words
+desc_task_verbs = description_heuristics.task_verbs
 
 # ---------- frontmatter (minimal YAML subset) ----------
 
@@ -180,42 +64,8 @@ def as_list(v):
     if v is None or v == "": return []
     return v if isinstance(v, list) else [v]
 
-FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
-# CommonMark ATX heading: 0-3 spaces, 1-6 '#', then a space/tab or end of line; optional closing '#' sequence
-ATX_RE = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$")
-
-def _split_fences(text):
-    """(lines outside, lines inside) fenced code blocks (``` or ~~~, CommonMark closing rules); fence lines dropped."""
-    prose, code, fence = [], [], None
-    for ln in text.splitlines():
-        m = FENCE_RE.match(ln)
-        if m:
-            mark, rest = m.group(1), m.group(2)
-            if fence is None: fence = mark
-            elif mark[0] == fence[0] and len(mark) >= len(fence) and not rest.strip(): fence = None
-            continue
-        (prose if fence is None else code).append(ln)
-    return prose, code
-
-def _unfenced(text):
-    """text with fenced code blocks removed."""
-    return "\n".join(_split_fences(text)[0])
-
-def _fenced(text):
-    """Lines inside fenced code blocks."""
-    return _split_fences(text)[1]
-
-def headings(text):
-    """[(level, heading text)] of ATX headings outside fenced code."""
-    out = []
-    for ln in _unfenced(text).splitlines():
-        m = ATX_RE.match(ln)
-        if m: out.append((len(m.group(1)), (m.group(2) or "").strip()))
-    return out
-
-def has_section(body, *words):
-    """True if a markdown heading (outside fenced code blocks) contains any of words."""
-    return any(w.lower() in t.lower() for _, t in headings(body) for w in words)
+headings = heading_present.headings
+has_section = heading_present.has_section
 
 class Report:
     """checks: status "pass"/"fail" (passed True/False), "n/a" (absent optional item) or "needs-review"
@@ -303,20 +153,6 @@ def _str_field(meta, key):
     v = meta.get(key)
     return v.strip() if isinstance(v, str) else ""
 
-def _common_name(r, meta, path):
-    name = unicodedata.normalize("NFKC", _str_field(meta, "name"))
-    ne = name_errors(name)
-    r.add("name-format", "single-task", not ne,
-          "name '%s' (skills-ref rules: NFKC, lowercase letters/digits/'-', <=%d)%s" % (name, NAME_MAX, (": %s" % ne) if ne else ""),
-          "name을 소문자·숫자·하이픈(예: pdf-summarizer)으로, %d자 이하로 바꾸세요." % NAME_MAX)
-    folder = unicodedata.normalize("NFKC", os.path.basename(os.path.realpath(path)))  # '.', 'x/', symlinks
-    r.add("name-matches-folder", "structure", name == folder,
-          "name '%s' vs folder '%s'" % (name, folder), "frontmatter name을 폴더 이름 '%s'과 같게 맞추세요." % folder)
-    desc = _str_field(meta, "description")
-    r.add("description-present", "single-task", bool(desc), "description present",
-          "무엇을 하는지와 언제 쓰는지를 담은 description을 추가하세요.")
-    return name, desc
-
 # ---------- English-only rule (owner decision 2026-10-19; design and exceptions: notes/english-rule-plan.md) ----------
 # The stdlib has no Unicode script property, so the script of a character is read from its Unicode name. The test fails
 # closed: a letter, mark or number whose name does not start with an English-compatible word is flagged, and so is a code
@@ -371,7 +207,6 @@ BINARY_EXTENSIONS = frozenset(""".png .jpg .jpeg .gif .webp .bmp .ico .icns .tif
 ENGLISH_RULES = "english-only.rules.json"
 PARITY_SKILL_RULES = "parity-skill.rules.json"
 PARITY_AGENT_RULES = "parity-agent.rules.json"
-ROW_RULE_FILES = (ENGLISH_RULES, PARITY_SKILL_RULES, PARITY_AGENT_RULES)  # rows built where the eva functions run
 
 def _family_bundle(bundle, fname):
     """bundle when it holds the rule file fname, else the default bundle, so a fixture bundle without the English or
@@ -963,139 +798,12 @@ def parity_line(status):
         x.replace("parity-", "") for x in status[t]["unverified"]) if status[t]["unverified"] else "") for t in TOOLS)
 
 # ---------- skills (agentskills.io specification + Claude skill authoring best practices) ----------
-SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
-WIN_DRIVE_RE = re.compile(r"^[A-Za-z]:")  # 'C:\x', 'C:/x' and drive-relative 'C:x': a path, never a 1-letter URL scheme
-MD_LINK_RE = re.compile(r"\]\(\s*<?([^)\s>]+)>?(?:\s+[\"'][^)]*[\"'])?\s*\)")
-
-# Spec bundled directories (agentskills.io "Directory structure"); a path into one of them is a file reference
-# whether written as a link, in inline code, or as plain text ("Run scripts/x.py").
-BUNDLED_REF_RE = re.compile(r"(?<![\w./\\-])((?:scripts|references|assets)[/\\][^\s`'\"()<>\[\]{}|,;]+)")
-GLOB_CHARS = set("*?")
-HANGUL = "ㄱ-ㆎ가-힣"
-# Korean particle/ending glued to a path that ends in a Latin letter, digit, ')' or closing '**'
-# ('scripts/clean.py를', '...py에서', '**scripts/x.py**를')
-KO_PARTICLE_RE = re.compile(r"(?<=[A-Za-z0-9)\]*])[%s]+$" % HANGUL)
-# Inside fenced code only run commands are references, checked in every command of a line (split on &&, ||, ;, |):
-# an interpreter followed by a bundled-dir path ('python scripts/x.py', '$ bash assets/setup.sh', 'cd d && sh scripts/b.sh'),
-# or direct execution of a script ('./scripts/x.sh', 'scripts/x.py args'). A bare 'scripts/x.py' is a file listing,
-# not a run command, when it is indented, carries a '# note', or the block draws a tree (├ └ │).
-RUNNER = r"(?:sudo\s+)?(?:python[0-9.]*|bash|sh|zsh|node|deno\s+run|ruby|perl|Rscript|php|pwsh|uv\s+run(?:\s+python[0-9.]*)?)"
-_ARG = r"[^\s;&|<>'\"`]+"
-_ENV = r"(?:[A-Za-z_]\w*=\S*\s+)*"  # 'LANG=C python scripts/x.py'
-FENCED_RUN_RE = re.compile(r"^(?:\$\s+)?%s%s\s+(?:-\S+\s+)*(?:\./)?((?:scripts|references|assets)/%s)" % (_ENV, RUNNER, _ARG))
-FENCED_EXEC_RE = re.compile(r"^(?:\$\s+)?%s(\./)?(scripts/%s)" % (_ENV, _ARG))
-CMD_SPLIT_RE = re.compile(r"&&|\|\||;|\|")
-TREE_CHARS = set("├└│")
-
-def _fenced_run_refs(code_lines):
-    """Bundled-dir paths that fenced code lines run (see FENCED_RUN_RE / FENCED_EXEC_RE)."""
-    out, tree = [], any(TREE_CHARS & set(ln) for ln in code_lines)
-    for ln in code_lines:
-        m = re.search(r"(^|\s)#", ln)  # shell comment
-        cmd, note = (ln[:m.start()], True) if m else (ln, False)
-        for i, seg in enumerate(CMD_SPLIT_RE.split(cmd)):
-            indented = i == 0 and seg[:1] in (" ", "\t")
-            seg = seg.strip()
-            r = FENCED_RUN_RE.match(seg)
-            if r:
-                out.append(r.group(1)); continue
-            e = FENCED_EXEC_RE.match(seg)
-            if e and (e.group(1) or not (indented or tree or (note and seg == e.group(0)))):
-                out.append(e.group(2))
-    return out
-
-def _clean_bundled(t, stars=0):
-    """Bundled-dir path with trailing prose removed (anchor, punctuation, Korean particle, and up to `stars` closing
-    '*' of the emphasis the path was opened with, as in '**scripts/x.py**'); None if what is left is a directory
-    mention or a glob ('assets/icon*', 'scripts/*.py')."""
-    t = t.split("#", 1)[0]
-    prev = None
-    while t != prev:
-        prev = t
-        t = KO_PARTICLE_RE.sub("", t.rstrip(".:!?"))
-        k = len(t) - len(t.rstrip("*"))
-        if 0 < k <= stars:
-            t = t[:-k]
-    if not t or t[-1] in "/\\" or GLOB_CHARS & set(t):
-        return None
-    return t
-
-def local_refs(text):
-    """Local file references in markdown: every relative markdown link target and bundled-dir path (scripts/,
-    references/, assets/) in inline code, **bold** or plain text outside fenced code, plus run commands inside
-    fenced code ('python scripts/x.py'). URLs, #anchors, directory mentions ('scripts/') and glob patterns
-    ('assets/*.png') are not file references."""
-    prose = _unfenced(text)
-    refs = set()
-    for t in MD_LINK_RE.findall(prose):
-        t = t.split("#", 1)[0].split("?", 1)[0]
-        if t and (not SCHEME_RE.match(t) or WIN_DRIVE_RE.match(t)):  # 'C:\x' / 'C:/x' / 'C:x' is a path, not a URL scheme
-            refs.add(t)
-    found = [(m.group(1), len(prose[:m.start()]) - len(prose[:m.start()].rstrip("*")))
-             for m in BUNDLED_REF_RE.finditer(prose)]
-    found += [(t, 0) for t in _fenced_run_refs(_fenced(text))]
-    for t, stars in found:
-        t = _clean_bundled(t, stars)
-        if t: refs.add(t)
-    return refs
-
-def _ref_problem(ref):
-    """Why a reference is not a portable relative path inside the skill root (None if fine)."""
-    if "\\" in ref: return "backslash (use forward slashes)"
-    if ref.startswith("/") or ref.startswith("~") or WIN_DRIVE_RE.match(ref): return "absolute or drive path (use a path relative to the skill root)"
-    norm = posixpath.normpath(ref)
-    if norm == ".." or norm.startswith("../"): return "points outside the skill directory"
-    return None
-
-def git_root(path):
-    """Nearest enclosing git work tree root of path (a directory holding '.git', dir or worktree file), or None."""
-    d = os.path.realpath(path)
-    while True:
-        if os.path.exists(os.path.join(d, ".git")): return d
-        up = os.path.dirname(d)
-        if up == d: return None
-        d = up
-
-def repo_root_ref(path, ref):
-    """True if ref, missing from the skill folder, is a file relative to the enclosing git repo root and stays inside
-    it (after resolving symlinks). Refs with a _ref_problem ('..', absolute, backslash) never qualify."""
-    root = git_root(path)
-    if root is None or _ref_problem(ref): return False
-    target = os.path.realpath(os.path.join(root, ref))
-    return os.path.commonpath([root, target]) == root and os.path.exists(target)
-
-def _within(root, target):
-    return root is not None and os.path.commonpath([root, target]) == root
-
-def ref_targets(path, refs):
-    """Sort refs by where they resolve (after '..' normalization and symlinks). Returns sorted lists
-    (missing, repo_refs, up_refs, escaped): missing = found nowhere; repo_refs = absent from the skill folder but found
-    from the git repo root (repo_root_ref); up_refs = exist outside the skill folder but inside the repo;
-    escaped = absolute / '~' / drive / backslash paths, or targets outside both the skill folder and the repo.
-    Escapes are classified before the existence check, so a missing escaping path ('../../../../nope') or a dangling
-    symlink pointing outside is escaped, not missing. Refs that resolve to an existing file inside the skill folder
-    (bundled) are in none of the lists."""
-    skill, repo = os.path.realpath(path), git_root(path)
-    missing, repo_refs, up_refs, escaped = [], [], [], []
-    for x in sorted(refs):
-        if "\\" in x or x.startswith(("/", "~")) or WIN_DRIVE_RE.match(x):
-            escaped.append(x); continue  # absolute, drive or backslash: never a portable skill reference
-        target = os.path.realpath(os.path.join(skill, x))  # resolves dangling symlinks as far as they go
-        if not (_within(skill, target) or _within(repo, target)):
-            escaped.append(x); continue
-        if os.path.exists(target):
-            if _within(skill, target): continue
-            up_refs.append(x)
-        elif repo_root_ref(path, x): repo_refs.append(x)
-        else: missing.append(x)
-    return missing, repo_refs, up_refs, escaped
-
-def _toc_first(text):
-    """True if the first heading after the title (outside fences) is a table of contents."""
-    heads = headings(text)
-    if heads and heads[0][0] == 1:
-        heads = heads[1:]
-    return bool(heads) and bool(re.search(r"contents|목차|\btoc\b", heads[0][1], re.I))
+local_refs = refs_primitive.local_refs
+_ref_problem = refs_primitive.ref_problem
+git_root = refs_primitive.git_root
+repo_root_ref = refs_primitive.repo_root_ref
+_within = refs_primitive.within
+ref_targets = refs_primitive.ref_targets
 
 # ---------- schema-backed shape checks (schemas/*.schema.json) ----------
 SCHEMA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schemas")
@@ -1400,152 +1108,154 @@ def _legacy_evals_errors(path, name):
     if dup: e.append("duplicate ids %s" % dup)
     return len(items), e
 
+# The rule files whose rows check_skill and check_agent add: every one replaces built-in rows, so each is taken from the
+# bundle in use when it holds the file, else from the default bundle (brief A4 D2).
+FAMILY_FILES = ("skill-structure.rules.json", "skill-description.rules.json", "naming.rules.json",
+                "skill-frontmatter.rules.json", "skill-evals.rules.json", "agent-structure.rules.json",
+                ENGLISH_RULES, PARITY_SKILL_RULES, PARITY_AGENT_RULES)
+
+
 def check_skill(path, bundle=None):
+    """The rows of the skill at path: one runner call over FAMILY_FILES, then the A3 reasons of the SHAPE_ROWS."""
     r = Report(path, "skill")
-    fp = os.path.join(path, "SKILL.md")
-    raw, rerr = read_text(fp)
-    meta, body, ferr = parse_frontmatter_ex(raw) if raw is not None else (None, "", rerr)
-    raw = raw or ""
-    r.add("frontmatter", "structure", meta is not None, "YAML frontmatter between --- lines" + (": %s" % ferr if ferr else ""),
-          "SKILL.md 첫 줄을 정확히 '---'로 시작하고, 'key: value' 매핑(name, description)으로 된 frontmatter를 '---'로 닫으세요.")
-    meta = meta or {}
-    typed = set(yaml_typed_keys(raw)) if meta else set()
-    extra = sorted(k for k in meta if k not in SKILL_FIELDS + HOST_SKILL_FIELDS)
-    host = sorted(k for k in meta if k in HOST_SKILL_FIELDS)
-    r.add("frontmatter-fields", "structure", not extra,
-          "frontmatter fields within spec %s" % (SKILL_FIELDS,) +
-          (" + Claude Code host-specific %s" % host if host else "") + (": unexpected %s" % extra if extra else ""),
-          "spec 밖 필드 %s를 frontmatter에서 빼세요. 입력·출력은 본문 '## Inputs'/'## Outputs' 섹션에, "
-          "그 밖의 값은 metadata: 아래 문자열로 두세요." % extra, must=True)
-    te = _field_type_errors(meta, typed)
-    r.add("field-types", "structure", not te, "field types per spec" + (": %s" % te if te else ""),
-          "Use the spec types: name, description, license, compatibility and allowed-tools are strings (allowed-tools "
-          "space-separated), metadata is a 'key: string' mapping. Quote a name, description or compatibility that "
-          "looks like a number, a date or yes/no.", must=True)
-    name, desc = _common_name(r, meta, path)
-    bad_words = [w for w in RESERVED_NAME_WORDS if w in name.lower()]
-    r.add("name-reserved", "single-task", not bad_words,
-          "name has no reserved words %s" % (RESERVED_NAME_WORDS,) + (": contains %s" % bad_words if bad_words else ""),
-          "name에서 예약어 %s를 빼세요." % bad_words, must=True)
-    r.add("description-length", "single-task", 1 <= len(desc) <= DESCRIPTION_MAX,
-          "description length %d (1..%d)" % (len(desc), DESCRIPTION_MAX),
-          "description을 %d자 이하로 줄이세요(자세한 내용은 본문으로 옮기세요)." % DESCRIPTION_MAX, must=True)
-    r.add("description-min-length", "single-task", len(desc) >= DESCRIPTION_MIN,
-          "description length %d (>= %d, house rule)" % (len(desc), DESCRIPTION_MIN),
-          "무엇을 하는지와 언제 쓰는지가 드러나게 description을 %d자 이상으로 쓰세요." % DESCRIPTION_MIN)
-    r.add("description-no-xml", "single-task", "<" not in desc and ">" not in desc,
-          "description has no XML tags / angle brackets", "description에서 '<', '>'(XML 태그)를 빼세요.", must=True)
-    when = desc_when_clause(desc)
-    r.add("description-when", "single-task", when is not None,
-          "description has an English trigger clause outside quotes (sentence-initial 'Use when ...', 'Used when ...', "
-          "'Use this skill when ...', 'Use for/to ... when ...', 'Invoke when ...', 'Trigger when ...', "
-          "'... use this skill when ...', 'This skill should be used when ...', 'Read this skill before ...') with a concrete condition" + (": %s" % when if when else ""),
-          "description에 영어 사용 조건 문장(예: 'Use when the user asks to summarize a PDF.')을 문장 첫머리에 넣으세요. "
-          "'when'/'before' 뒤에 구체적인 조건(%d단어 이상)을 쓰세요. 'Use this.', 수동형('files loaded when', "
-          "'Applies to X when', 'This skill is loaded when'), 부정형('Do not use when', 'Skip this skill when'), 따옴표 안 문장, 한국어 조건문('…할 때 사용한다')만으로는 "
-          "인정하지 않습니다." % DESC_WHEN_MIN_WORDS, must=True)
-    pov = desc_person_words(desc)
-    r.add("description-pov", "single-task", not pov,
-          "description has no first/second-person wording" + (": %s" % pov if pov else ""),
-          "description을 3인칭으로 쓰세요(예: 'I can help you...'/'You can use this...' 대신 'Processes Excel files...'). "
-          "1·2인칭 표현 %s를 빼세요." % pov, must=True)
-    multi = sorted({m.group(0).lower() for m in MULTI_PURPOSE_RE.finditer(desc)})
-    verbs = desc_task_verbs(desc)
-    r.add("single-purpose", "single-task", not multi and len(verbs) <= SINGLE_PURPOSE_MAX_VERBS,
-          "description focuses on one purpose (distinct task verbs %d, max %d; add-on phrases %d)%s" % (
-              len(verbs), SINGLE_PURPOSE_MAX_VERBS, len(multi),
-              ": task verbs %s%s" % (verbs, ", phrases %s" % multi if multi else "") if verbs or multi else ""),
-          "여러 일을 나열하지 말고 스킬 하나에 작업 하나만 남기세요(나머지는 별도 스킬로 분리). 찾은 작업 동사: %s" % verbs)
-    if "compatibility" in meta:
-        comp = meta["compatibility"] if isinstance(meta["compatibility"], str) else ""
-        r.add("compatibility-length", "structure", 1 <= len(comp.strip()) <= COMPATIBILITY_MAX,
-              "compatibility length %d (1..%d)" % (len(comp.strip()), COMPATIBILITY_MAX),
-              "compatibility를 1~%d자 문자열로 줄이세요(환경 요구사항이 없으면 필드를 빼세요)." % COMPATIBILITY_MAX, must=True)
-    else:
-        r.na("compatibility-length", "structure", "no compatibility (optional)", must=True)
-    r.add("inputs-declared", "io", has_section(body, "input", "입력"),
-          "inputs declared (## Inputs section)", "본문에 '## Inputs' 섹션을 추가하세요(frontmatter inputs:는 spec 밖 필드입니다).")
-    r.add("outputs-declared", "io", has_section(body, "output", "출력"),
-          "outputs declared (## Outputs section)", "본문에 '## Outputs' 섹션을 추가하세요(frontmatter outputs:는 spec 밖 필드입니다).")
-    r.add("example-present", "io", has_section(body, "example", "예시"),
-          "has ## Example section", "입력→출력 예시를 담은 '## Example' 섹션을 추가하세요.")
-    nbytes, nlines = len(raw.encode("utf-8")), len(raw.splitlines())
-    r.add("size-limit", "structure", nbytes <= SKILL_MAX_BYTES and nlines < SKILL_MAX_LINES,
-          "SKILL.md %d bytes / %d lines (<=%d bytes, <%d lines)" % (nbytes, nlines, SKILL_MAX_BYTES, SKILL_MAX_LINES),
-          "긴 내용은 references/로 옮기고 SKILL.md에서 링크하세요.")
-    refs = local_refs(body)
-    probs = sorted("%s (%s)" % (x, _ref_problem(x)) for x in refs if _ref_problem(x))
-    r.add("refs-relative", "structure", not probs,
-          "refs are forward-slash paths relative to the skill root" + (": %s" % probs if probs else ""),
-          "참조를 스킬 폴더 기준 상대경로·슬래시(/)로 고치세요(예: references/guide.md): %s" % ", ".join(probs))
-    missing, repo_refs, up_refs, escaped = ref_targets(path, refs)
-    if missing or escaped or not (repo_refs or up_refs):
-        r.add("refs-exist", "structure", not (missing or escaped),
-              "referenced files exist" + (": missing %s" % missing if missing else "") +
-              ("; outside the skill folder and the git repo (absolute, backslash or escaping path): %s" % escaped
-               if escaped else "") +
-              ("; repo-root-relative reference, not bundled: %s" % repo_refs if repo_refs else "") +
-              ("; outside the skill folder, inside the git repo, not bundled: %s" % up_refs if up_refs else ""),
-              "없는 파일을 만들거나 참조를 지우세요: %s" % ", ".join(missing) if not escaped else
-              "스킬 폴더·리포 밖을 가리키는 참조(절대경로, 역슬래시, '..'·심볼릭 링크 탈출)를 지우거나 파일을 스킬 폴더 "
-              "안에 넣고 상대경로로 링크하세요: %s" % ", ".join(escaped + missing), must=True)
-    else:
-        r.review("refs-exist", "structure",
-                 "; ".join(s for s in (
-                     "repo-root-relative reference, not bundled: %s (found from the enclosing git repo root, not the "
-                     "skill folder)" % repo_refs if repo_refs else "",
-                     "outside the skill folder, inside the git repo, not bundled: %s" % up_refs if up_refs else "") if s) +
-                 " (works only when the skill runs inside that repo)",
-                 "스킬을 리포 밖에서도 쓰려면 파일을 스킬 폴더(scripts/ 등)에 넣으세요. 리포 안에서만 쓰는 스킬이면 "
-                 "본문에 '리포 루트 기준 경로'라고 밝히고 사람이 확인하세요: %s" % ", ".join(repo_refs + up_refs))
-    direct = {posixpath.normpath(x) for x in refs if not _ref_problem(x)}
-    md_refs = sorted(x for x in direct if x.lower().endswith(".md") and os.path.isfile(os.path.join(path, x)))
-    nested = []
-    for x in md_refs:
-        text, _ = read_text(os.path.join(path, x))
-        for t in local_refs(text or ""):
-            if _ref_problem(t): continue
-            cand = posixpath.normpath(posixpath.join(posixpath.dirname(x), t))
-            if not os.path.exists(os.path.join(path, cand)):
-                cand = posixpath.normpath(t)
-            if cand not in direct and cand != x and cand != "SKILL.md":
-                nested.append("%s -> %s" % (x, t))
-    r.add("refs-one-level", "structure", not nested,
-          "no nested reference chains (files linked from SKILL.md link nothing SKILL.md doesn't)" +
-          (": %s" % nested if nested else ""),
-          "참조 파일이 다른 파일을 다시 참조하지 않게 하세요. 필요한 파일은 SKILL.md에서 직접 링크하세요: %s" % ", ".join(nested))
-    deep = sorted(x for x in direct if x.count("/") > 1)
-    r.add("refs-path-depth", "structure", not deep, "refs at most one directory deep" + (": %s" % deep if deep else ""),
-          "참조 파일은 scripts/x, references/x 처럼 한 단계 폴더 안에 두세요.")
-    long_refs = []
-    for x in md_refs:
-        text, _ = read_text(os.path.join(path, x))
-        if text is not None and len(text.splitlines()) > REF_TOC_LINES:
-            long_refs.append((x, _toc_first(text)))
-    if long_refs:
-        no_toc = [x for x, ok in long_refs if not ok]
-        r.add("reference-toc", "structure", not no_toc,
-              "reference files over %d lines start with a table of contents" % REF_TOC_LINES +
-              (": missing in %s" % no_toc if no_toc else ""),
-              "%d줄이 넘는 참조 파일 맨 위(제목 바로 다음)에 '## Contents' 목차를 넣으세요: %s" % (REF_TOC_LINES, ", ".join(no_toc)))
-    else:
-        r.na("reference-toc", "structure", "no referenced .md file over %d lines" % REF_TOC_LINES)
-    md = meta.get("metadata") if isinstance(meta.get("metadata"), dict) else {}
-    ver = md.get("version")
-    if ver is not None:
-        r.add("version-format", "structure", bool(re.match(r"^\d+\.\d+\.\d+$", str(ver))),
-              "version '%s' semver (metadata.version)" % ver, "metadata.version에 \"1.0.0\" 같은 SemVer를 쓰세요.", must=True)
-    else:
-        r.na("version-format", "structure", "no metadata.version (optional)", must=True)
-    n, ee = evals_errors(path, name)
-    r.add("evals-valid", "evaluation", not ee, "evals/evals.json format" + (": %s" % ee if ee else " valid"),
-          "Write evals/evals.json as {\"skill_name\": \"<frontmatter name>\", \"evals\": [{\"id\": 1, \"prompt\": ..., "
-          "\"expected_output\": ..., \"files\" (optional), \"assertions\" (optional)}]}.", must=True)
-    r.add("evals-count", "evaluation", n >= MIN_EVALS, "%d eval cases (need >= %d)" % (n, MIN_EVALS),
-          "실제 사용자 요청처럼 쓴 테스트 케이스를 %d개 이상 두세요(경계 상황 1개 이상 포함)." % MIN_EVALS, must=True)
-    add_english_checks(r, path, bundle=bundle)
-    add_parity_checks(r, path, bundle)
+    rule_runner.apply_families(r, FAMILY_FILES, bundle)
+    _merge_shape_rows(r)
     return r
+
+
+# ---------- host ops: rows whose A3 reasons need eva.py's parsers or outcome checkers (rules/*-structure.rules.json) ----------
+def _meta(unit):
+    return heading_present.main_file(unit).meta_or_empty
+
+
+def _agent_tools(meta):
+    return [str(t) for t in as_list(meta.get("tools"))]
+
+
+def _verdict(ok, facts):
+    return ("pass" if ok else "fail"), facts
+
+
+def _host_frontmatter(node):
+    def run(unit):
+        f = heading_present.main_file(unit)
+        return _verdict(f.meta is not None, {"error": ": %s" % f.error if f.error else ""})
+    return run
+
+
+def _host_frontmatter_fields(node):
+    fields, host_fields = tuple(node["fields"]), tuple(node["host_fields"])
+
+    def run(unit):
+        meta = _meta(unit)
+        extra = sorted(k for k in meta if k not in fields + host_fields)
+        host = sorted(k for k in meta if k in host_fields)
+        return _verdict(not extra, {"spec": "%s" % (fields,), "extra": "%s" % extra,
+                                    "host": " + Claude Code host-specific %s" % host if host else "",
+                                    "unexpected": ": unexpected %s" % extra if extra else ""})
+    return run
+
+
+def _host_field_length(node):
+    field, lo, hi = node["field"], node["min"], node["max"]
+
+    def run(unit):
+        meta = _meta(unit)
+        if field not in meta:
+            return "na", {}
+        n = len((meta[field] if isinstance(meta[field], str) else "").strip())
+        return _verdict(lo <= n <= hi, {"length": n, "min": lo, "max": hi})
+    return run
+
+
+def _host_main_file_size(node):
+    max_bytes, below = node["max_bytes"], node["lines_below"]
+
+    def run(unit):
+        raw = heading_present.main_file(unit).raw
+        nbytes, nlines = len(raw.encode("utf-8")), len(raw.splitlines())
+        return _verdict(nbytes <= max_bytes and nlines < below,
+                        {"bytes": nbytes, "lines": nlines, "max_bytes": max_bytes, "lines_below": below})
+    return run
+
+
+def _host_metadata_version(node):
+    pattern = re.compile(node["pattern"])
+
+    def run(unit):
+        meta = _meta(unit)
+        md = meta.get("metadata") if isinstance(meta.get("metadata"), dict) else {}
+        ver = md.get("version")
+        if ver is None:
+            return "na", {}
+        return _verdict(bool(pattern.match(str(ver))), {"version": str(ver)})
+    return run
+
+
+def _host_evals_count(node):
+    lo = node["min"]
+
+    def run(unit):
+        n, _ = evals_errors(unit.path, "")
+        return _verdict(n >= lo, {"count": n, "min": lo})
+    return run
+
+
+def _host_tools_declared(node):
+    def run(unit):
+        tools = _agent_tools(_meta(unit))
+        return _verdict(bool(tools), {"tools": "%s" % tools})
+    return run
+
+
+def _host_success_measurable(node):
+    """Measurable iff outcome_evidence (the transcript grader's checker) recognizes a criterion; B1 replaces it."""
+    def run(unit):
+        crit = [str(c) for c in as_list(_meta(unit).get("success_criteria"))]
+        unmeasurable = [c for c in crit if outcome_evidence(c, "") is None]
+        return _verdict(len(crit) > len(unmeasurable), {
+            "checkable": len(crit) - len(unmeasurable), "total": len(crit),
+            "detail": "; needs-review (human/model grading) at transcript time: %s" % unmeasurable if unmeasurable else ""})
+    return run
+
+
+def _scenarios(unit):
+    if "scenarios" not in unit.memo:
+        scen = load_scenarios(unit.path)
+        unit.memo["scenarios"] = scen, [(f, s) for f, s, e in scen if isinstance(s, dict)]
+    return unit.memo["scenarios"]
+
+
+def _host_scenarios(node):
+    measure, lo = node["measure"], node.get("min")
+
+    def run(unit):
+        scen, objs = _scenarios(unit)
+        if measure == "present":
+            valid = [f for f, s, e in scen if not e]
+            return _verdict(len(valid) >= lo, {"valid": len(valid), "min": lo})
+        if measure == "valid":
+            invalid = ["%s (%s)" % (f, "; ".join(e)) for f, s, e in scen if e]
+            return _verdict(bool(scen) and not invalid, {"detail": ": %s" % invalid if invalid else ""})
+        if measure == "expected":
+            noexp = [f for f, s in objs if not s.get("expected_outcome")]
+            return _verdict(bool(objs) and not noexp, {"detail": ": missing in %s" % noexp if noexp else ""})
+        if measure == "tools_subset":
+            tools = _agent_tools(_meta(unit))
+            undeclared = sorted({t for f, s in objs for t in _strs(s.get("expected_tools")) if t not in tools})
+            return _verdict(not undeclared, {"detail": ": undeclared %s" % undeclared if undeclared else "",
+                                             "undeclared": "%s" % undeclared})
+        multi = [f for f, s in objs if isinstance(s.get("turns"), list) and len(s["turns"]) >= 2]
+        return _verdict(bool(multi), {"multi": "%s" % multi})
+    return run
+
+
+rule_runner.install_host_ops({
+    "host_frontmatter": _host_frontmatter, "host_frontmatter_fields": _host_frontmatter_fields,
+    "host_field_length": _host_field_length, "host_main_file_size": _host_main_file_size,
+    "host_metadata_version": _host_metadata_version, "host_evals_count": _host_evals_count,
+    "host_tools_declared": _host_tools_declared, "host_success_measurable": _host_success_measurable,
+    "host_scenarios": _host_scenarios})
 
 # ---------- agents (slated to move to the separate "agent master"; kept here until then) ----------
 def _nonempty_str(v):
@@ -1607,59 +1317,15 @@ def load_scenarios(path):
     return out
 
 def check_agent(path, bundle=None):
+    """The rows of the agent at path: one runner call over FAMILY_FILES, then the A3 reasons of the SHAPE_ROWS."""
     r = Report(path, "agent")
-    raw, rerr = read_text(os.path.join(path, "AGENT.md"))
-    meta, body, ferr = parse_frontmatter_ex(raw) if raw is not None else (None, "", rerr)
-    r.add("frontmatter", "structure", meta is not None, "YAML frontmatter" + (": %s" % ferr if ferr else ""),
-          "AGENT.md 첫 줄을 정확히 '---'로 시작하고, 'key: value' 매핑(name, description, goal, tools, success_criteria)으로 된 frontmatter를 '---'로 닫으세요.")
-    meta = meta or {}
-    _common_name(r, meta, path)
-    goal = _str_field(meta, "goal")
-    r.add("goal-present", "goal", len(goal) >= 15, "goal stated (>=15 chars)", "에이전트가 끝내야 할 목표를 goal에 한 문장으로 쓰세요.")
-    crit = [str(c) for c in as_list(meta.get("success_criteria"))]
-    # same checkers as transcript grading: measurable iff an outcome checker recognizes the criterion.
-    # At least one must be machine-checkable; the rest stay as criteria and are graded needs-review per transcript.
-    unmeasurable = [c for c in crit if outcome_evidence(c, "") is None]
-    r.add("success-measurable", "goal", len(crit) > len(unmeasurable),
-          "%d/%d success criteria machine-checkable%s" % (len(crit) - len(unmeasurable), len(crit),
-          ("; needs-review (human/model grading) at transcript time: %s" % unmeasurable) if unmeasurable else ""),
-          "자동 확인 가능한 success_criteria를 1개 이상 쓰세요(예: '출처 링크 3개 이상', '800자 이하', '비교표', "
-          "'파일:줄 근거 2개 이상', '파일 변경 0건'). 자동 확인이 안 되는 기준은 지우지 말고 함께 두세요.", must=True)
-    scen = load_scenarios(path)
-    invalid = ["%s (%s)" % (f, "; ".join(e)) for f, s, e in scen if e]
-    valid = [(f, s) for f, s, e in scen if not e]
-    r.add("scenarios-present", "goal", len(valid) >= 2,
-          "%d valid scenarios in scenarios/*.json" % len(valid),
-          "scenarios/ 폴더에 유효한 JSON 시나리오를 2개 이상 넣으세요.")
-    r.add("scenarios-valid", "goal", bool(scen) and not invalid,
-          "scenario shape valid" + (": %s" % invalid if invalid else ""),
-          "각 시나리오를 JSON 객체로 쓰고 id(문자열), turns([{\"user\": ...}]), expected_tools, must_include(문자열 목록), "
-          "expected_outcome을 채우세요.", must=True)
-    objs = [(f, s) for f, s, e in scen if isinstance(s, dict)]
-    noexp = [f for f, s in objs if not s.get("expected_outcome")]
-    r.add("scenarios-expected", "goal", bool(objs) and not noexp,
-          "all scenarios have expected_outcome" + (": missing in %s" % noexp if noexp else ""),
-          "각 시나리오에 expected_outcome을 넣으세요.")
-    tools = [str(t) for t in as_list(meta.get("tools"))]
-    r.add("tools-declared", "tool-use", bool(tools), "tools declared: %s" % tools, "frontmatter tools: 에 쓸 도구 목록을 선언하세요.")
-    undeclared = sorted({t for f, s in objs for t in _strs(s.get("expected_tools")) if t not in tools})
-    r.add("tools-subset", "tool-use", not undeclared,
-          "scenario expected_tools within declared" + (": undeclared %s" % undeclared if undeclared else ""),
-          "tools에 %s를 선언하거나 시나리오에서 빼세요." % undeclared)
-    r.add("tools-documented", "tool-use", has_section(body, "tool", "도구"),
-          "## Tools section explains usage", "도구별로 언제 쓰는지 설명하는 '## Tools' 섹션을 추가하세요.")
-    r.add("memory-section", "context", has_section(body, "memory", "handoff", "context", "기억", "인수인계"),
-          "memory/handoff section", "'## Memory & Handoff' 섹션에 무엇을 기억하고 어떻게 넘기는지 쓰세요.")
-    multi = [f for f, s in objs if isinstance(s.get("turns"), list) and len(s["turns"]) >= 2]
-    r.add("multi-turn-scenario", "context", bool(multi),
-          "multi-turn scenarios: %s" % multi, "turns가 2개 이상이고 앞 턴 정보를 참조하는 시나리오를 추가하세요.")
-    add_english_checks(r, path, bundle=bundle)
-    add_parity_checks(r, path, bundle)
+    rule_runner.apply_families(r, FAMILY_FILES, bundle)
+    _merge_shape_rows(r)
     return r
 
 def check(path, bundle=None):
-    """The built-in rows, then the rows of bundle (default: the cached default bundle, which raises
-    rule_runner.BundleError when broken, so a direct caller such as loop.py fails closed)."""
+    """The family rows (check_skill, check_agent), then the other rules of bundle (default: the cached default bundle,
+    which raises rule_runner.BundleError when broken, so a direct caller such as loop.py fails closed)."""
     kind = detect_kind(path)
     bundle = rule_runner.default_bundle() if bundle is None else bundle
     if kind == "skill": r = check_skill(path, bundle)
@@ -1667,14 +1333,57 @@ def check(path, bundle=None):
     else:
         r = Report(path, "unknown")
         r.add("frontmatter", "structure", False, "no SKILL.md or AGENT.md", "폴더에 SKILL.md 또는 AGENT.md를 넣으세요.")
-    bundle.apply(r, skip=ROW_RULE_FILES)
-    _merge_shape_rows(r)
+    bundle.apply(r, skip=FAMILY_FILES)
+    _merge_bundle_rows(r)
     return r
 
+def _shape_reasons(path, kind):
+    """{row id: (passed, reason)} for SHAPE_ROWS, computed as the A3 built-in rows of check_skill and _common_name
+    computed them, so the rule rows keep the A3 reasons byte for byte."""
+    raw, rerr = read_text(os.path.join(path, "SKILL.md" if kind == "skill" else "AGENT.md"))
+    meta = (parse_frontmatter_ex(raw)[0] if raw is not None else None) or {}
+    name = unicodedata.normalize("NFKC", _str_field(meta, "name"))
+    ne = name_errors(name)
+    folder = unicodedata.normalize("NFKC", os.path.basename(os.path.realpath(path)))  # '.', 'x/', symlinks
+    out = {"name-format": (not ne, "name '%s' (skills-ref rules: NFKC, lowercase letters/digits/'-', <=%d)%s" % (
+               name, NAME_MAX, (": %s" % ne) if ne else "")),
+           "name-matches-folder": (name == folder, "name '%s' vs folder '%s'" % (name, folder))}
+    if kind == "skill":
+        bad_words = [w for w in RESERVED_NAME_WORDS if w in name.lower()]
+        out["name-reserved"] = (not bad_words, "name has no reserved words %s" % (RESERVED_NAME_WORDS,) +
+                                (": contains %s" % bad_words if bad_words else ""))
+        te = _field_type_errors(meta, set(yaml_typed_keys(raw or "")) if meta else set())
+        out["field-types"] = (not te, "field types per spec" + (": %s" % te if te else ""))
+        _, ee = evals_errors(path, name)
+        out["evals-valid"] = (not ee, "evals/evals.json format" + (": %s" % ee if ee else " valid"))
+    return out
+
+def _rule_fix(rid):
+    """The fail fix of the default-bundle rule rid (for a row the rule passed but eva.py fails)."""
+    rule = next((x for x in rule_runner.default_bundle().rules if x.id == rid), None)
+    return rule.text(rule.fix, "fail", {}, "") if rule else ""
+
 def _merge_shape_rows(r):
-    """A bundle row for an id in SHAPE_ROWS keeps its place, status and fix, takes the reason of the check_skill row,
-    which is dropped, so the id appears once, and is must when either row is. When the two disagree on pass, the row
-    fails."""
+    """Each rule row of an id in SHAPE_ROWS keeps its place, status and fix and takes the reason eva.py computes
+    (_shape_reasons), and is must. When the two disagree on pass, the row fails closed."""
+    built = None
+    for c in r.checks:
+        if c["id"] not in SHAPE_ROWS:
+            continue
+        built = built or _shape_reasons(r.path, r.kind)
+        if c["id"] not in built:
+            continue
+        passed, reason = built[c["id"]]
+        if passed is not c["passed"]:
+            c.update(status="fail", passed=False, must=True, fix=c["fix"] or _rule_fix(c["id"]),
+                     reason="%s (%s, failing closed: the rule says %s: %s)" % (reason, DISAGREE, c["status"], c["reason"]))
+        else:
+            c.update(reason=reason, must=True)
+
+def _merge_bundle_rows(r):
+    """A rule of the bundle outside FAMILY_FILES that reuses an id in SHAPE_ROWS keeps its place, status and fix, takes
+    the reason of the family row, which is dropped, so the id appears once, and is must when either row is. When the
+    two disagree on pass, the row fails."""
     for rid in SHAPE_ROWS:
         rows = [c for c in r.checks if c["id"] == rid]
         if len(rows) != 2:
@@ -2147,25 +1856,26 @@ def feedback_md(r, rnd=None):
              (" / round %s" % rnd) if rnd else ""), ""]
     fails = r.failed
     if d["category_failed"]:
-        lines += ["## 카테고리 하한 미달 (각 카테고리 통과율 %.0f%% 이상, 1개 이상 통과 필요)" % (CATEGORY_FLOOR * 100), ""]
+        lines += ["## Categories below the floor (each category needs a pass rate of %.0f%% or more and at least one pass)"
+                  % (CATEGORY_FLOOR * 100), ""]
         for k in d["category_failed"]:
-            lines.append("- %s: %d/%d 통과" % (k, d["categories"][k]["passed"], d["categories"][k]["total"]))
+            lines.append("- %s: %d/%d passed" % (k, d["categories"][k]["passed"], d["categories"][k]["total"]))
         lines.append("")
     if d["needs_review"]:
-        lines += ["## 사람/모델 채점 필요 (needs-review, 자동 판정 불가)", ""]
+        lines += ["## Needs human or model grading (needs-review, no automatic verdict)", ""]
         for c in r.needs_review:
             lines.append("- `%s`: %s" % (c["id"], c["reason"]))
         lines.append("")
     if not fails:
-        lines.append("자동 검사는 모두 통과했습니다." if d["needs_review"] else "모든 검사를 통과했습니다. 수정할 것이 없습니다.")
+        lines.append("Every automatic check passed." if d["needs_review"] else "Every check passed. Nothing to fix.")
     else:
-        lines += ["## 고쳐야 할 것 (중요도 순)", ""]
+        lines += ["## What to fix (most important first)", ""]
         fails.sort(key=lambda c: not c["must"])
         for i, c in enumerate(fails, 1):
-            tag = " [필수]" if c["must"] else ""
+            tag = " [must]" if c["must"] else ""
             lines += ["%d. `%s`%s (%s)" % (i, c["id"], tag, c["category"]),
-                      "   - 이유: %s" % c["reason"], "   - 수정: %s" % c["fix"]]
-    lines += ["", "다 고친 뒤 `python3 eva.py check %s`로 다시 제출하세요." % r.path]
+                      "   - Reason: %s" % c["reason"], "   - Fix: %s" % c["fix"]]
+    lines += ["", "After you fix everything, check again with `python3 eva.py check %s`." % r.path]
     return "\n".join(lines) + "\n"
 
 def english_state(rep):
@@ -2228,8 +1938,8 @@ def main(argv=None):
     if not getattr(a, "transcript", None):
         try:  # before any check(), so a broken bundle prints no unit row (plan.md:581)
             bundle = rule_runner.default_bundle() if getattr(a, "rules", None) is None else rule_runner.load_bundle(a.rules)
-            if not set(ROW_RULE_FILES) <= bundle.files():
-                rule_runner.default_bundle()  # the English and parity rows then come from it (_family_bundle)
+            if not set(FAMILY_FILES) <= bundle.files():
+                rule_runner.default_bundle()  # the family rows then come from it (rule_runner.apply_families)
         except rule_runner.BundleError as e:
             print("bundle error: %s" % e, file=sys.stderr)
             return 2

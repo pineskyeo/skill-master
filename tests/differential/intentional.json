@@ -1,1 +1,10 @@
-["row-map:tests/rules/_selftest/selftest-name-matches-folder/fail/bad-name"]
+["row-map:tests/rules/_selftest/selftest-name-matches-folder/fail/bad-name",
+ "row-map:variant:a4:ko-multi-and-also",
+ "row-map:variant:a4:ko-multi-not-only",
+ "row-map:variant:a4:ko-heading-input",
+ "row-map:variant:a4:ko-heading-output",
+ "row-map:variant:a4:ko-heading-example",
+ "row-map:variant:a4:ko-heading-tool",
+ "row-map:variant:a4:ko-heading-memory",
+ "row-map:variant:a4:ko-heading-handoff",
+ "row-map:variant:a4:ko-toc"]

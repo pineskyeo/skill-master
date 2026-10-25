@@ -36,10 +36,13 @@ EXTRA_SIDES = {
     "english-bundled-files": ("na",), "english-evals": ("na",), "english-tool-files": ("na",),
     "english-scenarios": ("na",), "english-wrappers": ("na",), "parity-skill-codex": ("review",),
     "parity-invocation-control": ("na",), "parity-permissions-claude": ("na",), "parity-permissions-codex": ("review", "na"),
+    "compatibility-length": ("na",), "reference-toc": ("na",), "version-format": ("na",),
 }
 # Reachable outcomes with no fixture side, and why: an unreadable main file needs non-UTF-8 bytes, which an ASCII-only
-# fixture cannot hold; tests/test_rule_targets.py builds that case in a temp folder.
-NO_SIDE = {"english-skill-md": ("na", "needs a non-UTF-8 SKILL.md"), "english-agent-md": ("na", "needs a non-UTF-8 AGENT.md")}
+# fixture cannot hold, so tests/test_rule_targets.py builds that case in a temp folder; a refs-exist review needs an
+# enclosing git work tree, which an exported tree does not have, so tests/test_rule_structure.py builds one.
+NO_SIDE = {"english-skill-md": ("na", "needs a non-UTF-8 SKILL.md"), "english-agent-md": ("na", "needs a non-UTF-8 AGENT.md"),
+           "refs-exist": ("review", "needs an enclosing git work tree")}
 
 
 def required_sides(rule):

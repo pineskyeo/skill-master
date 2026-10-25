@@ -1,0 +1,20 @@
+{
+ "skill_name": "three-evals",
+ "evals": [
+  {
+   "id": 1,
+   "prompt": "Clean file 1.",
+   "expected_output": "A cleaned copy of file 1."
+  },
+  {
+   "id": 2,
+   "prompt": "Clean file 2.",
+   "expected_output": "A cleaned copy of file 2."
+  },
+  {
+   "id": 3,
+   "prompt": "Clean file 3.",
+   "expected_output": "A cleaned copy of file 3."
+  }
+ ]
+}

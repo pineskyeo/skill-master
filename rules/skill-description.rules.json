@@ -1,0 +1,83 @@
+{
+  "ruleset": "skill-description",
+  "version": "1.0.0",
+  "rules": [
+    {
+      "id": "description-present",
+      "applies_to": ["skill", "agent"],
+      "category": "single-task",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"url": "https://agentskills.io/specification", "section": "description field (required, non-empty)", "verified": "2026-10-19"},
+      "check": {"op": "description_heuristics", "data": "data/description.json", "measure": "present"},
+      "message": "description present",
+      "fix": "Add a description that says what it does and when to use it."
+    },
+    {
+      "id": "description-length",
+      "applies_to": ["skill"],
+      "category": "single-task",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"url": "https://agentskills.io/specification", "section": "description field (max 1024 characters)", "verified": "2026-10-19"},
+      "check": {"op": "description_heuristics", "data": "data/description.json", "measure": "length", "min": 1, "max": 1024},
+      "message": "description length {length} ({min}..{max})",
+      "fix": "Shorten the description to {max} characters or fewer (move the details into the body)."
+    },
+    {
+      "id": "description-min-length",
+      "applies_to": ["skill"],
+      "category": "single-task",
+      "severity": "soft",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "house rule DESCRIPTION_MIN = 20: the spec only requires a non-empty description (cited in eva.py; no dated record)", "verified": null},
+      "check": {"op": "description_heuristics", "data": "data/description.json", "measure": "length", "min": 20},
+      "message": "description length {length} (>= {min}, house rule)",
+      "fix": "Write a description of at least {min} characters that says what the skill does and when to use it."
+    },
+    {
+      "id": "description-no-xml",
+      "applies_to": ["skill"],
+      "category": "single-task",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "Claude skill authoring best practices: the description cannot contain XML tags (cited in eva.py; no dated record)", "verified": null},
+      "check": {"op": "description_heuristics", "data": "data/description.json", "measure": "no_xml", "chars": "<>"},
+      "message": "description has no XML tags / angle brackets",
+      "fix": "Remove '<' and '>' (XML tags) from the description."
+    },
+    {
+      "id": "description-when",
+      "applies_to": ["skill"],
+      "category": "single-task",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "agentskills.io specification: the description should say when to use the skill; the English trigger clause test is a house rule (eva.py comments; no dated record)", "verified": null},
+      "check": {"op": "description_heuristics", "data": "data/description.json", "measure": "when"},
+      "message": "description has an English trigger clause outside quotes (sentence-initial 'Use when ...', 'Used when ...', 'Use this skill when ...', 'Use for/to ... when ...', 'Invoke when ...', 'Trigger when ...', '... use this skill when ...', 'This skill should be used when ...', 'Read this skill before ...') with a concrete condition{clause}",
+      "fix": "Start a sentence of the description with an English trigger clause (for example 'Use when the user asks to summarize a PDF.') and write a concrete condition of {min_words} or more words after 'when' or 'before'. These do not count: 'Use this.', passive forms ('files loaded when', 'Applies to X when', 'This skill is loaded when'), negations ('Do not use when', 'Skip this skill when'), sentences inside quotes, and conditions written only in Korean."
+    },
+    {
+      "id": "description-pov",
+      "applies_to": ["skill"],
+      "category": "single-task",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "Claude skill authoring best practices: always write the description in third person (cited in eva.py; no dated record)", "verified": null},
+      "check": {"op": "description_heuristics", "data": "data/description.json", "measure": "pov"},
+      "message": "description has no first/second-person wording{detail}",
+      "fix": "Write the description in the third person (for example 'Processes Excel files...' instead of 'I can help you...' or 'You can use this...'). Remove the first- and second-person words {words}."
+    },
+    {
+      "id": "single-purpose",
+      "applies_to": ["skill"],
+      "category": "single-task",
+      "severity": "soft",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "house heuristic: at most SINGLE_PURPOSE_MAX_VERBS distinct task verbs and no add-on phrase in the description (eva.py comments; no dated record)", "verified": null},
+      "check": {"op": "description_heuristics", "data": "data/description.json", "measure": "single_purpose"},
+      "message": "description focuses on one purpose (distinct task verbs {count}, max {max}; add-on phrases {phrases}){detail}",
+      "fix": "Keep one task per skill instead of listing several (move the others into separate skills). Task verbs found: {verbs}"
+    }
+  ]
+}

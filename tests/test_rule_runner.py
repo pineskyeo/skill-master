@@ -13,8 +13,11 @@ HEX64 = re.compile(r"^ruleset_sha256 [0-9a-f]{64}$")
 DESC = "Checks one rule runner fixture. Use when a rule runner test needs a unit folder."
 IMPLEMENTED = {"schema", "equals", "subset", "set_equals", "contains_text", "regex", "not_regex", "file_exists",
                "file_absent", "count", "max_bytes", "max_lines", "all", "any", "not", "when", "script_denylist",
-               "parity_skill", "parity_invocation", "parity_agent_name", "parity_wrapper", "parity_permissions"}
-RESERVED = {"heading_present", "description_heuristics", "local_refs", "generated_up_to_date"}
+               "parity_skill", "parity_invocation", "parity_agent_name", "parity_wrapper", "parity_permissions",
+               "heading_present", "description_heuristics", "local_refs", "host_frontmatter", "host_frontmatter_fields",
+               "host_field_length", "host_main_file_size", "host_metadata_version", "host_evals_count",
+               "host_tools_declared", "host_success_measurable", "host_scenarios"}
+RESERVED = {"generated_up_to_date"}
 
 
 def write(path, text):
@@ -504,6 +507,24 @@ class TestBundleLoadFails(Base):
         msg = self.load_error({"a.rules.json": rule_file(rule(FILE_A)), "b.rules.json": rule_file(rule(FILE_NONE))})
         self.assertIn("duplicate rule id 't-rule'", msg)
         self.assertIn("a.rules.json", msg)
+
+    def test_a_rule_id_may_repeat_across_files_only_for_disjoint_kinds(self):
+        skill_rule, agent_rule = rule(FILE_A, applies_to=("skill",)), rule(FILE_NONE, applies_to=("agent",))
+        b = RR.load_bundle(self.bundle_dir({"a.rules.json": rule_file(skill_rule), "b.rules.json": rule_file(agent_rule)}))
+        self.assertEqual([(r.id, r.applies_to) for r in b.rules], [("t-rule", ("skill",)), ("t-rule", ("agent",))])
+        msg = self.load_error({"a.rules.json": rule_file(skill_rule),
+                               "b.rules.json": rule_file(rule(FILE_NONE, applies_to=("skill", "agent")))})
+        self.assertIn("duplicate rule id 't-rule'", msg)
+
+    def test_the_id_of_a_repository_rule_never_repeats_for_another_kind(self):
+        for name in ("a-dup.rules.json", "z-dup.rules.json"):
+            with self.subTest(name=name):
+                folder = os.path.join(tempfile.mkdtemp(dir=self.tmp), "rules")
+                shutil.copytree(os.path.join(ROOT, "rules"), folder)
+                write(os.path.join(folder, name), rule_file(rule(FILE_A, rid="english-ruleset", applies_to=("agent",))))
+                with self.assertRaises(RR.BundleError) as cm:
+                    RR.load_bundle(folder)
+                self.assertIn("duplicate rule id 'english-ruleset'", str(cm.exception))
 
     def test_duplicate_rule_ids_in_one_file_fail_the_load(self):
         self.assertIn('duplicate id "t-rule"', self.load_error({"rules.json": rule_file(rule(FILE_A), rule(FILE_NONE))}))

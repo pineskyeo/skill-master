@@ -12,6 +12,8 @@ sys.path.insert(0, os.path.join(ROOT, "tests"))
 import eva, skill_eval
 from engine import rule_runner as RR, schema as S
 import test_multi_tool_parity as P
+sys.path.insert(0, os.path.join(ROOT, "tests", "differential"))
+import legacy_structure as L
 
 INTENTIONAL_PATH = os.path.join(ROOT, "tests", "differential", "intentional.json")
 SCHEMAS = ("evals.schema.json", "trigger-evals.schema.json", "scenario.schema.json", "transcript.schema.json",
@@ -60,7 +62,27 @@ for _fname, _ids in (("naming.rules.json", ("name-format", "name-matches-folder"
                          for t in ("claude", "codex", "opencode", "hermes")))):
     for _rid in _ids:
         A3_RULE_FILES[_rid] = _fname
-ROW_FAMILY_FILES = ("english-only.rules.json", "parity-skill.rules.json", "parity-agent.rules.json")
+# A4 rule ids by rule file (brief A4 D1). With the five rows of SHAPE_IDS they are the 37 rows A4 moved out of
+# check_skill, check_agent and _common_name.
+A4_RULE_FILES = {}
+for _fname, _ids in (("skill-description.rules.json", ("description-present", "description-length",
+                                                       "description-min-length", "description-no-xml",
+                                                       "description-when", "description-pov", "single-purpose")),
+                     ("skill-structure.rules.json", ("frontmatter", "frontmatter-fields", "compatibility-length",
+                                                     "inputs-declared", "outputs-declared", "example-present",
+                                                     "size-limit", "refs-relative", "refs-exist", "refs-one-level",
+                                                     "refs-path-depth", "reference-toc", "version-format",
+                                                     "evals-count")),
+                     ("agent-structure.rules.json", ("goal-present", "success-measurable", "scenarios-present",
+                                                     "scenarios-valid", "scenarios-expected", "tools-declared",
+                                                     "tools-subset", "tools-documented", "memory-section",
+                                                     "multi-turn-scenario"))):
+    for _rid in _ids:
+        A4_RULE_FILES[_rid] = _fname
+SHAPE_IDS = ("name-format", "name-matches-folder", "name-reserved", "field-types", "evals-valid")
+REASON_IDS = set(A3_RULE_FILES) | set(A4_RULE_FILES) | set(SHAPE_IDS)
+D2_KEY = "row-map:tests/rules/_selftest/selftest-name-matches-folder/fail/bad-name"
+DESC_DATA = os.path.join(ROOT, "rules", "data", "description.json")
 UNCHANGED_PINS = {
     ("skill_eval.py", "_check_problems"): "9b96dbde4cc903ed854c49f0607aa88823c4aeb1756c4b817bdcf12400b756ae",
     ("skill_eval.py", "_csv_rows_problems"): "17c8f420caa72778c36bf9f8e7656d582e04b63a30b7ee674a942b5d06527824",
@@ -122,8 +144,10 @@ def same_typed(a, b):
 
 @contextlib.contextmanager
 def legacy():
-    """The A1 behavior: the public names point at the legacy bodies (the rows then come from check_skill as at A1)."""
-    with mock.patch.object(eva, "evals_errors", eva._legacy_evals_errors), \
+    """The legacy behavior: the public names point at the legacy bodies, and check_skill and check_agent are the A3
+    bodies kept in tests/differential/legacy_structure.py (the rows then come from them as at A3)."""
+    with mock.patch.object(eva, "check_skill", L.check_skill), mock.patch.object(eva, "check_agent", L.check_agent), \
+            mock.patch.object(eva, "evals_errors", eva._legacy_evals_errors), \
             mock.patch.object(eva, "scenario_errors", eva._legacy_scenario_errors), \
             mock.patch.object(eva, "load_transcript", eva._legacy_load_transcript), \
             mock.patch.object(eva, "_field_type_errors", eva._legacy_field_type_errors), \
@@ -623,13 +647,14 @@ def skill_variant(name="diff-base", md_edit=None, files=None, links=None, raw=No
     return build
 
 
-def agent_variant(md_edit=None, caps=None, skip=(), replace=None, files=None, links=None, wrappers=True, folder="code-scout"):
+def agent_variant(md_edit=None, caps=None, skip=(), replace=None, files=None, links=None, wrappers=True, folder="code-scout",
+                  scenarios=(P.S1, P.S2)):
     def build(top):
         d = os.path.join(top, folder)
         md = md_edit(P.AGENT_MD) if md_edit else P.AGENT_MD
         write(os.path.join(d, "AGENT.md"), md)
-        write(os.path.join(d, "scenarios", "01.json"), json.dumps(P.S1, indent=1))
-        write(os.path.join(d, "scenarios", "02.json"), json.dumps(P.S2, indent=1))
+        for i, s in enumerate(scenarios, 1):
+            write(os.path.join(d, "scenarios", "%02d.json" % i), json.dumps(s, indent=1))
         if wrappers:
             P.write_wrappers(d, caps=caps, skip=skip, replace=replace)
         for rel_path, text in (files or {}).items():
@@ -877,8 +902,230 @@ def a3_functions(unit):
 
 
 def a3_row_view(rep):
-    """row_view plus the reason of every naming, English and parity row (D11)."""
-    return dict(row_view(rep), reasons={c["id"]: c["reason"] for c in rep.checks if c["id"] in A3_RULE_FILES})
+    """row_view plus the reason of every naming, English, parity (A3 D11) and moved structure row (A4 D7). The problem
+    messages inside the evals-valid, field-types and scenarios-valid reasons drop the A2 schema suffix, which the
+    legacy bodies these rows read under legacy() never had (A2 D5: old message plus suffix)."""
+    return dict(row_view(rep), reasons={c["id"]: SUFFIX_IN_REASON_RE.sub("", c["reason"]) if c["id"] in SUFFIXED else
+                                        c["reason"] for c in rep.checks if c["id"] in REASON_IDS})
+
+
+SUFFIX_IN_REASON_RE = re.compile(r" \[(?:rule [a-z-]+, )?[a-z-]+\.schema\.json#/[^,\]]*, keyword [^\]]+\]")
+SUFFIXED = ("evals-valid", "field-types", "scenarios-valid")
+
+
+# ---------- A4 variants: one per legacy branch of check_skill, check_agent and _common_name (brief A4 D5, D8) ----------
+# The dropped Korean alternatives, written as escapes: MULTI_PURPOSE_RE phrases, has_section words, the TOC word.
+KO_AND_ALSO, KO_NOT_ONLY = "\uadf8\ub9ac\uace0 \ub610", "\ubfd0\ub9cc \uc544\ub2c8\ub77c"
+KO_INPUT, KO_OUTPUT, KO_EXAMPLE = "\uc785\ub825", "\ucd9c\ub825", "\uc608\uc2dc"
+KO_TOOL, KO_MEMORY, KO_HANDOFF, KO_TOC = "\ub3c4\uad6c", "\uae30\uc5b5", "\uc778\uc218\uc778\uacc4", "\ubaa9\ucc28"
+KO_PRONOUN, KO_PARTICLE = "\uc81c\uac00", "\ub97c"
+LONG_REF = "".join("Line %d of the guide.\n" % i for i in range(120))
+CRITERIA = "  - at least 2 file:line citations\n  - no file changes (read-only)\n"
+EVERY_KIND = ("  - at least 3 source links\n  - at most 800 characters\n  - a comparison table\n  - read-only\n"
+              "  - at least 2 file:line citations\n  - be helpful\n")
+
+
+def desc(text):
+    return sub("Cleans one CSV file for the differential suite. Use when a test needs a valid skill unit.", text)
+
+
+def body(old, new):
+    return sub(old, new)
+
+
+def link(text, files=None):
+    return skill_variant(md_edit=sub("## Example\n", text + "\n## Example\n"), files=files)
+
+
+def repo_variant(text):
+    """A skill inside a git work tree (a .git folder at the top) with tools/run.py at the repo root."""
+    def build(top):
+        os.makedirs(os.path.join(top, ".git"))
+        write(os.path.join(top, "tools", "run.py"), "print(1)\n")
+        return link(text)(os.path.join(top, "skills"))
+    return build
+
+
+def edits(*fns):
+    return lambda t: functools.reduce(lambda acc, f: f(acc), fns, t)
+
+
+def to_bytes(n):
+    return lambda t: t + "x" * (n - len(t.encode("utf-8")) - 1) + "\n"
+
+
+def to_lines(n):
+    return lambda t: t + "".join("Note %d.\n" % i for i in range(n - len(t.splitlines())))
+
+
+def ref_lines(n):
+    """A reference file of exactly n lines whose first heading after the title is not a table of contents."""
+    return "# Long\n## Part\n" + "".join("Line %d of the guide.\n" % i for i in range(n - 2))
+
+
+NO_IO_HEADINGS = edits(body("## Inputs\n", "## Notes\n"), body("## Outputs\n", "## Notes\n"),
+                       body("## Example\n", "## Notes\n"))
+D19 = "Cleans one CSV file"
+
+
+# name -> (builder, row id, legacy status that proves the branch is reached)
+A4_VARIANTS = {
+    "ko-multi-and-also": (skill_variant(md_edit=sub("suite.", "suite %s." % KO_AND_ALSO)), "single-purpose", "fail"),
+    "ko-multi-not-only": (skill_variant(md_edit=sub("suite.", "suite %s." % KO_NOT_ONLY)), "single-purpose", "fail"),
+    "ko-heading-input": (skill_variant(md_edit=body("## Inputs\n", "## %s\n" % KO_INPUT)), "inputs-declared", "pass"),
+    "ko-heading-output": (skill_variant(md_edit=body("## Outputs\n", "## %s\n" % KO_OUTPUT)), "outputs-declared", "pass"),
+    "ko-heading-example": (skill_variant(md_edit=body("## Example\n", "## %s\n" % KO_EXAMPLE)), "example-present", "pass"),
+    "ko-heading-tool": (agent_variant(md_edit=body("## Tools\n", "## %s\n" % KO_TOOL)), "tools-documented", "pass"),
+    "ko-heading-memory": (agent_variant(md_edit=body("## Memory & Handoff\n", "## %s\n" % KO_MEMORY)), "memory-section",
+                          "pass"),
+    "ko-heading-handoff": (agent_variant(md_edit=body("## Memory & Handoff\n", "## %s\n" % KO_HANDOFF)), "memory-section",
+                           "pass"),
+    "ko-toc": (link("See [l](references/long.md).", {"references/long.md": "# Long\n## %s\n%s" % (KO_TOC, LONG_REF)}),
+               "reference-toc", "pass"),
+    "s-base": (skill_variant(), "frontmatter", "pass"),
+    "s-frontmatter-error": (skill_variant(md_edit=fm("bad line\n")), "frontmatter", "fail"),
+    "s-extra-field": (skill_variant(md_edit=fm("inputs: csv_path\n")), "frontmatter-fields", "fail"),
+    "s-host-field": (skill_variant(md_edit=fm('argument-hint: "[file]"\n')), "frontmatter-fields", "pass"),
+    "s-desc-missing": (skill_variant(md_edit=lambda t: re.sub(r"description: .*\n", "", t)), "description-present", "fail"),
+    "s-desc-empty": (skill_variant(md_edit=desc('""')), "description-present", "fail"),
+    "s-desc-list": (skill_variant(md_edit=desc("[a, b]")), "description-present", "fail"),
+    "s-desc-long": (skill_variant(md_edit=desc("Cleans %s files. Use when a test needs a skill." % ("very " * 220))),
+                    "description-length", "fail"),
+    "s-desc-short": (skill_variant(md_edit=desc("Cleans CSVs.")), "description-min-length", "fail"),
+    "s-desc-gt": (skill_variant(md_edit=desc("Cleans one CSV file > 2 MB. Use when a test needs a valid skill unit.")),
+                  "description-no-xml", "fail"),
+    "s-desc-no-when": (skill_variant(md_edit=desc("Cleans one CSV file.")), "description-when", "fail"),
+    "s-desc-negated-when": (skill_variant(md_edit=desc("Cleans one CSV file. Do not use when the file is huge.")),
+                            "description-when", "fail"),
+    "s-desc-quoted-when": (skill_variant(md_edit=desc('Cleans one CSV file, as in "Use when the user asks for it".')),
+                           "description-when", "fail"),
+    "s-desc-read-before": (skill_variant(md_edit=desc("Cleans CSV files. Read this skill before editing a CSV file.")),
+                           "description-when", "pass"),
+    "s-desc-subject": (skill_variant(md_edit=desc("Cleans CSV files. This skill should be used when a CSV file needs "
+                                                  "cleaning.")), "description-when", "pass"),
+    "s-desc-tight-stop": (skill_variant(md_edit=desc("Cleans CSV files. Use when needed.The user asks for a clean "
+                                                     "file.")), "description-when", "fail"),
+    "s-desc-pov": (skill_variant(md_edit=desc("I clean one CSV file. Use when the user wants a clean file.")),
+                   "description-pov", "fail"),
+    "s-desc-pov-ko": (skill_variant(md_edit=desc("%s cleans one CSV file. Use when the user wants a clean file."
+                                                 % KO_PRONOUN)), "description-pov", "fail"),
+    "s-desc-roman": (skill_variant(md_edit=desc("Cleans Phase I CSV files. Use when a test needs a valid skill unit.")),
+                     "description-pov", "pass"),
+    "s-desc-quoted-pov": (skill_variant(md_edit=desc('Cleans files the user calls "my data". Use when a test needs a '
+                                                     'valid skill unit.')), "description-pov", "pass"),
+    "s-many-verbs": (skill_variant(md_edit=desc("Summarizes PDFs, cleans CSVs and sends emails. Use when a test needs a "
+                                                "valid skill unit.")), "single-purpose", "fail"),
+    "s-add-on": (skill_variant(md_edit=desc("Cleans CSV files and also trims them. Use when a test needs a valid skill "
+                                            "unit.")), "single-purpose", "fail"),
+    "s-verb-after-to": (skill_variant(md_edit=desc("Cleans CSV files to report totals and to schedule runs. Use when a "
+                                                   "test needs a valid skill unit.")), "single-purpose", "fail"),
+    "s-compat-ok": (skill_variant(md_edit=fm("compatibility: Python 3.9\n")), "compatibility-length", "pass"),
+    "s-compat-long": (skill_variant(md_edit=fm("compatibility: %s\n" % ("x" * 600))), "compatibility-length", "fail"),
+    "s-compat-list": (skill_variant(md_edit=fm("compatibility: [a, b]\n")), "compatibility-length", "fail"),
+    "s-no-inputs": (skill_variant(md_edit=body("## Inputs\n", "## Notes\n")), "inputs-declared", "fail"),
+    "s-no-outputs": (skill_variant(md_edit=body("## Outputs\n", "## Notes\n")), "outputs-declared", "fail"),
+    "s-fenced-example": (skill_variant(md_edit=body("## Example\n", "```\n## Example\n```\n")), "example-present", "fail"),
+    "s-size-bytes": (skill_variant(md_edit=lambda t: t + "x" * 21000 + "\n"), "size-limit", "fail"),
+    "s-size-lines": (skill_variant(md_edit=lambda t: t + "".join("Note %d.\n" % i for i in range(520))), "size-limit",
+                     "fail"),
+    "s-ref-ok": (link("See [g](references/g.md).", {"references/g.md": "# G\nShort.\n"}), "refs-exist", "pass"),
+    "s-ref-missing": (link("See [m](references/missing.md)."), "refs-exist", "fail"),
+    "s-ref-backslash": (link("See [b](references\\g.md).", {"references/g.md": "# G\n"}), "refs-relative", "fail"),
+    "s-ref-absolute": (link("See [a](/etc/hosts)."), "refs-exist", "fail"),
+    "s-ref-escaping": (link("See [u](../../../../nope.md)."), "refs-relative", "fail"),
+    "s-ref-chain": (link("See [g](references/g.md).", {"references/g.md": "# G\nRun scripts/x.py first.\n",
+                                                       "scripts/x.py": "print(1)\n"}), "refs-one-level", "fail"),
+    "s-ref-chain-back": (link("See [g](references/g.md).", {"references/g.md": "# G\n[back](../SKILL.md) [self](g.md)\n"}),
+                         "refs-one-level", "pass"),
+    "s-ref-deep": (link("See [d](references/deep/d.md).", {"references/deep/d.md": "# D\n"}), "refs-path-depth", "fail"),
+    "s-ref-fenced-run": (link("```bash\npython scripts/x.py\n```", {"scripts/x.py": "print(1)\n"}), "refs-exist", "pass"),
+    "s-ref-fenced-missing": (link("```bash\npython scripts/x.py\n```"), "refs-exist", "fail"),
+    "s-ref-ko-particle": (link("Run scripts/x.py%s now." % KO_PARTICLE, {"scripts/x.py": "print(1)\n"}), "refs-exist",
+                          "pass"),
+    "s-ref-glob": (link("Files in assets/*.png and scripts/ are listed."), "refs-exist", "pass"),
+    "s-ref-repo-root": (repo_variant("See [r](tools/run.py)."), "refs-exist", "needs-review"),
+    "s-ref-up": (repo_variant("See [u](../../tools/run.py)."), "refs-exist", "needs-review"),
+    "s-ref-repo-and-missing": (repo_variant("See [r](tools/run.py) and [m](references/missing.md)."), "refs-exist",
+                               "fail"),
+    "s-toc-ok": (link("See [l](references/long.md).", {"references/long.md": "# Long\n## Contents\n" + LONG_REF}),
+                 "reference-toc", "pass"),
+    "s-toc-missing": (link("See [l](references/long.md).", {"references/long.md": "# Long\n## Part\n" + LONG_REF}),
+                      "reference-toc", "fail"),
+    "s-toc-word": (link("See [l](references/long.md).", {"references/long.md": "# Long\n## TOC\n" + LONG_REF}),
+                   "reference-toc", "pass"),
+    "s-toc-title-only": (link("See [l](references/long.md).", {"references/long.md": "# Long\n" + LONG_REF}),
+                         "reference-toc", "fail"),
+    "s-version-none": (skill_variant(md_edit=sub("metadata:\n  version: 1.0.0\n", "")), "version-format", "n/a"),
+    "s-version-bad": (skill_variant(md_edit=sub("version: 1.0.0", "version: v1")), "version-format", "fail"),
+    "s-version-list": (skill_variant(md_edit=sub("version: 1.0.0", "version: [1, 2]")), "version-format", "fail"),
+    "s-evals-none": (skill_variant(evals_edit=lambda d: None), "evals-count", "fail"),
+    "s-evals-two": (skill_variant(evals_edit=lambda d: dict(d, evals=d["evals"][:2])), "evals-count", "fail"),
+    "a-base": (agent_variant(), "frontmatter", "pass"),
+    "a-no-frontmatter": (agent_variant(md_edit=lambda t: t.replace("---\n", "", 2), wrappers=False), "frontmatter", "fail"),
+    "a-desc-missing": (agent_variant(md_edit=lambda t: re.sub(r"description: .*\n", "", t), wrappers=False),
+                       "description-present", "fail"),
+    "a-short-goal": (agent_variant(md_edit=sub("Explain the repository structure with file and line evidence.",
+                                               "Explain it.")), "goal-present", "fail"),
+    "a-no-criteria": (agent_variant(md_edit=sub("success_criteria:\n" + CRITERIA, "")), "success-measurable", "fail"),
+    "a-vague-criteria": (agent_variant(md_edit=sub(CRITERIA, "  - be helpful\n")), "success-measurable", "fail"),
+    "a-every-criterion-kind": (agent_variant(md_edit=sub(CRITERIA, EVERY_KIND)), "success-measurable", "pass"),
+    "a-criterion-string": (agent_variant(md_edit=sub("success_criteria:\n" + CRITERIA, "success_criteria: read-only\n")),
+                           "success-measurable", "pass"),
+    "a-no-scenarios": (agent_variant(scenarios=()), "scenarios-valid", "fail"),
+    "a-one-scenario": (agent_variant(scenarios=(P.S2,)), "scenarios-present", "fail"),
+    "a-invalid-json": (agent_variant(files={"scenarios/03.json": "{"}), "scenarios-valid", "fail"),
+    "a-scenario-list": (agent_variant(files={"scenarios/03.json": "[]"}), "scenarios-valid", "fail"),
+    "a-scenario-undecodable": (agent_variant(files={"scenarios/03.json": b"\xff\xfe"}), "scenarios-valid", "fail"),
+    "a-no-expected": (agent_variant(scenarios=(P.S2, {k: v for k, v in P.S1.items() if k != "expected_outcome"})),
+                      "scenarios-expected", "fail"),
+    "a-single-turn": (agent_variant(scenarios=(P.S1, dict(P.S1, id="other"))), "multi-turn-scenario", "fail"),
+    "a-undeclared-tool": (agent_variant(scenarios=(P.S2, dict(P.S1, expected_tools=["glob", "bash"]))), "tools-subset",
+                          "fail"),
+    "a-tools-string": (agent_variant(md_edit=sub("tools: [glob, grep, read_file]", "tools: glob")), "tools-declared",
+                       "pass"),
+    "a-no-tools": (agent_variant(md_edit=sub("tools: [glob, grep, read_file]\n", "")), "tools-declared", "fail"),
+    "a-no-tools-section": (agent_variant(md_edit=body("## Tools\n", "## Usage\n")), "tools-documented", "fail"),
+    "a-context-heading": (agent_variant(md_edit=body("## Memory & Handoff\n", "## Context\n")), "memory-section", "pass"),
+    "a-no-memory": (agent_variant(md_edit=body("## Memory & Handoff\n", "## Notes\n")), "memory-section", "fail"),
+    "s-fm-comment-headings": (skill_variant(md_edit=edits(NO_IO_HEADINGS, fm("# Inputs\n# Outputs\n# Example\n"))),
+                              "inputs-declared", "fail"),
+    "s-fm-block-headings": (skill_variant(md_edit=edits(NO_IO_HEADINGS, desc(
+        "|\n  Cleans one CSV file. Use when a test needs a valid skill unit.\n  ## Inputs\n  ## Outputs\n  ## Example"))),
+                            "example-present", "fail"),
+    "s-fm-compat-ref": (skill_variant(md_edit=fm("compatibility: needs scripts/missing.py\n")), "refs-exist", "pass"),
+    "s-size-bytes-at": (skill_variant(md_edit=to_bytes(20000)), "size-limit", "pass"),
+    "s-size-bytes-over": (skill_variant(md_edit=to_bytes(20001)), "size-limit", "fail"),
+    "s-size-lines-at": (skill_variant(md_edit=to_lines(499)), "size-limit", "pass"),
+    "s-size-lines-over": (skill_variant(md_edit=to_lines(500)), "size-limit", "fail"),
+    "s-toc-lines-at": (link("See [l](references/long.md).", {"references/long.md": ref_lines(100)}), "reference-toc",
+                       "n/a"),
+    "s-toc-lines-over": (link("See [l](references/long.md).", {"references/long.md": ref_lines(101)}), "reference-toc",
+                         "fail"),
+    "s-compat-blank": (skill_variant(md_edit=fm('compatibility: "   "\n')), "compatibility-length", "fail"),
+    "s-compat-empty": (skill_variant(md_edit=fm("compatibility: ''\n")), "compatibility-length", "fail"),
+    "s-compat-padded": (skill_variant(md_edit=fm('compatibility: "  Python 3.9  "\n')), "compatibility-length", "pass"),
+    "s-compat-padded-max": (skill_variant(md_edit=fm('compatibility: " %s "\n' % ("x" * 500))), "compatibility-length",
+                            "pass"),
+    "s-desc-blank": (skill_variant(md_edit=desc('"   "')), "description-present", "fail"),
+    "s-desc-padded-short": (skill_variant(md_edit=desc('"  %s  "' % D19)), "description-min-length", "fail"),
+    "s-desc-padded-min": (skill_variant(md_edit=desc('"  %s.  "' % D19)), "description-min-length", "pass"),
+    "s-desc-padded-max": (skill_variant(md_edit=desc('" C%s "' % ("x" * 1023))), "description-length", "pass"),
+    "s-desc-padded-over": (skill_variant(md_edit=desc('" C%s "' % ("x" * 1024))), "description-length", "fail"),
+    "a-padded-goal": (agent_variant(md_edit=sub("Explain the repository structure with file and line evidence.",
+                                                '"Explain things\\n"')), "goal-present", "fail"),
+}
+KO_VARIANTS = ("ko-multi-and-also", "ko-multi-not-only", "ko-heading-input", "ko-heading-output", "ko-heading-example",
+               "ko-heading-tool", "ko-heading-memory", "ko-heading-handoff", "ko-toc")
+
+
+@functools.lru_cache(maxsize=None)
+def a4_variant_unit(name):
+    return A4_VARIANTS[name][0](os.path.join(tmpdir(), "a4", name))
+
+
+def unescape(text):
+    """text with the \\uXXXX escapes of the oracle (non-ASCII written as escapes) decoded."""
+    return re.sub(r"\\u([0-9a-f]{4})", lambda m: chr(int(m.group(1), 16)), text)
 
 
 def corpus_units():
@@ -915,6 +1162,7 @@ def area_rows():
     units += [("variant:evals:" + n, evals_variant_unit(n)) for n in EVALS_VARIANTS]
     units += [("variant:frontmatter:" + n, frontmatter_variant_unit(n)) for n in FRONTMATTER_UNITS]
     units += [("variant:a3:" + n, a3_variant_unit(n)) for n in A3_VARIANTS]
+    units += [("variant:a4:" + n, a4_variant_unit(n)) for n in A4_VARIANTS]
     for key, u in units:
         with legacy():
             old, old_fn = a3_row_view(eva.check(u, EMPTY_BUNDLE)), a3_functions(u)
@@ -1097,24 +1345,21 @@ class TestCorpusRows(unittest.TestCase):
         u = os.path.join(ROOT, "golden", "skills", "csv-cleaner")
         r = eva.check(u)
         ids = [c["id"] for c in r.checks]
-        for rid in RULE_FILES:
-            self.assertEqual(ids.count(rid), 1, ids)
-        bundle_ids = [rule.id for rule in RR.default_bundle().rules
-                      if rule.file not in ROW_FAMILY_FILES and "skill" in rule.applies_to]
-        self.assertEqual(ids[-len(bundle_ids):], bundle_ids)
-        family = [rule.id for rule in RR.default_bundle().rules
-                  if rule.file in ROW_FAMILY_FILES and "skill" in rule.applies_to]
-        self.assertEqual([i for i in ids if i in family], family)
-        self.assertLess(ids.index(family[0]), ids.index(bundle_ids[0]))
-        direct = [c["id"] for c in eva.check_skill(u).checks]
-        self.assertIn("field-types", direct)
-        self.assertIn("evals-valid", direct)
+        self.assertEqual(sorted(set(ids)), sorted(ids))
+        self.assertLessEqual(set(SHAPE_IDS), set(ids))
+        family =[rule.id for f in eva.FAMILY_FILES for rule in RR.default_bundle().rules
+                  if rule.file == f and "skill" in rule.applies_to]
+        self.assertEqual(ids, family)
+        self.assertTrue(all("rule" in c for c in r.checks))
+        self.assertEqual([c["id"] for c in eva.check_skill(u).checks], ids)
 
     def test_a_non_default_bundle_without_the_rules_keeps_the_built_in_rows(self):
         selftest = RR.load_bundle(os.path.join(ROOT, "tests", "rules", "_selftest"))
-        ids = [c["id"] for c in eva.check(os.path.join(ROOT, "golden", "skills", "csv-cleaner"), selftest).checks]
+        u = os.path.join(ROOT, "golden", "skills", "csv-cleaner")
+        ids = [c["id"] for c in eva.check(u, selftest).checks]
         for rid in RULE_FILES:
             self.assertEqual(ids.count(rid), 1, ids)
+        self.assertEqual(ids, [c["id"] for c in eva.check(u).checks] + ["selftest-name-matches-folder", "bundle-non-default"])
 
     def test_the_evals_valid_reason_keeps_the_old_text_and_names_the_rule(self):
         u = evals_variant_unit("id-missing")
@@ -1161,9 +1406,9 @@ class TestA3Variants(unittest.TestCase):
                                                 "codex_policy", "english_eval_problems", "parity_violations",
                                                 "parity_line"})
 
-    def test_the_only_recorded_difference_is_the_naming_dedupe(self):
+    def test_the_recorded_differences_are_the_naming_dedupe_and_the_dropped_korean_alternatives(self):
         unit = "tests/rules/_selftest/selftest-name-matches-folder/fail/bad-name"
-        self.assertEqual(intentional(), ["row-map:" + unit])
+        self.assertEqual(intentional(), ["row-map:" + unit] + ["row-map:variant:a4:" + n for n in KO_VARIANTS])
         diffs = all_differences()
         d = diffs[intentional()[0]]
         old = d["legacy"]["rows"]["parity-skill-opencode"]
@@ -1298,7 +1543,9 @@ class TestLegacyOracle(unittest.TestCase):
             return f
         targets = [(eva, n) for n in dir(eva) if n.startswith("_legacy_")] + \
                   [(skill_eval, n) for n in dir(skill_eval) if n.startswith("_legacy_")] + \
-                  [(skill_eval, "_check_problems"), (skill_eval, "_csv_rows_problems"), (eva, "_assertion_list")]
+                  [(skill_eval, "_check_problems"), (skill_eval, "_csv_rows_problems"), (eva, "_assertion_list")] + \
+                  [(L, n) for n, f in vars(L).items() if inspect.isfunction(f) and f.__module__ == L.__name__]
+        self.assertGreaterEqual(len([t for t in targets if t[0] is L]), 20)
         with contextlib.ExitStack() as stack:
             for mod, n in targets:
                 stack.enter_context(mock.patch.object(mod, n, trip(n)))
@@ -1931,6 +2178,259 @@ class TestEvalSetBranches(unittest.TestCase):
                 self.assertTrue(any(phrase in p for p in old), old)
                 self.assertEqual([strip(p) for p in new], old)
                 self.assertTrue(same_typed(old_spec, new_spec))
+
+
+ORACLE_QUALIFIED = ("DESCRIPTION_MAX", "NAME_MAX", "RESERVED_NAME_WORDS", "Report", "_field_type_errors", "_str_field",
+                    "_strs", "add_english_checks", "add_parity_checks", "as_list", "evals_errors", "load_scenarios",
+                    "name_errors", "outcome_evidence", "parse_frontmatter_ex", "read_text", "yaml_typed_keys")
+# sha256 (first 16 hex digits) of each A3 source segment of eva.py, in A3 order, computed from the A3 export by
+# /tmp/a4-owner/gen_oracle.py (/tmp/a4-owner/oracle-pins.json).
+ORACLE_PINS = dict(x.split(":") for x in """
+SKILL_MAX_BYTES:be13eabf0de2627e SKILL_MAX_LINES:bd50b9359dda875b SKILL_FIELDS:a9e7e0eec0ad7886
+HOST_SKILL_FIELDS:54a9bc7350a8e8d5 COMPATIBILITY_MAX:a0b3369af9a557d9 REF_TOC_LINES:d78fb29ecb2c0dac
+MIN_EVALS:b1863a9a172b55a6 DESCRIPTION_MIN:65bbfe035973c06b _DESC_USE_VERB:1292e785fb7b9293
+DESC_USE_START_RE:a335fd7cf32dd044 DESC_THIS_SKILL_OBJ_RE:616b3afad9671fc7 DESC_THIS_SKILL_SUBJ_RE:1c813243a531d2fa
+DESC_READ_RE:7de15ab0470724a3 DESC_NEGATION_RE:adaee399be951859 DESC_SENTENCE_RE:53e4d38d2f2a2858
+DESC_TIGHT_STOP_RE:70982cc3393269e6 DESC_WHEN_MIN_WORDS:33099e4fa8f8a9fc DESC_WHEN_VAGUE:d4ebdf68d5234eb2
+desc_when_clause:e178831d2c1d9922 _ROMAN_I_BEFORE:cfa66e1042b0aa89 DESC_PERSON_RE:9b934bacc1861556
+_ROMAN_I_RE:221e5f173fbf155d _QUOTED_RE:616d6661d9fcd9a0 _unquoted:3da568aec3f6f344 desc_person_words:26baa927dadfbe01
+TASK_VERBS:b3084d53a4c4dff1 AMBIGUOUS_TASK_VERBS:3edcd70caeda3501 SINGLE_PURPOSE_MAX_VERBS:db4dc0c0bc693c4a
+MULTI_PURPOSE_RE:d1c30948c371d309 _verb_forms:ae94ab1a5da7afc9 TASK_VERB_FORMS:75b46162daeb99d2
+TASK_TOKEN_RE:7f321bba238e9c5c TASK_EXCLUSION_RE:ca18562e8b9dcce0 TASK_JOINERS:15a6c806e37f8db7
+desc_task_verbs:5318be50fa20a132 FENCE_RE:7031abfea7e93be9 ATX_RE:aaf64c81fbe1fc84 _split_fences:136d8258e1ebd4e8
+_unfenced:208f8f1f4f611ff7 _fenced:c722bf0879896c9e headings:140bcd20df383d72 has_section:12e649e5fc0414f8
+_common_name:acca040021e0951d SCHEME_RE:19e20bbe03fabb5d WIN_DRIVE_RE:db06c58c43603017 MD_LINK_RE:2aa51d37a51d11f5
+BUNDLED_REF_RE:7ebfdb12c2ffc4d1 GLOB_CHARS:426feb0e6eab1102 HANGUL:9932090468d1f50b KO_PARTICLE_RE:f2e55680e2401be9
+RUNNER:9899c7eccf0db546 _ARG:1acd05246e8bd0cd _ENV:9bcc81151d715be8 FENCED_RUN_RE:df25deedeafe89a1
+FENCED_EXEC_RE:f3ba7011524594ce CMD_SPLIT_RE:cc1456fcf379b04c TREE_CHARS:1454545f6ba21e95
+_fenced_run_refs:16d0ea71bd3d710d _clean_bundled:9f61f27ed6d37adf local_refs:30bd011e19f02fa0
+_ref_problem:4f36d9df9aff42e9 git_root:3ef992f54795e915 repo_root_ref:c9af83ec24ebd3ee _within:76aff3fd19899caf
+ref_targets:2e9c1404737acd8c _toc_first:837ff866afe665d2 check_skill:4522dcd30ee65958 check_agent:ba76b680715a4733
+""".split())
+
+
+def oracle_segments():
+    with open(L.__file__, encoding="utf-8") as f:
+        src = f.read()
+    out = {}
+    for node in ast.parse(src).body:
+        name = node.name if isinstance(node, ast.FunctionDef) else \
+            node.targets[0].id if isinstance(node, ast.Assign) else None
+        if name:
+            out[name] = ast.get_source_segment(src, node)
+    return out
+
+
+def heading_words(fn):
+    """{row id: the ASCII words of its has_section call} in the oracle body fn."""
+    out = {}
+    for node in ast.walk(ast.parse(inspect.getsource(fn))):
+        if isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "add" and len(node.args) > 2 and \
+                isinstance(node.args[2], ast.Call) and getattr(node.args[2].func, "id", None) == "has_section":
+            out[node.args[0].value] = [a.value for a in node.args[2].args[1:] if a.value.isascii()]
+    return out
+
+
+def operand(fname, rid, key):
+    doc = load_json(os.path.join(ROOT, "rules", fname))
+    return next(r for r in doc["rules"] if r["id"] == rid)["check"][key]
+
+
+def code_literals(*fns):
+    """{call name: its first string argument} of the lstrip, re.findall and re.sub calls in the oracle bodies fns."""
+    out = {}
+    for fn in fns:
+        for node in ast.walk(ast.parse(inspect.getsource(fn))):
+            name = getattr(node.func, "attr", None) if isinstance(node, ast.Call) else None
+            if name in ("lstrip", "findall", "sub") and node.args and isinstance(node.args[0], ast.Constant):
+                out.setdefault(name, []).append(node.args[0].value)
+    return {k: v[0] for k, v in out.items() if len(v) == 1}
+
+
+# The whole check node of every A4 rule on a generic op (not a primitive and not a host op).
+GENERIC_NODES = {"goal-present": {"op": "regex", "sel": "frontmatter:#/goal", "normalize": ["string-or-empty", "strip"],
+                                  "pattern": r"[\s\S]{15}"}}
+
+
+class TestStructureOracle(unittest.TestCase):
+    def test_each_oracle_segment_is_the_a3_segment_but_for_qualification_and_escapes(self):
+        segs = oracle_segments()
+        self.assertEqual(list(segs), list(ORACLE_PINS))
+        for name, pin in ORACLE_PINS.items():
+            seg = re.sub(r"\beva\.(%s)\b" % "|".join(ORACLE_QUALIFIED), r"\1", segs[name])
+            self.assertEqual(hashlib.sha256(unescape(seg).encode("utf-8")).hexdigest()[:16], pin, name)
+
+    def test_only_the_differential_suite_imports_the_oracle(self):
+        allowed = {"tests/test_differential.py", "tests/differential/legacy_structure.py"}
+        for dp, dn, fn in os.walk(ROOT):
+            dn[:] = [d for d in dn if not d.startswith(".") and d != "__pycache__"]
+            for n in fn:
+                p = os.path.join(dp, n)
+                if n.endswith(".py") and rel(p) not in allowed:
+                    with open(p, encoding="utf-8") as f:
+                        self.assertNotIn("legacy_structure", f.read(), rel(p))
+
+
+class TestDescriptionData(unittest.TestCase):
+    def test_every_data_value_equals_the_a3_constant_but_the_korean_alternatives(self):
+        doc = load_json(DESC_DATA)
+        pat = lambda rx: unescape(rx.pattern)
+        a3_multi = pat(L.MULTI_PURPOSE_RE)
+        self.assertTrue(a3_multi.endswith("|%s|%s" % (KO_AND_ALSO, KO_NOT_ONLY)), a3_multi)
+        headings = dict(heading_words(L.check_skill), **heading_words(L.check_agent))
+        literals = code_literals(L.desc_when_clause, L.desc_task_verbs)
+        expect = {
+            "DESC_LIST_MARKERS": literals["lstrip"], "DESC_WORD_RE": literals["findall"],
+            "TASK_JOINER_PHRASE_RE": literals["sub"],
+            "DESC_USE_VERB": L._DESC_USE_VERB, "DESC_USE_START_RE": pat(L.DESC_USE_START_RE),
+            "DESC_THIS_SKILL_OBJ_RE": pat(L.DESC_THIS_SKILL_OBJ_RE), "DESC_THIS_SKILL_SUBJ_RE": pat(L.DESC_THIS_SKILL_SUBJ_RE),
+            "DESC_READ_RE": pat(L.DESC_READ_RE), "DESC_NEGATION_RE": pat(L.DESC_NEGATION_RE),
+            "DESC_SENTENCE_RE": pat(L.DESC_SENTENCE_RE), "DESC_TIGHT_STOP_RE": pat(L.DESC_TIGHT_STOP_RE),
+            "DESC_WHEN_MIN_WORDS": L.DESC_WHEN_MIN_WORDS, "DESC_WHEN_VAGUE": sorted(L.DESC_WHEN_VAGUE),
+            "ROMAN_I_BEFORE": L._ROMAN_I_BEFORE, "DESC_PERSON_RE": pat(L.DESC_PERSON_RE), "QUOTED_RE": pat(L._QUOTED_RE),
+            "TASK_VERBS": L.TASK_VERBS, "AMBIGUOUS_TASK_VERBS": sorted(L.AMBIGUOUS_TASK_VERBS),
+            "TASK_TOKEN_RE": pat(L.TASK_TOKEN_RE), "TASK_EXCLUSION_RE": pat(L.TASK_EXCLUSION_RE),
+            "TASK_JOINERS": sorted(L.TASK_JOINERS), "SINGLE_PURPOSE_MAX_VERBS": L.SINGLE_PURPOSE_MAX_VERBS,
+            "MULTI_PURPOSE_RE": a3_multi[:-len("|%s|%s" % (KO_AND_ALSO, KO_NOT_ONLY))],
+            "HEADING_WORDS": {"inputs": headings["inputs-declared"], "outputs": headings["outputs-declared"],
+                              "example": headings["example-present"], "tools": headings["tools-documented"],
+                              "memory": headings["memory-section"]},
+        }
+        got = {k: unescape(v) if isinstance(v, str) else v for k, v in doc.items() if k != "$comment"}
+        self.assertEqual(got, expect)
+        self.assertEqual(expect["HEADING_WORDS"]["memory"], ["memory", "handoff", "context"])
+
+    def test_every_threshold_operand_equals_the_a3_constant(self):
+        s, d, a = "skill-structure.rules.json", "skill-description.rules.json", "agent-structure.rules.json"
+        pairs = [
+            (operand(s, "frontmatter-fields", "fields"), list(L.SKILL_FIELDS)),
+            (operand(s, "frontmatter-fields", "host_fields"), list(L.HOST_SKILL_FIELDS)),
+            (operand(s, "compatibility-length", "max"), L.COMPATIBILITY_MAX), (operand(s, "compatibility-length", "min"), 1),
+            (operand(s, "size-limit", "max_bytes"), L.SKILL_MAX_BYTES), (operand(s, "size-limit", "lines_below"), L.SKILL_MAX_LINES),
+            (operand(s, "reference-toc", "toc_lines"), L.REF_TOC_LINES), (operand(s, "evals-count", "min"), L.MIN_EVALS),
+            (operand(s, "refs-path-depth", "depth"), 1), (operand(s, "version-format", "pattern"), r"^\d+\.\d+\.\d+$"),
+            (operand(s, "reference-toc", "toc_pattern"), unescape(re.search(r'r"(contents[^"]*)"',
+                                                                   inspect.getsource(L._toc_first)).group(1))
+             .replace("|" + KO_TOC, "")),
+            (operand(d, "description-length", "max"), eva.DESCRIPTION_MAX), (operand(d, "description-length", "min"), 1),
+            (operand(d, "description-min-length", "min"), L.DESCRIPTION_MIN), (operand(d, "description-no-xml", "chars"), "<>"),
+            (operand(a, "scenarios-present", "min"), 2), (operand(a, "goal-present", "pattern"), r"[\s\S]{15}"),
+        ]
+        for got, want in pairs:
+            self.assertEqual(got, want)
+        self.assertEqual(eva.DESCRIPTION_MAX, 1024)
+        self.assertIn("1 <= len(desc) <= eva.DESCRIPTION_MAX", inspect.getsource(L.check_skill))
+        self.assertIn("len(goal) >= 15", inspect.getsource(L.check_agent))
+        self.assertIn("len(valid) >= 2", inspect.getsource(L.check_agent))
+
+    def test_every_a4_rule_on_a_generic_op_has_its_whole_check_node_pinned(self):
+        generic = {}
+        for fname in sorted(set(A4_RULE_FILES.values())):
+            for r in load_json(os.path.join(ROOT, "rules", fname))["rules"]:
+                if r["check"]["op"] not in RR.HOST_OPS and r["check"]["op"] not in RR.PRIMITIVES:
+                    generic[r["id"]] = r["check"]
+        self.assertEqual(generic, GENERIC_NODES)
+        self.assertIn('goal = eva._str_field(meta, "goal")', inspect.getsource(L.check_agent))
+        self.assertEqual(eva._str_field({"goal": " x\n"}, "goal"), "x")
+
+
+class TestA4Variants(unittest.TestCase):
+    def test_every_a4_variant_reaches_its_legacy_branch(self):
+        wrong = {}
+        for name, (_, rid, status) in A4_VARIANTS.items():
+            u = a4_variant_unit(name)
+            with legacy():
+                rows = [c for c in eva.check(u, EMPTY_BUNDLE).checks if c["id"] == rid]
+            if [c["status"] for c in rows] != [status]:
+                wrong[name] = (rid, status, [(c["status"], c["reason"]) for c in rows])
+        self.assertEqual(wrong, {})
+
+    def test_the_edge_variants_sit_on_their_edge(self):
+        want = {"s-size-bytes-at": ("size-limit", "SKILL.md 20000 bytes / "),
+                "s-size-bytes-over": ("size-limit", "SKILL.md 20001 bytes / "),
+                "s-size-lines-at": ("size-limit", " / 499 lines ("), "s-size-lines-over": ("size-limit", " / 500 lines ("),
+                "s-toc-lines-at": ("reference-toc", "no referenced .md file over 100 lines"),
+                "s-toc-lines-over": ("reference-toc", "over 100 lines start with a table of contents: missing in "),
+                "s-compat-padded": ("compatibility-length", "compatibility length 10 (1..500)"),
+                "s-compat-padded-max": ("compatibility-length", "compatibility length 500 (1..500)"),
+                "s-compat-blank": ("compatibility-length", "compatibility length 0 (1..500)"),
+                "s-compat-empty": ("compatibility-length", "compatibility length 0 (1..500)"),
+                "s-desc-padded-short": ("description-min-length", "description length 19 ("),
+                "s-desc-padded-min": ("description-min-length", "description length 20 ("),
+                "s-desc-padded-max": ("description-length", "description length 1024 (1..1024)"),
+                "s-desc-padded-over": ("description-length", "description length 1025 (1..1024)"),
+                "s-fm-comment-headings": ("frontmatter", "YAML frontmatter between --- lines"),
+                "s-fm-block-headings": ("frontmatter", "YAML frontmatter between --- lines"),
+                "s-fm-compat-ref": ("compatibility-length", "compatibility length 24 (1..500)"),
+                "a-padded-goal": ("frontmatter", "YAML frontmatter")}
+        got = {}
+        for name, (rid, text) in want.items():
+            with legacy():
+                reasons = [c["reason"] for c in eva.check(a4_variant_unit(name), EMPTY_BUNDLE).checks if c["id"] == rid]
+            got[name] = (rid, text if len(reasons) == 1 and (reasons[0] == text if rid == "frontmatter" else
+                                                             text in reasons[0]) else reasons)
+        self.assertEqual(got, want)
+        with open(os.path.join(a4_variant_unit("a-padded-goal"), "AGENT.md"), encoding="utf-8") as f:
+            goal = eva.parse_frontmatter(f.read())[0]["goal"]
+        self.assertEqual((goal, len(goal.strip())), ("Explain things\n", 14))
+
+    def test_every_moved_row_is_compared_with_its_reason_on_variants_and_fixtures(self):
+        _, compared = area_rows()
+        self.assertEqual(len([c for c in compared if c.startswith("variant:a4:")]), len(A4_VARIANTS))
+        for rid in A4_RULE_FILES:
+            self.assertTrue(any(c.startswith("tests/rules/%s/" % rid) for c in compared), rid)
+        reached = {v[1] for v in A4_VARIANTS.values()}
+        self.assertEqual(set(A4_RULE_FILES) - reached, set())
+        for name in ("s-base", "a-base"):
+            reasons = a3_row_view(eva.check(a4_variant_unit(name)))["reasons"]
+            ids = {c["id"] for c in eva.check(a4_variant_unit(name)).checks}
+            self.assertEqual(ids & (set(A4_RULE_FILES) | set(SHAPE_IDS)), set(reasons) & (set(A4_RULE_FILES) | set(SHAPE_IDS)))
+
+    def test_each_dropped_korean_alternative_changes_only_its_row(self):
+        diffs = all_differences()
+        flip = {"pass": "fail", "fail": "pass"}
+        for name in KO_VARIANTS:
+            _, rid, old_status = A4_VARIANTS[name]
+            d = diffs["row-map:variant:a4:" + name]
+            for part in ("rows", "reasons"):
+                changed = {k for k in set(d["legacy"][part]) | set(d["new"][part])
+                           if d["legacy"][part].get(k) != d["new"][part].get(k)}
+                self.assertLessEqual(changed, {rid}, (name, part))
+            self.assertEqual((d["legacy"]["rows"][rid][0], d["new"]["rows"][rid][0]), (old_status, flip[old_status]), name)
+            self.assertNotIn("functions:variant:a4:" + name, diffs)
+
+    def test_an_unreadable_skill_md_gives_the_legacy_frontmatter_row(self):
+        """Not a full variant: a non-UTF-8 SKILL.md is the A2 field-types split that the A3 head already fails closed
+        (A3 owner follow-up), so only the moved frontmatter row is compared here."""
+        u = skill_variant(files={"SKILL.md": b"---\nname: diff-base\n---\n\xff\xfe\n"})(os.path.join(tmpdir(), "a4x", "u"))
+        with legacy():
+            old = [(c["status"], c["must"], c["reason"]) for c in eva.check(u, EMPTY_BUNDLE).checks if c["id"] == "frontmatter"]
+        new = [(c["status"], c["must"], c["reason"]) for c in eva.check(u).checks if c["id"] == "frontmatter"]
+        self.assertEqual(new, old)
+        self.assertEqual(new[0][0], "fail")
+        self.assertIn("cannot read SKILL.md", new[0][2])
+
+    def test_each_korean_variant_uses_a_word_the_a3_oracle_holds(self):
+        src = unescape(inspect.getsource(L.check_skill) + inspect.getsource(L.check_agent))
+        for word in (KO_INPUT, KO_OUTPUT, KO_EXAMPLE, KO_TOOL, KO_MEMORY, KO_HANDOFF):
+            self.assertIn('"%s"' % word, src)
+        self.assertIn(KO_TOC, unescape(inspect.getsource(L._toc_first)))
+        self.assertIn("|%s|%s" % (KO_AND_ALSO, KO_NOT_ONLY), unescape(L.MULTI_PURPOSE_RE.pattern))
+        self.assertIn(KO_PRONOUN, unescape(L.DESC_PERSON_RE.pattern))
+
+    def test_every_file_a4_adds_is_ascii(self):
+        files = [os.path.join(ROOT, *p.split("/")) for p in (
+            "rules/skill-structure.rules.json", "rules/skill-description.rules.json", "rules/agent-structure.rules.json",
+            "rules/data/description.json", "engine/primitives/heading_present.py",
+            "engine/primitives/description_heuristics.py", "engine/primitives/local_refs.py",
+            "tests/test_rule_structure.py", "tests/differential/legacy_structure.py", "tests/differential/intentional.json")]
+        for rid in A4_RULE_FILES:
+            for dp, dn, fn in os.walk(os.path.join(ROOT, "tests", "rules", rid)):
+                files += [os.path.join(dp, n) for n in fn]
+        self.assertGreater(len(files), 150)
+        for f in files:
+            with open(f, "rb") as fh:
+                self.assertTrue(fh.read().isascii(), rel(f))
 
 
 class TestAscii(unittest.TestCase):

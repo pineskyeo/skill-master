@@ -1,0 +1,160 @@
+{
+  "ruleset": "skill-structure",
+  "version": "1.0.0",
+  "rules": [
+    {
+      "id": "frontmatter",
+      "applies_to": ["skill"],
+      "category": "structure",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"url": "https://agentskills.io/specification", "section": "SKILL.md YAML frontmatter", "verified": "2026-10-19"},
+      "check": {"op": "host_frontmatter"},
+      "message": "YAML frontmatter between --- lines{error}",
+      "fix": "Start SKILL.md with a first line of exactly '---', write the frontmatter as a 'key: value' mapping (name, description), and close it with a '---' line."
+    },
+    {
+      "id": "frontmatter-fields",
+      "applies_to": ["skill"],
+      "category": "structure",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"url": "https://agentskills.io/specification", "section": "frontmatter fields (skills-ref and skill-creator quick_validate reject others; argument-hint and disable-model-invocation are Claude Code host fields)", "verified": "2026-10-19"},
+      "check": {"op": "host_frontmatter_fields", "fields": ["name", "description", "license", "compatibility", "metadata", "allowed-tools"], "host_fields": ["argument-hint", "disable-model-invocation"]},
+      "message": "frontmatter fields within spec {spec}{host}{unexpected}",
+      "fix": "Remove the fields outside the spec {extra} from the frontmatter. Put inputs and outputs in the body under '## Inputs' and '## Outputs' sections, and other values as strings under metadata:."
+    },
+    {
+      "id": "compatibility-length",
+      "applies_to": ["skill"],
+      "category": "structure",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"url": "https://agentskills.io/specification", "section": "compatibility field (1 to 500 characters, optional)", "verified": "2026-10-19"},
+      "check": {"op": "host_field_length", "field": "compatibility", "min": 1, "max": 500},
+      "message": {"pass": "compatibility length {length} ({min}..{max})", "fail": "compatibility length {length} ({min}..{max})", "na": "no compatibility (optional)"},
+      "fix": "Make compatibility a string of {min} to {max} characters (remove the field when there are no environment requirements)."
+    },
+    {
+      "id": "inputs-declared",
+      "applies_to": ["skill"],
+      "category": "io",
+      "severity": "soft",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "house rule: the body declares its inputs in a heading section (README rule table; no dated record)", "verified": null},
+      "check": {"op": "heading_present", "data": "data/description.json", "words": "inputs"},
+      "message": "inputs declared (## Inputs section)",
+      "fix": "Add an '## Inputs' section to the body (a frontmatter inputs: field is outside the spec)."
+    },
+    {
+      "id": "outputs-declared",
+      "applies_to": ["skill"],
+      "category": "io",
+      "severity": "soft",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "house rule: the body declares its outputs in a heading section (README rule table; no dated record)", "verified": null},
+      "check": {"op": "heading_present", "data": "data/description.json", "words": "outputs"},
+      "message": "outputs declared (## Outputs section)",
+      "fix": "Add an '## Outputs' section to the body (a frontmatter outputs: field is outside the spec)."
+    },
+    {
+      "id": "example-present",
+      "applies_to": ["skill"],
+      "category": "io",
+      "severity": "soft",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "house rule: the body shows an input and its output in an example section (README rule table; no dated record)", "verified": null},
+      "check": {"op": "heading_present", "data": "data/description.json", "words": "example"},
+      "message": "has ## Example section",
+      "fix": "Add an '## Example' section that shows an input and its output."
+    },
+    {
+      "id": "size-limit",
+      "applies_to": ["skill"],
+      "category": "structure",
+      "severity": "soft",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "agentskills.io and Claude best practices: keep SKILL.md under 500 lines; 20000 bytes is a house proxy for the 5000-token body budget (cited in eva.py; no dated record)", "verified": null},
+      "check": {"op": "host_main_file_size", "max_bytes": 20000, "lines_below": 500},
+      "message": "SKILL.md {bytes} bytes / {lines} lines (<={max_bytes} bytes, <{lines_below} lines)",
+      "fix": "Move long content into references/ and link it from SKILL.md."
+    },
+    {
+      "id": "refs-relative",
+      "applies_to": ["skill"],
+      "category": "structure",
+      "severity": "soft",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"url": "https://agentskills.io/specification", "section": "file references (relative paths from the skill root)", "verified": "2026-10-19"},
+      "check": {"op": "local_refs", "check": "relative"},
+      "message": "refs are forward-slash paths relative to the skill root{detail}",
+      "fix": "Write each reference as a forward-slash path relative to the skill folder (for example references/guide.md): {problems}"
+    },
+    {
+      "id": "refs-exist",
+      "applies_to": ["skill"],
+      "category": "structure",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "house rule: every local file reference resolves inside the skill folder; a reference found only from the enclosing git repo needs a review (README rule table; no dated record)", "verified": null},
+      "check": {"op": "local_refs", "check": "exist"},
+      "message": {"pass": "referenced files exist{detail}", "fail": "referenced files exist{detail}", "review": "{detail} (works only when the skill runs inside that repo)"},
+      "fix": {"fail": "Create each missing file or remove its reference, and remove each reference that points outside the skill folder and the repo (an absolute path, a backslash, a '..' or symlink escape) or move that file into the skill folder and link it with a relative path: {refs}", "review": "To use the skill outside the repo, put the files in the skill folder (scripts/ and the like). If the skill runs only inside the repo, say in the body that the paths are relative to the repo root and have a person confirm it: {refs}"}
+    },
+    {
+      "id": "refs-one-level",
+      "applies_to": ["skill"],
+      "category": "structure",
+      "severity": "soft",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"url": "https://agentskills.io/specification", "section": "file references (keep them one level deep from SKILL.md)", "verified": "2026-10-19"},
+      "check": {"op": "local_refs", "check": "one_level"},
+      "message": "no nested reference chains (files linked from SKILL.md link nothing SKILL.md doesn't){detail}",
+      "fix": "Keep each referenced file from referencing other files; link every file it needs directly from SKILL.md: {chains}"
+    },
+    {
+      "id": "refs-path-depth",
+      "applies_to": ["skill"],
+      "category": "structure",
+      "severity": "soft",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "house rule: referenced files sit at most one folder deep, as in scripts/x or references/x (README rule table; no dated record)", "verified": null},
+      "check": {"op": "local_refs", "check": "path_depth", "depth": 1},
+      "message": "refs at most one directory deep{detail}",
+      "fix": "Keep referenced files one folder deep, as in scripts/x or references/x."
+    },
+    {
+      "id": "reference-toc",
+      "applies_to": ["skill"],
+      "category": "structure",
+      "severity": "soft",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "Claude skill authoring best practices: reference files longer than 100 lines start with a table of contents (cited in eva.py; no dated record)", "verified": null},
+      "check": {"op": "local_refs", "check": "toc", "toc_lines": 100, "toc_pattern": "contents|\\btoc\\b"},
+      "message": {"pass": "reference files over {toc_lines} lines start with a table of contents{detail}", "fail": "reference files over {toc_lines} lines start with a table of contents{detail}", "na": "no referenced .md file over {toc_lines} lines"},
+      "fix": "Put a '## Contents' table of contents at the top of each reference file over {toc_lines} lines, right after its title: {files}"
+    },
+    {
+      "id": "version-format",
+      "applies_to": ["skill"],
+      "category": "structure",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "house rule: metadata.version is a SemVer string when present (README rule table; no dated record)", "verified": null},
+      "check": {"op": "host_metadata_version", "pattern": "^\\d+\\.\\d+\\.\\d+$"},
+      "message": {"pass": "version '{version}' semver (metadata.version)", "fail": "version '{version}' semver (metadata.version)", "na": "no metadata.version (optional)"},
+      "fix": "Write a SemVer such as \"1.0.0\" in metadata.version."
+    },
+    {
+      "id": "evals-count",
+      "applies_to": ["skill"],
+      "category": "evaluation",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "Claude skill authoring best practices checklist: at least three evaluations created (cited in eva.py; no dated record)", "verified": null},
+      "check": {"op": "host_evals_count", "min": 3},
+      "message": "{count} eval cases (need >= {min})",
+      "fix": "Write at least {min} test cases phrased like real user requests, including at least one edge case."
+    }
+  ]
+}

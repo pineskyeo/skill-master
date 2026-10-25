@@ -1,0 +1,127 @@
+{
+  "ruleset": "agent-structure",
+  "version": "1.0.0",
+  "rules": [
+    {
+      "id": "frontmatter",
+      "applies_to": ["agent"],
+      "category": "structure",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "AGENT.md v1: YAML frontmatter with name, description, goal, tools and success_criteria (README agent section; no dated record)", "verified": null},
+      "check": {"op": "host_frontmatter"},
+      "message": "YAML frontmatter{error}",
+      "fix": "Start AGENT.md with a first line of exactly '---', write the frontmatter as a 'key: value' mapping (name, description, goal, tools, success_criteria), and close it with a '---' line."
+    },
+    {
+      "id": "goal-present",
+      "applies_to": ["agent"],
+      "category": "goal",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "AGENT.md v1: goal states what the agent must finish, at least 15 characters (README agent section; no dated record)", "verified": null},
+      "check": {"op": "regex", "sel": "frontmatter:#/goal", "normalize": ["string-or-empty", "strip"], "pattern": "[\\s\\S]{15}"},
+      "message": "goal stated (>=15 chars)",
+      "fix": "Write the goal the agent must reach as one sentence in goal."
+    },
+    {
+      "id": "success-measurable",
+      "applies_to": ["agent"],
+      "category": "goal",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "AGENT.md v1: at least one success criterion an outcome checker recognizes (eva.outcome_evidence until unit B1 types the criteria; no dated record)", "verified": null},
+      "check": {"op": "host_success_measurable"},
+      "message": "{checkable}/{total} success criteria machine-checkable{detail}",
+      "fix": "Write at least one success criterion a machine can check (for example 'at least 3 source links', 'at most 800 characters', 'a comparison table', 'at least 2 file:line citations', 'read-only'). Keep the criteria that cannot be checked automatically next to them."
+    },
+    {
+      "id": "scenarios-present",
+      "applies_to": ["agent"],
+      "category": "goal",
+      "severity": "soft",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "AGENT.md v1: at least two valid scenarios in scenarios/*.json (README agent section; no dated record)", "verified": null},
+      "check": {"op": "host_scenarios", "measure": "present", "min": 2},
+      "message": "{valid} valid scenarios in scenarios/*.json",
+      "fix": "Put at least {min} valid JSON scenarios in the scenarios/ folder."
+    },
+    {
+      "id": "scenarios-valid",
+      "applies_to": ["agent"],
+      "category": "goal",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "AGENT.md v1: every scenario follows schemas/scenario.schema.json (README agent section; no dated record)", "verified": null},
+      "check": {"op": "host_scenarios", "measure": "valid"},
+      "message": "scenario shape valid{detail}",
+      "fix": "Write each scenario as a JSON object and fill in id (a string), turns ([{\"user\": ...}]), expected_tools, must_include (lists of strings) and expected_outcome."
+    },
+    {
+      "id": "scenarios-expected",
+      "applies_to": ["agent"],
+      "category": "goal",
+      "severity": "soft",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "AGENT.md v1: every scenario has an expected_outcome (README agent section; no dated record)", "verified": null},
+      "check": {"op": "host_scenarios", "measure": "expected"},
+      "message": "all scenarios have expected_outcome{detail}",
+      "fix": "Add an expected_outcome to every scenario."
+    },
+    {
+      "id": "tools-declared",
+      "applies_to": ["agent"],
+      "category": "tool-use",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "AGENT.md v1: frontmatter tools lists the tools the agent uses (README agent section; no dated record)", "verified": null},
+      "check": {"op": "host_tools_declared"},
+      "message": "tools declared: {tools}",
+      "fix": "Declare the tools the agent uses in the frontmatter tools: list."
+    },
+    {
+      "id": "tools-subset",
+      "applies_to": ["agent"],
+      "category": "tool-use",
+      "severity": "soft",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "AGENT.md v1: scenario expected_tools are declared in tools (README agent section; no dated record)", "verified": null},
+      "check": {"op": "host_scenarios", "measure": "tools_subset"},
+      "message": "scenario expected_tools within declared{detail}",
+      "fix": "Declare {undeclared} in tools or remove them from the scenarios."
+    },
+    {
+      "id": "tools-documented",
+      "applies_to": ["agent"],
+      "category": "tool-use",
+      "severity": "soft",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "AGENT.md v1: a Tools section says when to use each tool (README agent section; no dated record)", "verified": null},
+      "check": {"op": "heading_present", "data": "data/description.json", "words": "tools"},
+      "message": "## Tools section explains usage",
+      "fix": "Add a '## Tools' section that says when to use each tool."
+    },
+    {
+      "id": "memory-section",
+      "applies_to": ["agent"],
+      "category": "context",
+      "severity": "soft",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "AGENT.md v1: a memory, handoff or context section (README agent section; no dated record)", "verified": null},
+      "check": {"op": "heading_present", "data": "data/description.json", "words": "memory"},
+      "message": "memory/handoff section",
+      "fix": "Write a '## Memory & Handoff' section that says what the agent remembers and how it hands work over."
+    },
+    {
+      "id": "multi-turn-scenario",
+      "applies_to": ["agent"],
+      "category": "context",
+      "severity": "soft",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "AGENT.md v1: at least one scenario with two or more turns (README agent section; no dated record)", "verified": null},
+      "check": {"op": "host_scenarios", "measure": "multi_turn"},
+      "message": "multi-turn scenarios: {multi}",
+      "fix": "Add a scenario with two or more turns whose later turns refer to what an earlier turn said."
+    }
+  ]
+}

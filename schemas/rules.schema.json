@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Skill Master rule file",
-  "description": "Every rules.json and *.rules.json of a bundle is validated against this schema by engine/rule_runner.py; a rule file's own $schema value never selects the schema. The op enum lists the 16 ops unit A1 implements plus the A3 primitives: script_denylist (engine/primitives/script_denylist.py; data names a file under the bundle's data/ folder; group is one closed scan mode, review_of names the rules whose run-output matchers it reviews) and parity_skill, parity_invocation, parity_agent_name, parity_wrapper, parity_permissions (engine/primitives/parity.py, driven by targets/<tool>.json; the reason is the fact {reason}). heading_present, description_heuristics, local_refs and generated_up_to_date stay out until their primitives exist. An op outcome is pass, fail, review or n/a; review always gives a needs-review row. na_must false gives an n/a row that is not must. message and fix are a string or an object keyed by outcome; both render op facts as {key}. applies_to [\"repository\"] runs the rule once at bundle load over the bundle folder as rules/ and the engine's schemas/, targets/ and policy/; a fail is a bundle error. Normalize: strip, nfkc, lower (str.lower), string-or-empty (first only: a missing or non-string value becomes the empty string, as eva.py _str_field reads a field). Selectors: frontmatter:<pointer>, json:<relpath>#<pointer>, toml:<relpath>#<pointer>, yaml:<relpath>#<pointer>, markdown:<relpath>, text:<relpath>, glob:<pattern>, path:basename; {key} in a relpath takes a top-level frontmatter string. Custom schema keywords for the schema op: x-python-regex (true: the string compiles with Python re), x-unique-by (key: object items with that key have distinct values), x-count-where ({where, min, max}: number of items valid under where), x-le ([a, b]: a <= b when both are numbers), x-path-exists (unit: a relative path to a regular file inside the unit), x-yaml-string (true: the frontmatter scalar is not typed by YAML 1.1).",
+  "description": "Every rules.json and *.rules.json of a bundle is validated against this schema by engine/rule_runner.py; a rule file's own $schema value never selects the schema. The op enum lists the 16 ops unit A1 implements plus the A3 primitives: script_denylist (engine/primitives/script_denylist.py; data names a file under the bundle's data/ folder; group is one closed scan mode, review_of names the rules whose run-output matchers it reviews) and parity_skill, parity_invocation, parity_agent_name, parity_wrapper, parity_permissions (engine/primitives/parity.py, driven by targets/<tool>.json; the reason is the fact {reason}). The A4 primitives: heading_present (engine/primitives/heading_present.py; words names a HEADING_WORDS entry of the data file), description_heuristics (engine/primitives/description_heuristics.py; one measure of the frontmatter description, word lists and regexes from the data file) and local_refs (engine/primitives/local_refs.py; one check of the SKILL.md file references, depth and toc_lines as operands). The host ops host_frontmatter, host_frontmatter_fields, host_field_length, host_main_file_size, host_metadata_version, host_evals_count, host_tools_declared, host_success_measurable and host_scenarios run callables eva.py installs (engine/rule_runner.py HOST_OPS); a rule on one with no installed callable fails the load. Two rules may share an id only when their applies_to kinds are disjoint. generated_up_to_date stays out until its primitive exists. An op outcome is pass, fail, review or n/a; review always gives a needs-review row. na_must false gives an n/a row that is not must. message and fix are a string or an object keyed by outcome; both render op facts as {key}. applies_to [\"repository\"] runs the rule once at bundle load over the bundle folder as rules/ and the engine's schemas/, targets/ and policy/; a fail is a bundle error. Normalize: strip, nfkc, lower (str.lower), string-or-empty (first only: a missing or non-string value becomes the empty string, as eva.py _str_field reads a field). Selectors: frontmatter:<pointer>, json:<relpath>#<pointer>, toml:<relpath>#<pointer>, yaml:<relpath>#<pointer>, markdown:<relpath>, text:<relpath>, glob:<pattern>, path:basename; {key} in a relpath takes a top-level frontmatter string. Custom schema keywords for the schema op: x-python-regex (true: the string compiles with Python re), x-unique-by (key: object items with that key have distinct values), x-count-where ({where, min, max}: number of items valid under where), x-le ([a, b]: a <= b when both are numbers), x-path-exists (unit: a relative path to a regular file inside the unit), x-yaml-string (true: the frontmatter scalar is not typed by YAML 1.1).",
   "type": "object",
   "required": ["ruleset", "version", "rules"],
   "additionalProperties": false,
@@ -83,7 +83,7 @@
       "type": "object",
       "required": ["op"],
       "properties": {
-        "op": {"enum": ["schema", "equals", "subset", "set_equals", "contains_text", "regex", "not_regex", "file_exists", "file_absent", "count", "max_bytes", "max_lines", "all", "any", "not", "when", "script_denylist", "parity_skill", "parity_invocation", "parity_agent_name", "parity_wrapper", "parity_permissions"]}
+        "op": {"enum": ["schema", "equals", "subset", "set_equals", "contains_text", "regex", "not_regex", "file_exists", "file_absent", "count", "max_bytes", "max_lines", "all", "any", "not", "when", "script_denylist", "parity_skill", "parity_invocation", "parity_agent_name", "parity_wrapper", "parity_permissions", "heading_present", "description_heuristics", "local_refs", "host_frontmatter", "host_frontmatter_fields", "host_field_length", "host_main_file_size", "host_metadata_version", "host_evals_count", "host_tools_declared", "host_success_measurable", "host_scenarios"]}
       },
       "allOf": [
         {"if": {"properties": {"op": {"const": "schema"}}}, "then": {"$ref": "#/$defs/op-schema"}},
@@ -99,8 +99,71 @@
         {"if": {"properties": {"op": {"const": "script_denylist"}}}, "then": {"$ref": "#/$defs/op-script-denylist"}},
         {"if": {"properties": {"op": {"enum": ["parity_skill", "parity_wrapper", "parity_permissions"]}}}, "then": {"$ref": "#/$defs/op-parity-tool"}},
         {"if": {"properties": {"op": {"const": "parity_invocation"}}}, "then": {"$ref": "#/$defs/op-parity-invocation"}},
-        {"if": {"properties": {"op": {"const": "parity_agent_name"}}}, "then": {"$ref": "#/$defs/op-parity-agent-name"}}
+        {"if": {"properties": {"op": {"const": "parity_agent_name"}}}, "then": {"$ref": "#/$defs/op-parity-agent-name"}},
+        {"if": {"properties": {"op": {"const": "heading_present"}}}, "then": {"$ref": "#/$defs/op-heading-present"}},
+        {"if": {"properties": {"op": {"const": "description_heuristics"}}}, "then": {"$ref": "#/$defs/op-description-heuristics"}},
+        {"if": {"properties": {"op": {"const": "local_refs"}}}, "then": {"$ref": "#/$defs/op-local-refs"}},
+        {"if": {"properties": {"op": {"enum": ["host_frontmatter", "host_tools_declared", "host_success_measurable"]}}}, "then": {"$ref": "#/$defs/op-host-bare"}},
+        {"if": {"properties": {"op": {"const": "host_frontmatter_fields"}}}, "then": {"$ref": "#/$defs/op-host-frontmatter-fields"}},
+        {"if": {"properties": {"op": {"const": "host_field_length"}}}, "then": {"$ref": "#/$defs/op-host-field-length"}},
+        {"if": {"properties": {"op": {"const": "host_main_file_size"}}}, "then": {"$ref": "#/$defs/op-host-main-file-size"}},
+        {"if": {"properties": {"op": {"const": "host_metadata_version"}}}, "then": {"$ref": "#/$defs/op-host-metadata-version"}},
+        {"if": {"properties": {"op": {"const": "host_evals_count"}}}, "then": {"$ref": "#/$defs/op-host-evals-count"}},
+        {"if": {"properties": {"op": {"const": "host_scenarios"}}}, "then": {"$ref": "#/$defs/op-host-scenarios"}}
       ]
+    },
+    "data-file": {"type": "string", "pattern": "^data/[a-z0-9][a-z0-9-]*\\.json$"},
+    "op-heading-present": {
+      "type": "object", "required": ["op", "data", "words"], "additionalProperties": false,
+      "properties": {"op": true, "data": {"$ref": "#/$defs/data-file"}, "words": {"$ref": "#/$defs/name"}}
+    },
+    "op-description-heuristics": {
+      "type": "object", "required": ["op", "data", "measure"], "additionalProperties": false,
+      "properties": {"op": true, "data": {"$ref": "#/$defs/data-file"},
+                     "measure": {"enum": ["present", "length", "no_xml", "when", "pov", "single_purpose"]},
+                     "min": {"$ref": "#/$defs/count"}, "max": {"$ref": "#/$defs/count"}, "chars": {"type": "string", "minLength": 1}},
+      "allOf": [
+        {"if": {"properties": {"measure": {"const": "length"}}}, "then": {"required": ["min"]}},
+        {"if": {"properties": {"measure": {"const": "no_xml"}}}, "then": {"required": ["chars"]}}
+      ]
+    },
+    "op-local-refs": {
+      "type": "object", "required": ["op", "check"], "additionalProperties": false,
+      "properties": {"op": true, "check": {"enum": ["relative", "exist", "one_level", "path_depth", "toc"]},
+                     "depth": {"$ref": "#/$defs/count"}, "toc_lines": {"$ref": "#/$defs/count"},
+                     "toc_pattern": {"type": "string", "minLength": 1, "x-python-regex": true}},
+      "allOf": [
+        {"if": {"properties": {"check": {"const": "path_depth"}}}, "then": {"required": ["depth"]}},
+        {"if": {"properties": {"check": {"const": "toc"}}}, "then": {"required": ["toc_lines", "toc_pattern"]}}
+      ]
+    },
+    "op-host-bare": {"type": "object", "required": ["op"], "additionalProperties": false, "properties": {"op": true}},
+    "op-host-frontmatter-fields": {
+      "type": "object", "required": ["op", "fields", "host_fields"], "additionalProperties": false,
+      "properties": {"op": true, "fields": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+                     "host_fields": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}}
+    },
+    "op-host-field-length": {
+      "type": "object", "required": ["op", "field", "min", "max"], "additionalProperties": false, "x-le": ["min", "max"],
+      "properties": {"op": true, "field": {"type": "string", "minLength": 1}, "min": {"$ref": "#/$defs/count"}, "max": {"$ref": "#/$defs/count"}}
+    },
+    "op-host-main-file-size": {
+      "type": "object", "required": ["op", "max_bytes", "lines_below"], "additionalProperties": false,
+      "properties": {"op": true, "max_bytes": {"$ref": "#/$defs/count"}, "lines_below": {"$ref": "#/$defs/count"}}
+    },
+    "op-host-metadata-version": {
+      "type": "object", "required": ["op", "pattern"], "additionalProperties": false,
+      "properties": {"op": true, "pattern": {"type": "string", "x-python-regex": true}}
+    },
+    "op-host-evals-count": {
+      "type": "object", "required": ["op", "min"], "additionalProperties": false,
+      "properties": {"op": true, "min": {"$ref": "#/$defs/count"}}
+    },
+    "op-host-scenarios": {
+      "type": "object", "required": ["op", "measure"], "additionalProperties": false,
+      "properties": {"op": true, "measure": {"enum": ["present", "valid", "expected", "tools_subset", "multi_turn"]},
+                     "min": {"$ref": "#/$defs/count"}},
+      "allOf": [{"if": {"properties": {"measure": {"const": "present"}}}, "then": {"required": ["min"]}}]
     },
     "selector": {"type": "string", "pattern": "^(frontmatter|json|toml|yaml|markdown|text|glob|path):"},
     "normalize": {"type": "array", "uniqueItems": true, "items": {"enum": ["strip", "nfkc", "lower", "string-or-empty"]}},

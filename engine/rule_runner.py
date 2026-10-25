@@ -3,11 +3,12 @@ closed op set, and add one row per rule to an eva Report (plan.md:558-560).
 
 A bundle is a folder. Its top-level rules.json and *.rules.json files are rule files; every other file in it (data/
 for example) is hashed but not loaded. An unknown or reserved op, an unknown selector, a literal path that leaves the
-unit, a rule file that fails the schema, or a duplicate rule id fails the whole load with BundleError, so no unit row
+unit, a rule file that fails the schema, a host op eva.py has not installed, or a duplicate rule id (two rules may share
+an id only when they apply to disjoint unit kinds) fails the whole load with BundleError, so no unit row
 is ever printed for a broken bundle. engine.schema is imported only when a bundle holds a rule file, so the empty
 default bundle costs a folder listing and a hash. Standard library only; no import of eva or skill_eval
 (engine/writable.py)."""
-import hashlib, json, os, re, stat, unicodedata
+import hashlib, importlib, json, os, re, stat, unicodedata
 from engine.loaders import TomlError, parse_frontmatter_ex, parse_toml, yaml_typed_keys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -15,8 +16,12 @@ RULES_SCHEMA = "schemas/rules.schema.json"
 HASHED_TREES = ("schemas", "targets")
 POLICY_FILES = ("policy/eval-policy.json", "policy/gates.json", "policy/gate.rules.json")
 NON_DEFAULT_ID = "bundle-non-default"
-RESERVED_OPS = {"heading_present": "A4", "description_heuristics": "A4", "local_refs": "A4",
-                "generated_up_to_date": "B2"}
+RESERVED_OPS = {"generated_up_to_date": "B2"}
+# Ops whose callable eva.py installs (install_host_ops), because they read eva's parsers or outcome checkers and engine
+# modules never import eva. A rule on one of them with no installed callable fails at compile (fail closed).
+HOST_OPS = ("host_frontmatter", "host_frontmatter_fields", "host_field_length", "host_main_file_size",
+            "host_metadata_version", "host_evals_count", "host_tools_declared", "host_success_measurable", "host_scenarios")
+_HOST = {}
 SELECTORS = ("frontmatter", "json", "toml", "yaml", "markdown", "text", "glob", "path")
 NORMALIZE = {"strip": str.strip, "nfkc": lambda s: unicodedata.normalize("NFKC", s), "lower": str.lower}
 OR_EMPTY = "string-or-empty"
@@ -95,7 +100,7 @@ class Rule:
     def __init__(self, raw, check, file="rules.json"):
         self.id, self.category, self.severity = raw["id"], raw["category"], raw["severity"]
         self.applies_to, self.message, self.fix, self.check = tuple(raw["applies_to"]), raw["message"], raw["fix"], check
-        self.file, self.source, self.protects = file, raw["source"], tuple(raw["protects"])
+        self.file, self.source, self.protects, self.node = file, raw["source"], tuple(raw["protects"]), raw["check"]
         self.na_must = raw.get("na_must", True)
 
     def text(self, value, outcome, facts, fallback):
@@ -142,6 +147,30 @@ class Bundle:
         if only is None and not self.default and not any(c["id"] == NON_DEFAULT_ID for c in report.checks):
             report.review(NON_DEFAULT_ID, "structure", "bundle non-default %s" % self.display,
                           "Run without --rules: only the default rule bundle can give PASS.")
+
+
+def apply_families(report, files, bundle=None):
+    """Adds the rows of the rule files `files`, in that order, to report: each file's rules come from bundle when it
+    holds the file, else from the default bundle, so a non-default bundle never shrinks the rows these files give
+    (brief A4 D2). Adds no bundle-non-default row; Bundle.apply over the other files does."""
+    if report.kind not in MAIN_FILE:
+        return
+    held, units = bundle.files() if bundle is not None else set(), {}
+    for fname in files:
+        source = bundle if fname in held else default_bundle()
+        unit = units.setdefault(id(source), _Unit(report.path, report.kind))
+        for rule in source.rules:
+            if rule.file == fname and report.kind in rule.applies_to:
+                rule.add_row(report, unit)
+
+
+def install_host_ops(table):
+    """Installs eva.py's callables for the closed HOST_OPS names: table maps a name to build(node) -> run(unit), where
+    run returns (status, facts) with status pass, fail, review or na."""
+    unknown = sorted(set(table) - set(HOST_OPS))
+    if unknown:
+        raise ValueError("not a host op: %s (closed list: %s)" % (", ".join(unknown), ", ".join(HOST_OPS)))
+    _HOST.update(table)
 
 
 def load_bundle(folder=None, root=ROOT):
@@ -195,12 +224,13 @@ def _load_rules(path, names, root, display):
             more = "; (+%d more)" % (len(errs) - 5) if len(errs) > 5 else ""
             raise BundleError(where, "; ".join(schema.format_error(e) for e in errs[:5]) + more)
         for raw in doc["rules"]:
-            rid = raw["id"]
+            rid, kinds = raw["id"], set(raw["applies_to"])
             if rid == NON_DEFAULT_ID:
                 raise BundleError(where, "rule id '%s' is reserved for the --rules row" % rid)
-            if rid in seen:
-                raise BundleError(where, "duplicate rule id '%s' (also in %s)" % (rid, seen[rid]))
-            seen[rid] = name
+            clash = [f for f, other in seen.get(rid, ()) if other & kinds or REPOSITORY in other | kinds]
+            if clash:
+                raise BundleError(where, "duplicate rule id '%s' (also in %s)" % (rid, clash[0]))
+            seen.setdefault(rid, []).append((name, kinds))
             try:
                 check = compile_check(raw["check"], root, path)
                 if REPOSITORY in raw["applies_to"] and not hasattr(check, "repository"):
@@ -634,10 +664,13 @@ OPS = {
 
 def _primitive(name):
     def build(node, root, folder=None):
+        folder = folder or os.path.join(root, "rules")
         if name == "script_denylist":
             from engine.primitives import script_denylist as mod
             make = mod.RuleCheck
-            args = (node, folder or os.path.join(root, "rules"))
+            args = (node, folder)
+        elif name in PRIMITIVES:
+            make, args = getattr(importlib.import_module("engine.primitives." + name), PRIMITIVES[name]), (node, folder)
         else:
             from engine.primitives import parity as mod
             make = mod.OPS[name]
@@ -649,9 +682,27 @@ def _primitive(name):
     return build
 
 
+PRIMITIVES = {"heading_present": "HeadingCheck", "description_heuristics": "DescriptionCheck", "local_refs": "RefsCheck"}
 for _name in ("script_denylist", "parity_skill", "parity_invocation", "parity_agent_name", "parity_wrapper",
-              "parity_permissions"):
+              "parity_permissions") + tuple(PRIMITIVES):
     OPS[_name] = _primitive(_name)
+
+
+def _host(name):
+    def build(node, root, folder=None):
+        if name not in _HOST:
+            raise RuleError("host op '%s' has no installed callable (eva.py installs the host ops)" % name)
+        run = _HOST[name](node)
+
+        def check(unit):
+            status, facts = run(unit)
+            return status, facts, None, False
+        return check
+    return build
+
+
+for _name in HOST_OPS:
+    OPS[_name] = _host(_name)
 
 
 def _render(message, facts):
