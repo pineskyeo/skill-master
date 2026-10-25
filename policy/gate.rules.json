@@ -1,0 +1,32 @@
+{
+  "$comment": "compute_gate data that skill_eval.py reads at import (plan.md:846). values: the two gate thresholds, in the eval-policy.json entry shape. messages: one template per compute_gate predicate or note, keyed by the predicate id of skill_eval.GATE_PREDICATES, with %(field)s fields that the predicate supplies. The predicate bodies and the problem-or-note decision stay code. Part of the rule bundle hash (ruleset_sha256).",
+  "policy": "gate-rules",
+  "version": "1.0.0",
+  "values": {
+    "AGREEMENT_MIN": {"value": 0.8, "type": "float", "source": "house", "note": "H: grader-vs-human agreement below this is a gate problem. Moved from eval-policy.json by A5."},
+    "REGRESSION_TOLERANCE": {"value": 0.0, "type": "float", "source": "house", "note": "H: any drop of mean pass_rate counts as regression. Moved from eval-policy.json by A5."}
+  },
+  "messages": {
+    "regression-baseline": {"template": "regression [%(engine)s]: with_skill pass_rate %(with_skill).2f < %(baseline)s %(baseline_rate).2f", "source": "house: with_skill below its baseline by more than REGRESSION_TOLERANCE"},
+    "regression-previous": {"template": "regression [%(engine)s]: with_skill pass_rate %(with_skill).2f < previous iteration %(previous).2f", "source": "house: with_skill below the previous iteration by more than REGRESSION_TOLERANCE"},
+    "low-agreement": {"template": "low grader agreement: %(agreement).2f < %(threshold).2f on %(n)d golden examples", "source": "house: calibration agreement below AGREEMENT_MIN"},
+    "not-calibrated": {"template": "grader not calibrated for this iteration (run `calibrate --golden ...`)", "source": "house: a note when the iteration has no calibration.json"},
+    "coverage": {"template": "%(note)s", "source": "house: the per-tool coverage note (skill_eval.coverage_note), never a problem"},
+    "static-failures": {"template": "failing static checks in with_skill runs: %(count)d", "source": "house: static checks fail in with_skill runs"},
+    "run-stopped": {"template": "incomplete: run stopped early (%(stopped)s)", "source": "house: plan.json records that the run stopped"},
+    "no-plan": {"template": "incomplete: no plan.json, expected run counts unknown", "source": "house: no plan.json, so completeness is unknown"},
+    "eval-runs-incomplete": {"template": "incomplete [%(engine)s]: %(graded)d of %(expected)d eval runs graded", "source": "house: fewer graded eval runs than planned"},
+    "trigger-runs-incomplete": {"template": "incomplete [%(engine)s]: %(runs)d of %(expected)d trigger runs", "source": "house: fewer trigger runs than planned"},
+    "trigger-errors": {"template": "execution failed [%(engine)s]: %(errors)d trigger run(s) with errors", "source": "house: trigger runs that ended in an error"},
+    "comparisons-incomplete": {"template": "incomplete [%(engine)s]: %(comparisons)d of %(expected)d blind pairwise comparisons (run `grade --live`)", "source": "house: fewer blind pairwise comparisons than planned"},
+    "unbound": {"template": "unbound: plan.json records no skill/eval-set hash; re-run the iteration", "source": "house: the iteration is not bound to a skill and eval set hash"},
+    "stale-skill": {"template": "stale: the skill changed after this iteration ran (re-run before trusting this report)", "source": "house: the skill folder hashes elsewhere now"},
+    "stale-eval-set": {"template": "stale: the eval set changed after this iteration ran", "source": "house: the eval set hashes elsewhere now"},
+    "stale-rules": {"template": "stale: rules changed since this iteration ran", "source": "plan.md:844 (A5): ruleset_sha256 moved since the iteration ran"},
+    "stale-rules-unrecorded": {"template": "stale: rules changed since this iteration ran (plan.json records no ruleset_sha256)", "source": "plan.md:844 (A5): the iteration ran before ruleset_sha256 was recorded"},
+    "execution-errors": {"template": "execution failed in %(count)d eval run(s)", "source": "house: eval runs that ended in an error"},
+    "trigger-failed": {"template": "trigger criteria failed [%(engine)s]: %(failed)d of %(total)d queries", "source": "house: with_skill trigger queries that missed their criterion"},
+    "llm-ungraded": {"template": "ungraded: %(count)d LLM item(s) not graded (run `grade --live`)", "source": "house: LLM items without a grade"},
+    "human-pending": {"template": "ungraded: %(count)d human item(s) pending review (fill human_review.json, re-run grade)", "source": "house: human items without a review"}
+  }
+}

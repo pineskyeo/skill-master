@@ -17,10 +17,11 @@ Usage: python3 skill_eval.py <validate|estimate|plan|run|grade|calibrate|report|
        python3 skill_eval.py builder-check <skill> --workspace <ws> [--compare SAVED]
        (also reachable as: python3 eva.py eval <subcommand> ...)
 """
-import argparse, csv, datetime, errno, hashlib, json, math, mmap, os, platform, random, re, shlex, shutil, subprocess, sys, tempfile, time
+import argparse, csv, datetime, errno, hashlib, itertools, json, math, mmap, os, platform, random, re, shlex, shutil, subprocess, sys, tempfile, time
 from engine import approvals, writable
 
 POLICY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "policy")
+RULESET_ROOT = os.path.dirname(os.path.abspath(__file__))  # rules/, schemas/, targets/, policy/ of ruleset_sha256()
 POLICY_TYPES = {"tuple": tuple, "dict": dict, "int": int, "float": float, "str": str}
 
 class PolicyError(ValueError): pass
@@ -75,8 +76,8 @@ POLICY_SPECS = {
     "TRIGGER_POS": PolicySpec("eval-policy.json", "int", _COUNT, "an integer >= 1"),
     "TRIGGER_NEG": PolicySpec("eval-policy.json", "int", _COUNT, "an integer >= 1"),
     "MAX_AUTO_ITERATIONS": PolicySpec("eval-policy.json", "int", _COUNT, "an integer >= 1"),
-    "AGREEMENT_MIN": PolicySpec("eval-policy.json", "float", _FRACTION, "a finite number from 0 to 1"),
-    "REGRESSION_TOLERANCE": PolicySpec("eval-policy.json", "float", _FRACTION, "a finite number from 0 to 1"),
+    "AGREEMENT_MIN": PolicySpec("gate.rules.json", "float", _FRACTION, "a finite number from 0 to 1"),
+    "REGRESSION_TOLERANCE": PolicySpec("gate.rules.json", "float", _FRACTION, "a finite number from 0 to 1"),
     "HIGH_VARIANCE_STDDEV": PolicySpec("eval-policy.json", "float", _FRACTION, "a finite number from 0 to 1"),
     "PRICES": PolicySpec("pricing.json", "dict", _each(_pair(_finite(0))), "a non-empty map of model ids to price rows"),
     "DEFAULT_TOKENS": PolicySpec("pricing.json", "dict", _each(_pair(_finite(0, kind=int))),
@@ -92,7 +93,7 @@ POLICY_SPECS = {
     "CODEX_EFFORT_CONFIG": PolicySpec("models.json", "str", _whole(_STRING), "a string", unverified=True),
     "GRADER_ENGINES": PolicySpec("models.json", "tuple", _each(_STRING), "a non-empty list of strings"),
 }
-POLICY_FILES = ("eval-policy.json", "pricing.json", "models.json")
+POLICY_FILES = ("eval-policy.json", "gate.rules.json", "pricing.json", "models.json")
 PRICE_ROW = {  # field of a PRICES row -> (valid, what a valid field is)
     "input": (_finite(0, kind=float), "a finite float >= 0"),
     "output": (_finite(0, kind=float), "a finite float >= 0"),
@@ -157,7 +158,7 @@ def load_policy(fname):
     return out
 
 def load_all_policy():
-    """Every POLICY_SPECS value from the three policy files; each default model id needs a PRICES row."""
+    """Every POLICY_SPECS value from the policy files; each default model id needs a PRICES row."""
     policy = {}
     for fname in POLICY_FILES:
         policy.update(load_policy(fname))
@@ -169,12 +170,15 @@ def load_all_policy():
                                   % (spec.file, n, k and "." + k, json.dumps(model)))
     return policy
 
-try:
-    _POLICY = load_all_policy()
-except PolicyError as e:
-    if __name__ == "__main__":
-        sys.exit("skill_eval: policy error: %s" % e)
-    raise
+def _policy_or_exit(load):
+    try:
+        return load()
+    except PolicyError as e:
+        if __name__ == "__main__":
+            sys.exit("skill_eval: policy error: %s" % e)
+        raise
+
+_POLICY = _policy_or_exit(load_all_policy)
 
 LAYERS = _POLICY["LAYERS"]
 BASELINES = _POLICY["BASELINES"]
@@ -281,6 +285,16 @@ def sha256_labeled(pairs, marked=()):
     for label, marker in marked:
         h.update(label.encode() + b"\0" + marker + b"\0")
     return h.hexdigest()
+
+def ruleset_sha256():
+    """The rule bundle hash under RULESET_ROOT (engine/rule_runner.ruleset_pairs: rules/**, schemas/**, targets/** and
+    the bundle policy files), the ruleset_sha256 that eva.py check prints. Computed on every call, never through the
+    cached default bundle, so a change made while this process runs (a loop builder call) is seen."""
+    from engine import rule_runner
+    try:
+        return rule_runner.sha256_labeled(rule_runner.ruleset_pairs(os.path.join(RULESET_ROOT, "rules"), RULESET_ROOT))
+    except (rule_runner.BundleError, OSError) as ex:
+        raise EvalError("ruleset_sha256: %s" % ex)
 
 def skill_tree_hash(skill_dir):
     """sha256 over every file a run installs (eva.unit_tree files), labeled by relative path and hashed by content. A
@@ -2184,13 +2198,13 @@ def rule_review_hash(skill_dir):
     files = sha256_labeled([(rel, os.path.join(skill_dir, *rel.split("/"))) for rel in eva.review_sources(skill_dir)])
     return hashlib.sha256(("\n".join(items) + "\n" + files).encode("utf-8")).hexdigest()
 
-def rule_review_problems(spec, ws):
+def rule_review_problems(spec, ws, verdict_of=None):
     """[problem] when the skill has rule-review findings and no recorded human decision (`approve --gate rule_review`) matches
     exactly these findings and the bytes of eva.review_sources: changing a matcher, a metadata field, AGENT.md or a Codex or
-    OpenCode wrapper invalidates the decision."""
+    OpenCode wrapper invalidates the decision. verdict_of(gate, spec, ws): approval_verdict, or plan's memo of it."""
     items = rule_review_items(spec["skill_dir"])
     if not items: return []
-    v = approval_verdict("rule_review", spec, ws)
+    v = (verdict_of or approval_verdict)("rule_review", spec, ws)
     if v.status == "approved": return []
     return ["rule review not recorded%s: %d finding(s) need a human decision (%s); read them with `validate`, then run "
             "`approve --gate rule_review` at a terminal (the signed decision is bound to these exact findings)"
@@ -2208,6 +2222,19 @@ def eval_set_files(skill_dir):
     return out + [("files:" + f, os.path.join(skill_dir, f)) for f in refs]
 
 APPROVER = {"it": approvals.cli_approver()}  # the human gate (engine/approvals.py); in-process tests replace it
+POLICY_HASHED = (("pricing", "pricing.json"), ("models", "models.json"), ("auth_profiles", "auth-profiles.json"))
+
+def policy_sha256():
+    """sha256 of each file outside the rule bundle that shapes a run (plan.md:842): pricing, models, auth profiles and
+    the approver signers file, null while absent. plan.json records it; no approval binds it."""
+    def digest(path):
+        try:
+            with open(path, "rb") as f: return hashlib.sha256(f.read()).hexdigest()
+        except FileNotFoundError:
+            return None
+    out = {k: digest(os.path.join(RULESET_ROOT, "policy", f)) for k, f in POLICY_HASHED}
+    out["allowed_signers"] = digest(APPROVER["it"].signers)
+    return out
 
 def approvals_data(ws):
     """approvals.json as a dict, {} when the file is absent; EvalError when it is JSON but not an object."""
@@ -2220,7 +2247,8 @@ def approval_record(gate, spec, ws):
     """(record, verdict) of one approvals.json gate, read once."""
     try: rec = approvals_data(ws).get(gate)
     except EvalError as ex: return None, approvals.Verdict("invalid", None, str(ex))
-    return rec, APPROVER["it"].verdict(rec, "approve", gate, spec["skill_name"], gate_hash(gate, spec, ws))
+    return rec, APPROVER["it"].verdict(rec, "approve", gate, spec["skill_name"], gate_hash(gate, spec, ws),
+                                       ruleset_sha256())
 
 def approval_verdict(gate, spec, ws):
     return approval_record(gate, spec, ws)[1]
@@ -2231,7 +2259,11 @@ def approval_ok(gate, spec, ws):
 def approval_label(v):
     if v.status == "approved": return "approved by %s" % v.principal
     if v.status == "missing": return "NOT APPROVED"
-    return "NOT APPROVED (%s)" % (v.status + (": " + v.reason if v.status == "invalid" else ""))
+    if v.status == "invalid": return "NOT APPROVED (invalid: %s)" % v.reason
+    rules = "stale: " + approvals.RULES_CHANGED
+    if v.reason == approvals.RULES_CHANGED: return "NOT APPROVED (%s)" % rules
+    if v.reason == approvals.UNSIGNED_RULES: return "NOT APPROVED (unsigned; %s)" % rules
+    return "NOT APPROVED (%s)" % v.status
 
 def approve(gate, spec, ws):
     return _approve_with(gate, lambda: (spec, ws))
@@ -2247,24 +2279,27 @@ def _approve_with(gate, load):
         except ValueError as ex: raise EvalError("%s/approvals.json is not valid JSON (%s); nothing was signed" % (ws, ex))
         except EvalError as ex: raise EvalError("%s; nothing was signed" % ex)
         st.update(ws=ws)
-        return approvals.Prepared(spec["skill_name"], h, approve_show(gate, spec, ws))
+        rules = ruleset_sha256()
+        return approvals.Prepared(spec["skill_name"], h, rules, approve_show(gate, spec, ws, rules))
     grant = APPROVER["it"].sign("approve", gate, prepare)
     data = approvals_data(st["ws"])
     data[gate] = grant.record
     wjson(os.path.join(st["ws"], "approvals.json"), data)
     return grant.record
 
-def approve_show(gate, spec, ws):
-    """What the person approves, printed before the challenge."""
-    if gate == "requirements": return ["requirements: %s" % os.path.join(ws, "requirements.md")]
-    if gate == "eval_set":
-        return ["eval set file %s: %s" % (label, sha256_files(p)[:12] if os.path.isfile(p) else "<missing>")
-                for label, p in eval_set_files(spec["skill_dir"])]
-    if gate == "rule_review": return ["rule review finding: " + x[:300] for x in rule_review_items(spec["skill_dir"])]
-    m = re.match(r"iteration-(\d+)$", gate)
-    n = int(m.group(1)) if m else (iterations(ws) or [None])[-1]
-    g = rjson(os.path.join(ws, "iteration-%s" % n, "gate.json")) or {}
-    return ["iteration-%s gate problems: %s" % (n, g.get("problems") or "none recorded")]
+def approve_show(gate, spec, ws, rules):
+    """What the person approves, printed before the challenge; the last line is the rule bundle hash it binds."""
+    if gate == "requirements": shown = ["requirements: %s" % os.path.join(ws, "requirements.md")]
+    elif gate == "eval_set":
+        shown = ["eval set file %s: %s" % (label, sha256_files(p)[:12] if os.path.isfile(p) else "<missing>")
+                 for label, p in eval_set_files(spec["skill_dir"])]
+    elif gate == "rule_review": shown = ["rule review finding: " + x[:300] for x in rule_review_items(spec["skill_dir"])]
+    else:
+        m = re.match(r"iteration-(\d+)$", gate)
+        n = int(m.group(1)) if m else (iterations(ws) or [None])[-1]
+        g = rjson(os.path.join(ws, "iteration-%s" % n, "gate.json")) or {}
+        shown = ["iteration-%s gate problems: %s" % (n, g.get("problems") or "none recorded")]
+    return shown + ["ruleset_sha256 " + rules]
 
 def preflight(spec, engines, run_root=None, home=None):
     """Read-only, blocks --live (fail closed). Runs execute in per-run sandboxes under run_root (README "Eval
@@ -2477,6 +2512,7 @@ def run_iteration(spec, ws, engines, runs=DEFAULT_RUNS, baseline="none", old_ski
           "trigger_queries": len(spec["triggers"] or []), "started_at": now_iso(),
           "skill_sha256": skill_tree_hash(spec["skill_dir"]), "eval_set_sha256": gate_hash("eval_set", spec, ws),
           "old_skill_sha256": skill_tree_hash(old_skill) if baseline == "old" else None,
+          "ruleset_sha256": ruleset_sha256(), "policy_sha256": policy_sha256(),
           "isolation": {"run_root": run_root, "per_run_sandbox": True},
           "budget_enforcement": {e.name: budget_enforcement(e) for e in engines}})
     budget, prices, tokens = budget or Budget(float("inf")), prices or {}, tokens or DEFAULT_TOKENS
@@ -2981,7 +3017,8 @@ def build_benchmark(spec, ws, n):
                           # what was tested (recorded at run start) vs what is on disk now; register compares them
                           "skill_sha256": plan.get("skill_sha256"), "eval_set_sha256": plan.get("eval_set_sha256"),
                           "current_skill_sha256": skill_tree_hash(spec["skill_dir"]),
-                          "current_eval_set_sha256": gate_hash("eval_set", spec, ws)},
+                          "current_eval_set_sha256": gate_hash("eval_set", spec, ws),
+                          "ruleset_sha256": plan.get("ruleset_sha256"), "current_ruleset_sha256": ruleset_sha256()},
              "tool_coverage": coverage,
              "parity": {t: st["status"] for t, st in eva.parity_status(spec["skill_dir"]).items()},
              "runs": runs, "run_summary": summarize(runs), "per_engine": per_engine, "trigger": trig, "pairwise": pw,
@@ -2998,64 +3035,144 @@ def build_benchmark(spec, ws, n):
              "notes": analyzer_notes(runs)}
     return bench
 
-def compute_gate(bench, prev=None):
-    problems, notes = [], []
-    for eng, rs in (bench.get("per_engine") or {}).items():
-        base = next((c for c in rs if c in BASELINES.values()), None)
-        if PRIMARY in rs and base and rs[PRIMARY]["graded_runs"] and rs[base]["graded_runs"]:
-            w, b = rs[PRIMARY]["pass_rate"]["mean"], rs[base]["pass_rate"]["mean"]
-            if w < b - REGRESSION_TOLERANCE:
-                problems.append("regression [%s]: with_skill pass_rate %.2f < %s %.2f" % (eng, w, base, b))
-        pr = ((prev or {}).get("per_engine") or {}).get(eng, {}).get(PRIMARY)
-        if pr and pr.get("graded_runs") and rs.get(PRIMARY, {}).get("graded_runs"):
-            if rs[PRIMARY]["pass_rate"]["mean"] < pr["pass_rate"]["mean"] - REGRESSION_TOLERANCE:
-                problems.append("regression [%s]: with_skill pass_rate %.2f < previous iteration %.2f"
-                                % (eng, rs[PRIMARY]["pass_rate"]["mean"], pr["pass_rate"]["mean"]))
+def _meta(bench):
+    return bench.get("metadata") or {}
+
+def _regression_baseline(bench, prev, eng, rs):
+    base = next((c for c in rs if c in BASELINES.values()), None)
+    if PRIMARY in rs and base and rs[PRIMARY]["graded_runs"] and rs[base]["graded_runs"]:
+        w, b = rs[PRIMARY]["pass_rate"]["mean"], rs[base]["pass_rate"]["mean"]
+        if w < b - REGRESSION_TOLERANCE: return {"engine": eng, "with_skill": w, "baseline": base, "baseline_rate": b}
+
+def _regression_previous(bench, prev, eng, rs):
+    pr = ((prev or {}).get("per_engine") or {}).get(eng, {}).get(PRIMARY)
+    if pr and pr.get("graded_runs") and rs.get(PRIMARY, {}).get("graded_runs") \
+            and rs[PRIMARY]["pass_rate"]["mean"] < pr["pass_rate"]["mean"] - REGRESSION_TOLERANCE:
+        return {"engine": eng, "with_skill": rs[PRIMARY]["pass_rate"]["mean"], "previous": pr["pass_rate"]["mean"]}
+
+def _low_agreement(bench, prev):
     cal = bench.get("calibration")
     if cal and cal.get("agreement", 1.0) < AGREEMENT_MIN:
-        problems.append("low grader agreement: %.2f < %.2f on %d golden examples" % (cal["agreement"], AGREEMENT_MIN, cal["n"]))
-    elif not cal:
-        notes.append("grader not calibrated for this iteration (run `calibrate --golden ...`)")
-    cov_note = coverage_note(bench["tool_coverage"]) if bench.get("tool_coverage") else None
-    if cov_note: notes.append(cov_note)  # a note, not a problem: registration semantics are unchanged
-    if bench.get("static_failures"):
-        problems.append("failing static checks in with_skill runs: %d" % len(bench["static_failures"]))
-    stopped = (bench.get("metadata") or {}).get("stopped")
-    if stopped: problems.append("incomplete: run stopped early (%s)" % stopped)
-    comp = bench.get("completeness")
-    if comp is None:
-        problems.append("incomplete: no plan.json, expected run counts unknown")
-    for eng, c in sorted((comp or {}).items()):
-        if c["graded_runs"] < c["expected_runs"]:
-            problems.append("incomplete [%s]: %d of %d eval runs graded" % (eng, c["graded_runs"], c["expected_runs"]))
-        if c["trigger_runs"] < c["expected_trigger_runs"]:
-            problems.append("incomplete [%s]: %d of %d trigger runs" % (eng, c["trigger_runs"], c["expected_trigger_runs"]))
-        if c.get("trigger_errors"):
-            problems.append("execution failed [%s]: %d trigger run(s) with errors" % (eng, c["trigger_errors"]))
-        if c.get("comparisons", 0) < c.get("expected_comparisons", 0):
-            problems.append("incomplete [%s]: %d of %d blind pairwise comparisons (run `grade --live`)"
-                            % (eng, c.get("comparisons", 0), c["expected_comparisons"]))
-    m = bench.get("metadata") or {}
-    if comp is not None:
-        if not m.get("skill_sha256") or not m.get("eval_set_sha256"):
-            problems.append("unbound: plan.json records no skill/eval-set hash; re-run the iteration")
-        else:
-            if m.get("current_skill_sha256") != m["skill_sha256"]:
-                problems.append("stale: the skill changed after this iteration ran (re-run before trusting this report)")
-            if m.get("current_eval_set_sha256") != m["eval_set_sha256"]:
-                problems.append("stale: the eval set changed after this iteration ran")
-    if bench.get("execution_errors"):
-        problems.append("execution failed in %d eval run(s)" % len(bench["execution_errors"]))
-    for eng, cf in sorted((bench.get("trigger") or {}).items()):
-        t = cf.get(PRIMARY)
-        if t and t.get("failed"):
-            problems.append("trigger criteria failed [%s]: %d of %d queries" % (eng, t["failed"], t["total"]))
-    if bench.get("llm_not_graded"):
-        problems.append("ungraded: %d LLM item(s) not graded (run `grade --live`)" % bench["llm_not_graded"])
-    if bench.get("human_pending"):
-        problems.append("ungraded: %d human item(s) pending review (fill human_review.json, re-run grade)" % bench["human_pending"])
+        return {"agreement": cal["agreement"], "threshold": AGREEMENT_MIN, "n": cal["n"]}
+
+def _coverage(bench, prev):
+    note = coverage_note(bench["tool_coverage"]) if bench.get("tool_coverage") else None
+    if note: return {"note": note}  # a note, not a problem: registration semantics are unchanged
+
+def _hashes_bound(bench):
+    m = _meta(bench)
+    return bench.get("completeness") is not None and m.get("skill_sha256") and m.get("eval_set_sha256")
+
+def _stale_rules(bench, prev):
+    m = _meta(bench)
+    if "current_ruleset_sha256" in m and m.get("ruleset_sha256") and m["ruleset_sha256"] != m["current_ruleset_sha256"]:
+        return {}
+
+def _stale_rules_unrecorded(bench, prev):
+    m = _meta(bench)
+    if "current_ruleset_sha256" in m and not m.get("ruleset_sha256"): return {}
+
+def _trigger_failed(bench, prev, eng, cf):
+    t = cf.get(PRIMARY)
+    if t and t.get("failed"): return {"engine": eng, "failed": t["failed"], "total": t["total"]}
+
+# (id, kind, scope, fields, body). body(bench, prev[, engine, value]) returns the fields its policy/gate.rules.json
+# template renders, or None. Consecutive rows that share a scope run per engine of GATE_SCOPES[scope], interleaved.
+# The stale-rules rows fire only when the metadata holds current_ruleset_sha256, which build_benchmark always writes.
+GATE_PREDICATES = (
+    ("regression-baseline", "problem", "per_engine", ("engine", "with_skill", "baseline", "baseline_rate"),
+     _regression_baseline),
+    ("regression-previous", "problem", "per_engine", ("engine", "with_skill", "previous"), _regression_previous),
+    ("low-agreement", "problem", None, ("agreement", "threshold", "n"), _low_agreement),
+    ("not-calibrated", "note", None, (), lambda b, p: None if b.get("calibration") else {}),
+    ("coverage", "note", None, ("note",), _coverage),
+    ("static-failures", "problem", None, ("count",),
+     lambda b, p: {"count": len(b["static_failures"])} if b.get("static_failures") else None),
+    ("run-stopped", "problem", None, ("stopped",),
+     lambda b, p: {"stopped": _meta(b)["stopped"]} if _meta(b).get("stopped") else None),
+    ("no-plan", "problem", None, (), lambda b, p: {} if b.get("completeness") is None else None),
+    ("eval-runs-incomplete", "problem", "completeness", ("engine", "graded", "expected"),
+     lambda b, p, e, c: {"engine": e, "graded": c["graded_runs"], "expected": c["expected_runs"]}
+     if c["graded_runs"] < c["expected_runs"] else None),
+    ("trigger-runs-incomplete", "problem", "completeness", ("engine", "runs", "expected"),
+     lambda b, p, e, c: {"engine": e, "runs": c["trigger_runs"], "expected": c["expected_trigger_runs"]}
+     if c["trigger_runs"] < c["expected_trigger_runs"] else None),
+    ("trigger-errors", "problem", "completeness", ("engine", "errors"),
+     lambda b, p, e, c: {"engine": e, "errors": c["trigger_errors"]} if c.get("trigger_errors") else None),
+    ("comparisons-incomplete", "problem", "completeness", ("engine", "comparisons", "expected"),
+     lambda b, p, e, c: {"engine": e, "comparisons": c.get("comparisons", 0), "expected": c["expected_comparisons"]}
+     if c.get("comparisons", 0) < c.get("expected_comparisons", 0) else None),
+    ("unbound", "problem", None, (),
+     lambda b, p: {} if b.get("completeness") is not None and not _hashes_bound(b) else None),
+    ("stale-skill", "problem", None, (),
+     lambda b, p: {} if _hashes_bound(b) and _meta(b).get("current_skill_sha256") != _meta(b)["skill_sha256"] else None),
+    ("stale-eval-set", "problem", None, (),
+     lambda b, p: {} if _hashes_bound(b) and _meta(b).get("current_eval_set_sha256") != _meta(b)["eval_set_sha256"]
+     else None),
+    ("stale-rules", "problem", None, (), _stale_rules),
+    ("stale-rules-unrecorded", "problem", None, (), _stale_rules_unrecorded),
+    ("execution-errors", "problem", None, ("count",),
+     lambda b, p: {"count": len(b["execution_errors"])} if b.get("execution_errors") else None),
+    ("trigger-failed", "problem", "trigger", ("engine", "failed", "total"), _trigger_failed),
+    ("llm-ungraded", "problem", None, ("count",),
+     lambda b, p: {"count": b["llm_not_graded"]} if b.get("llm_not_graded") else None),
+    ("human-pending", "problem", None, ("count",),
+     lambda b, p: {"count": b["human_pending"]} if b.get("human_pending") else None),
+)
+GATE_SCOPES = {"per_engine": lambda b: list((b.get("per_engine") or {}).items()),
+               "completeness": lambda b: sorted((b.get("completeness") or {}).items()),
+               "trigger": lambda b: sorted((b.get("trigger") or {}).items())}
+RULES_STALE_IDS = ("stale-rules", "stale-rules-unrecorded")
+GATE_FIELD_RE = re.compile(r"%(?:%|\(([A-Za-z_]+)\)[#0 +-]*[0-9]*(?:\.[0-9]+)?[diouxXeEfFgGcrsa])")
+
+def load_gate_messages():
+    """{predicate id: template} from policy/gate.rules.json next to this file (POLICY_DIR); raises PolicyError on a
+    missing or unreadable file, non-strict JSON, ids other than exactly those of GATE_PREDICATES, an entry without a
+    non-empty ASCII template and a source, or a template whose % is not %% or %(field)<conversion> of a field its
+    predicate supplies."""
+    from engine import schema
+    where = "policy/gate.rules.json"
+    try:
+        doc = schema.load(os.path.join(POLICY_DIR, "gate.rules.json"))
+    except schema.JsonError as e:
+        raise PolicyError("%s: %s" % (where, e)) from None
+    msgs = doc.get("messages") if isinstance(doc, dict) else None
+    ids = [row[0] for row in GATE_PREDICATES]
+    if not isinstance(msgs, dict) or sorted(msgs) != sorted(ids):
+        raise PolicyError("%s: messages must name exactly %s" % (where, ", ".join(ids)))
+    out = {}
+    for pid, _, _, fields, _ in GATE_PREDICATES:
+        entry, at = msgs[pid], "%s: messages.%s" % (where, pid)
+        t = entry.get("template") if isinstance(entry, dict) else None
+        if not (isinstance(t, str) and t.strip() and t.isascii() and isinstance(entry.get("source"), str)
+                and entry["source"].strip()):
+            raise PolicyError("%s: needs a non-empty ASCII template and a source" % at)
+        if "%" in GATE_FIELD_RE.sub("", t):
+            raise PolicyError("%s: template %s holds a %% that is not %%%% or %%(field)<conversion>" % (at, json.dumps(t)))
+        unknown = sorted(set(GATE_FIELD_RE.findall(t)) - set(fields) - {""})
+        if unknown:
+            raise PolicyError("%s: template field %s is not one the predicate supplies (%s)"
+                              % (at, ", ".join(unknown), ", ".join(fields) or "none"))
+        out[pid] = t
+    return out
+
+GATE_MESSAGES = _policy_or_exit(load_gate_messages)
+
+def compute_gate(bench, prev=None):
+    """GATE_PREDICATES in order, each hit rendered with its policy/gate.rules.json template. human_pending_only ignores
+    the stale-rules problems, so it keeps its B1 result for every input."""
+    problems, notes, ids = [], [], []
+    for scope, rows in itertools.groupby(GATE_PREDICATES, key=lambda row: row[2]):
+        rows = list(rows)
+        for item in (GATE_SCOPES[scope](bench) if scope else [()]):
+            for pid, kind, _, _, body in rows:
+                fields = body(bench, prev, *item)
+                if fields is None: continue
+                (problems if kind == "problem" else notes).append(GATE_MESSAGES[pid] % fields)
+                if kind == "problem": ids.append(pid)
+    b1 = [pid for pid in ids if pid not in RULES_STALE_IDS]
     return {"problems": problems, "needs_approval": bool(problems), "notes": notes,
-            "human_pending_only": bool(problems) and all(p.startswith("ungraded: ") and "human" in p for p in problems)}
+            "human_pending_only": bool(b1) and all(pid == "human-pending" for pid in b1)}
 
 def fmt_stat(s, pct=False):
     return ("%.0f%% ± %.0f%%" % (s["mean"] * 100, s["stddev"] * 100)) if pct else ("%.1f ± %.1f" % (s["mean"], s["stddev"]))
@@ -3165,13 +3282,18 @@ def registration_record(spec, ws):
         if v.status != "approved":
             raise EvalError("iteration-%d has problems %s; registration needs `approve --gate registration` (%s)"
                             % (n, gate["problems"], "missing" if v.status == "missing" else "%s: %s" % (v.status, v.reason)))
+    now_rules = ruleset_sha256()
+    if m.get("ruleset_sha256") != now_rules:
+        raise EvalError("iteration-%d ran under ruleset %s but the rules now hash to %s; re-run the eval before "
+                        "registering" % (n, (m.get("ruleset_sha256") or "<unrecorded>")[:12], now_rules[:12]))
     return {"skill_name": spec["skill_name"], "skill_path": spec["skill_dir"], "iteration": n,
             "benchmark_sha256": gate_hash("iteration-%d" % n, spec, ws), "skill_sha256": now_skill,
             "eval_set_sha256": now_evals,
-            "skill_md_sha256": sha256_files(os.path.join(spec["skill_dir"], "SKILL.md")), "registered_at": now_iso(),
-            "approval": approval}
+            "skill_md_sha256": sha256_files(os.path.join(spec["skill_dir"], "SKILL.md")), "ruleset_sha256": now_rules,
+            "registered_at": now_iso(), "approval": approval}
 
-REGISTRATION_SIGNED = ("skill_name", "iteration", "benchmark_sha256", "skill_sha256", "eval_set_sha256", "skill_md_sha256")
+REGISTRATION_SIGNED = ("skill_name", "iteration", "benchmark_sha256", "skill_sha256", "eval_set_sha256", "skill_md_sha256",
+                       "ruleset_sha256")
 
 def registration_hash(rec):
     """What a register signature covers: the identity fields of the registration record."""
@@ -3181,8 +3303,10 @@ def registration_hash(rec):
 
 def registration_verdict(spec, ws):
     rec = rjson(os.path.join(ws, "registration.json"))
-    if not isinstance(rec, dict): return APPROVER["it"].verdict(None, "register", "registration", spec["skill_name"], None)
-    return APPROVER["it"].verdict(rec.get("signed"), "register", "registration", spec["skill_name"], registration_hash(rec))
+    if not isinstance(rec, dict):
+        return APPROVER["it"].verdict(None, "register", "registration", spec["skill_name"], None, None)
+    return APPROVER["it"].verdict(rec.get("signed"), "register", "registration", spec["skill_name"], registration_hash(rec),
+                                  ruleset_sha256())
 
 def register(spec, ws):
     return _register_with(lambda: (spec, ws))
@@ -3193,7 +3317,7 @@ def _register_with(load):
         spec, ws = load()
         rec = registration_record(spec, ws)
         st.update(rec=rec, ws=ws)
-        return approvals.Prepared(spec["skill_name"], registration_hash(rec),
+        return approvals.Prepared(spec["skill_name"], registration_hash(rec), rec["ruleset_sha256"],
                                   ["register %s=%s" % (k, rec[k]) for k in REGISTRATION_SIGNED] +
                                   ["register approval: %s" % ("auto (clean gate)" if rec["approval"] == "auto" else
                                                               "signed registration gate")])
@@ -3287,12 +3411,16 @@ def loop(spec, ws, engines, grader, builder, max_iterations=MAX_AUTO_ITERATIONS,
     budget); any problem stops the loop. Every builder call is bracketed by engine/writable.py fingerprints of the skill
     folder and ws: any change outside the writable set that the harness did not write itself stops the loop with status
     "builder-wrote-outside" (the problems name every changed path) before anything else runs, also when the builder
-    raised. After every builder call the skill folder must pass the static English-only
+    raised; next, a builder call that moved ruleset_sha256() stops it with status "rules-changed". The post-builder
+    gates run in the order of POST_BUILDER_GATES, which must equal policy/gates.json, else the loop refuses to start.
+    After every builder call the skill folder must pass the static English-only
     check (eva.english_violations), else the loop stops with status "builder-non-english", and then the multi-tool
     parity check (eva.parity_violations), else with status "builder-parity-missing", before anything more is
     spent. Run outputs are never checked. At most MAX_AUTO_ITERATIONS automatic iterations."""
     if max_iterations > MAX_AUTO_ITERATIONS:
         raise EvalError("max %d automatic iterations, got %d" % (MAX_AUTO_ITERATIONS, max_iterations))
+    declared = gate_declaration_problem()
+    if declared: raise EvalError(declared)
     n = None
     for i in range(max_iterations):
         if precheck is not None:
@@ -3312,33 +3440,75 @@ def loop(spec, ws, engines, grader, builder, max_iterations=MAX_AUTO_ITERATIONS,
         if budget is not None and budget.remaining() <= 0: return {"status": "budget-exhausted", "iteration": n}
         if i == max_iterations - 1 or builder is None: break
         harness = getattr(builder, "harness_writes", [])
-        seen, before = len(harness), writable.fingerprint(spec["skill_dir"], ws)
-        rc, error, crash = None, None, None
+        st = {"spec": spec, "ws": ws, "n": n, "log": log, "harness": harness, "seen": len(harness),
+              "before": writable.fingerprint(spec["skill_dir"], ws), "rules": ruleset_sha256(), "rc": None, "error": None}
+        crash = None
         try:
-            rc = builder(os.path.join(ws, "iteration-%d" % n), spec["skill_dir"])
+            st["rc"] = builder(os.path.join(ws, "iteration-%d" % n), spec["skill_dir"])
         except EvalError as ex:
-            error = str(ex)
+            st["error"] = str(ex)
         except Exception as ex:
-            crash, error = ex, "builder raised %s: %s" % (type(ex).__name__, ex)
-        extra = {} if error is None else {"error": error}
-        if rc is not None: extra["returncode"] = rc
-        outside = writable.changed(before, writable.fingerprint(spec["skill_dir"], ws),
-                                   [(writable.name(spec["skill_dir"], p), r, w) for p, r, w in harness[seen:]])
-        if outside:
-            log("builder-wrote-outside " + writable.shown(outside[0]))
-            return dict({"status": "builder-wrote-outside", "iteration": n, "problems": outside}, **extra)
-        if crash is not None: raise crash
-        import eva
-        non_english = eva.english_violations(spec["skill_dir"])
-        if non_english: return dict({"status": "builder-non-english", "iteration": n, "problems": non_english}, **extra)
-        missing = eva.parity_violations(spec["skill_dir"])
-        if missing: return dict({"status": "builder-parity-missing", "iteration": n, "problems": missing}, **extra)
-        review = rule_review_problems(spec, ws)
-        if review: return dict({"status": "builder-review-required", "iteration": n, "problems": review}, **extra)
-        if error is not None or rc != 0: return dict({"status": "builder-failed", "iteration": n}, **extra)
-        spec, problems = load_eval_set(spec["skill_dir"])
-        if problems: return {"status": "eval-set-invalid", "iteration": n, "problems": problems}
+            crash, st["error"] = ex, "builder raised %s: %s" % (type(ex).__name__, ex)
+        st["extra"] = {} if st["error"] is None else {"error": st["error"]}
+        if st["rc"] is not None: st["extra"]["returncode"] = st["rc"]
+        for gid, gate in POST_BUILDER_GATES:
+            if crash is not None and gid not in CRASH_GATES: raise crash
+            stop = gate(st)
+            if stop: return stop
+        spec = st["spec"]
     return {"status": "needs-approval", "iteration": n}
+
+def _stop(st, status, problems=None):
+    out = {"status": status, "iteration": st["n"]}
+    if problems is not None: out["problems"] = problems
+    return dict(out, **st["extra"])
+
+def _after_outside(st):
+    skill, ws = st["spec"]["skill_dir"], st["ws"]
+    outside = writable.changed(st["before"], writable.fingerprint(skill, ws),
+                               [(writable.name(skill, p), r, w) for p, r, w in st["harness"][st["seen"]:]])
+    if outside:
+        st["log"]("builder-wrote-outside " + writable.shown(outside[0]))
+        return _stop(st, "builder-wrote-outside", outside)
+
+def _after_rules(st):
+    try:
+        now = ruleset_sha256()
+        if now == st["rules"]: return None
+        now = now[:12]
+    except EvalError as ex:  # a bundle the builder left unhashable counts as moved
+        now = str(ex).splitlines()[0]
+    return _stop(st, "rules-changed", ["ruleset_sha256 %s -> %s" % (st["rules"][:12], now)])
+
+def _after_english(st):
+    import eva
+    found = eva.english_violations(st["spec"]["skill_dir"])
+    if found: return _stop(st, "builder-non-english", found)
+
+def _after_parity(st):
+    import eva
+    found = eva.parity_violations(st["spec"]["skill_dir"])
+    if found: return _stop(st, "builder-parity-missing", found)
+
+def _after_review(st):
+    found = rule_review_problems(st["spec"], st["ws"])
+    if found: return _stop(st, "builder-review-required", found)
+
+def _after_failed(st):
+    if st["error"] is not None or st["rc"] != 0: return _stop(st, "builder-failed")
+
+def _after_eval_set(st):
+    spec, problems = load_eval_set(st["spec"]["skill_dir"])
+    if problems: return {"status": "eval-set-invalid", "iteration": st["n"], "problems": problems}
+    st["spec"] = spec
+
+# The order policy/gates.json declares (post_builder); gate_declaration_problem() compares the two. A gate returns the
+# loop's stop result or None. CRASH_GATES also run when the builder raised; the crash is re-raised after them.
+POST_BUILDER_GATES = (("builder-wrote-outside", _after_outside), ("rules-changed", _after_rules),
+                      ("builder-non-english", _after_english), ("builder-parity-missing", _after_parity),
+                      ("builder-review-required", _after_review), ("builder-failed", _after_failed),
+                      ("eval-set-invalid", _after_eval_set))
+CRASH_GATES = ("builder-wrote-outside", "rules-changed")
 
 def builder_check(skill, workspace, compare=None):
     """`builder-check`: prints the builder's writable set and the fingerprint of every entry outside it (one
@@ -3388,7 +3558,17 @@ def grader_engine_of(a):
     v = getattr(a, "grader_engine", None)
     return v if v in GRADER_ENGINES else "claude"
 
-def plan_text(spec, problems, a, engines, ws, est):
+LIVE_GATES_HEADER = "live gates (policy/gates.json, checked as for run --live, nothing executed):"
+
+def _memo_verdicts():
+    """approval_verdict with one read per gate, so plan starts ssh-keygen at most once per signed record."""
+    seen = {}
+    def verdict_of(gate, spec, ws):
+        if gate not in seen: seen[gate] = approval_verdict(gate, spec, ws)
+        return seen[gate]
+    return verdict_of
+
+def plan_text(spec, problems, a, engines, ws, est, tokens=None, prices=None):
     configs = configs_for(a.baseline)
     layers = {l: sum(1 for c in spec["cases"] for it in c["items"] if it["layer"] == l) for l in LAYERS}
     trig = spec["triggers"] or []
@@ -3403,15 +3583,25 @@ def plan_text(spec, problems, a, engines, ws, est):
              sum(not q["should_trigger"] for q in trig))]
     L += ["validation problems (%d):" % len(problems)] + ["  - " + p for p in problems]
     import eva
-    rr = approval_verdict("rule_review", spec, ws) if rule_review_items(spec["skill_dir"]) else None
+    verdict_of = _memo_verdicts()
+    rr = verdict_of("rule_review", spec, ws) if rule_review_items(spec["skill_dir"]) else None
     L += ["rule review (English-only / parity needs-review findings): " + (
               "none" if rr is None else "RECORDED (signed by %s)" % rr.principal if rr.status == "approved" else
               "NOT RECORDED (%sblocks --live and the loop)" % ("" if rr.status == "missing" else rr.status + "; ")),
           "multi-tool parity (static, eva.py): " + eva.parity_line(eva.parity_status(spec["skill_dir"])),
           "tool coverage (dynamic): " + coverage_line(tool_coverage([e.name for e in engines]))]
     L += ["approval gates: requirements=%s, eval_set=%s" % (
-        approval_label(approval_verdict("requirements", spec, ws)), approval_label(approval_verdict("eval_set", spec, ws)))]
-    L += ["preflight problems (block --live):"] + ["  - " + w for w in preflight(spec, [e.name for e in engines], a.run_root)]
+        approval_label(verdict_of("requirements", spec, ws)), approval_label(verdict_of("eval_set", spec, ws)))]
+    pf = preflight(spec, [e.name for e in engines], a.run_root)
+    L += ["ruleset " + ruleset_sha256(), LIVE_GATES_HEADER]
+    declared = gate_declaration_problem()
+    if declared: L.append("gate declaration mismatch (check_live_gates and loop refuse): " + declared)
+    states = ([(gid, "fail: " + declared.splitlines()[0]) for gid, _ in LIVE_GATES] if declared else
+              live_gate_states(a, spec, problems, ws, engines, DEFAULT_TOKENS if tokens is None else tokens,
+                               prices or {}, pf, verdict_of))
+    L += ["  %d. %s: %s" % (k, gid, state) for k, (gid, state) in enumerate(states, 1)]
+    L += ["post-builder gates (loop): " + ", ".join(gid for gid, _ in POST_BUILDER_GATES)]
+    L += ["preflight problems (block --live):"] + ["  - " + w for w in pf]
     names = [e.name for e in engines]
     notes = claude_shared_skill_notes(claude_config_dir()) if "claude" in names else []
     if notes: L += ["isolation notes (not blocking):"] + ["  - " + x for x in notes]
@@ -3497,58 +3687,158 @@ AUTH_STATUS_SKIPPED = "skipped in dry run: `claude auth status --json` (runs a C
 CODEX_AUTH_SKIPPED = ("skipped in dry run: the Codex grader's ChatGPT login (auth_mode of auth.json; only the real "
                       "--live reads it)")
 
+class _LiveGates(object):
+    """What the live gate functions read. report: a list collects every failure instead of raising (dry runs, plan).
+    preflight() runs preflight once; verdict_of(gate, spec, ws) reads one approval verdict (plan passes a memo)."""
+    def __init__(self, a, spec, problems, ws, n, engines, tokens, prices, budget_left, iterations_left, report,
+                 verdict_of=None, pf=None):
+        self.a, self.spec, self.problems, self.ws, self.n = a, spec, problems, ws, n
+        self.engines, self.tokens, self.prices = engines, tokens, prices
+        self.budget_left, self.iterations_left, self.report = budget_left, iterations_left, report
+        self.verdict_of, self.pf, self.live_est = verdict_of or approval_verdict, pf, None
+
+    def fail(self, msg):
+        if self.report is None: raise EvalError(msg)
+        self.report.append(msg)
+
+    def preflight(self):
+        if self.pf is None: self.pf = preflight(self.spec, [e.name for e in self.engines], self.a.run_root)
+        return self.pf
+
+def _live_eval_set(g):
+    if g.problems: g.fail("eval set has %d validation problem(s); run `validate`" % len(g.problems))
+
+def _live_strict_budget(g):
+    soft = [e.name for e in g.engines if budget_enforcement(e) == "soft_limit"] if g.a.cmd in ("run", "loop") else []
+    if getattr(g.a, "strict_budget", True) and soft:
+        g.fail("--strict-budget (default): %s has no enforceable per-call budget cap (its budget is only a soft limit); "
+               "refusing the live run (drop it from --engines; --no-strict-budget overrides this, risky)" % ", ".join(soft))
+
+def _live_codex_grader(g):
+    if g.a.cmd in ("run", "loop") and grader_engine_of(g.a) == "codex" and any(e.name == "codex" for e in g.engines):
+        g.fail("--grader-engine codex with codex under test: a codex grader cannot grade codex runs (`grade` refuses "
+               "them), so the codex runs would be paid for and never graded; drop codex from --engines or use "
+               "--grader-engine claude")
+
+def _live_auth(g):
+    a = g.a
+    if g.report is None:
+        auth = subscription_problems(a, g.engines)
+        if auth: g.fail("subscription auth: " + " | ".join(auth))
+        return
+    env = [] if a.cmd in ("run", "loop") else api_key_env_problems()  # run/loop: reported by preflight
+    if env: g.fail("subscription auth: " + " | ".join(env))
+    if needs_claude_auth(a, g.engines):
+        g.report.append(AUTH_STATUS_SKIPPED)
+    if grades_now(a) and grader_engine_of(a) == "codex":
+        g.report.append(CODEX_AUTH_SKIPPED)
+
+def _live_grader_model(g):
+    a = g.a
+    if grader_engine_of(a) == "claude":  # the grader must differ from the model under test
+        same = [e.label() for e in g.engines if e.name == "claude" and e.model and e.model == a.grader_model]
+        if same and a.cmd in ("run", "loop"):
+            g.fail("grader %s is the model under test %s; pick another --grader-model or --grader-engine codex"
+                   % (a.grader_model, ", ".join(same)))
+
+def _live_rule_review(g):
+    for x in rule_review_problems(g.spec, g.ws, g.verdict_of): g.fail(x)
+
+def _live_approvals(g):
+    for gate in ("requirements", "eval_set"):
+        v = g.verdict_of(gate, g.spec, g.ws)
+        if v.status != "approved":
+            g.fail("gate %s not approved%s (write %s/requirements.md, then `approve --gate %s` at a terminal)"
+                   % (gate, "" if v.status == "missing" else " (%s)" % v.status, g.ws, gate))
+
+def _live_priced(g):
+    g.live_est = live_estimate(g.a, g.spec, g.ws, g.n, g.engines, g.tokens, g.prices, g.iterations_left)
+    if g.live_est["unpriced_models"]: g.fail("no price for %s; pass --price" % g.live_est["unpriced_models"])
+
+def _live_preflight(g):
+    if g.a.cmd in ("run", "loop"):
+        pf = g.preflight()
+        if pf: g.fail("preflight: " + " | ".join(pf))
+
+def _live_call_bound(g):
+    if g.a.cmd not in ("run", "loop"): return
+    for e in g.engines:
+        if e.has_call_cap: continue
+        for kind in ("exec", "trigger"):
+            b = call_bound(e.name, e.model, kind, g.prices, g.tokens)
+            if b is not None and b > g.budget_left:
+                g.fail("%s worst-case %s call bound $%.2f exceeds budget $%.2f (%s budget is a soft "
+                       "limit: no per-call cap)" % (e.name, kind, b, g.budget_left, e.name))
+
+def _live_estimate(g):
+    est = g.live_est
+    if est["total_usd"] > g.budget_left:
+        g.fail("estimate $%.2f exceeds budget $%.2f\n%s" % (est["total_usd"], g.budget_left, format_estimate(est)))
+
+# The order policy/gates.json declares (live); gate_declaration_problem() compares the two.
+LIVE_GATES = (("eval-set-valid", _live_eval_set), ("strict-budget", _live_strict_budget),
+              ("codex-grader-not-under-test", _live_codex_grader), ("subscription-auth", _live_auth),
+              ("grader-not-model-under-test", _live_grader_model), ("rule-review", _live_rule_review),
+              ("approvals", _live_approvals), ("priced-models", _live_priced), ("preflight", _live_preflight),
+              ("per-call-bound", _live_call_bound), ("estimate-within-budget", _live_estimate))
+BUDGET_GATES = ("per-call-bound", "estimate-within-budget")
+NO_BUDGET = "--live needs a finite --budget-usd > 0"
+
+def gate_declaration_problem():
+    """None when policy/gates.json under RULESET_ROOT declares exactly the ids of LIVE_GATES and POST_BUILDER_GATES, in
+    their order; else one line naming the difference, or why the file cannot be read."""
+    from engine import schema
+    where = "policy/gates.json"
+    try:
+        doc = schema.load(os.path.join(RULESET_ROOT, "policy", "gates.json"))
+    except schema.JsonError as e:
+        return "%s: %s" % (where, e)
+    for key, table in (("live", LIVE_GATES), ("post_builder", POST_BUILDER_GATES)):
+        entries = doc.get(key) if isinstance(doc, dict) else None
+        if not (isinstance(entries, list) and all(isinstance(e, dict) and set(e) == {"id", "label"}
+                                                  and isinstance(e["id"], str) and isinstance(e["label"], str)
+                                                  for e in entries)):
+            return "%s: %s must be a list of {id, label} objects" % (where, key)
+        ids, code = [e["id"] for e in entries], [gid for gid, _ in table]
+        if ids != code:
+            return "%s %s gates [%s] differ from the order the code runs [%s]" % (where, key, ", ".join(ids),
+                                                                                 ", ".join(code))
+    return None
+
 def check_live_gates(a, spec, problems, ws, n, engines, tokens, prices, budget_left, iterations_left=None, report=None):
-    """Every --live gate; raises EvalError on the first failure. `loop` calls it again before each iteration with the
+    """Every --live gate, in the order of LIVE_GATES; raises EvalError on the first failure, and before any gate when
+    policy/gates.json declares another list (also with report). `loop` calls it again before each iteration with the
     reloaded eval set, the remaining iterations and the remaining budget. report: a list for --dry-run: every failure
     is appended instead of raised, and `claude auth status` is not executed (AUTH_STATUS_SKIPPED is appended)."""
-    def fail(msg):
-        if report is None: raise EvalError(msg)
-        report.append(msg)
-    if problems: fail("eval set has %d validation problem(s); run `validate`" % len(problems))
-    soft = [e.name for e in engines if budget_enforcement(e) == "soft_limit"] if a.cmd in ("run", "loop") else []
-    if getattr(a, "strict_budget", True) and soft:
-        fail("--strict-budget (default): %s has no enforceable per-call budget cap (its budget is only a soft limit); "
-             "refusing the live run (drop it from --engines; --no-strict-budget overrides this, risky)" % ", ".join(soft))
-    if a.cmd in ("run", "loop") and grader_engine_of(a) == "codex" and any(e.name == "codex" for e in engines):
-        fail("--grader-engine codex with codex under test: a codex grader cannot grade codex runs (`grade` refuses "
-             "them), so the codex runs would be paid for and never graded; drop codex from --engines or use "
-             "--grader-engine claude")
-    if report is None:
-        auth = subscription_problems(a, engines)
-        if auth: fail("subscription auth: " + " | ".join(auth))
-    else:
-        env = [] if a.cmd in ("run", "loop") else api_key_env_problems()  # run/loop: reported by preflight
-        if env: fail("subscription auth: " + " | ".join(env))
-        if needs_claude_auth(a, engines):
-            report.append(AUTH_STATUS_SKIPPED)
-        if grades_now(a) and grader_engine_of(a) == "codex":
-            report.append(CODEX_AUTH_SKIPPED)
-    if grader_engine_of(a) == "claude":  # the grader must differ from the model under test
-        same = [e.label() for e in engines if e.name == "claude" and e.model and e.model == a.grader_model]
-        if same and a.cmd in ("run", "loop"):
-            fail("grader %s is the model under test %s; pick another --grader-model or --grader-engine codex"
-                 % (a.grader_model, ", ".join(same)))
-    for x in rule_review_problems(spec, ws): fail(x)
-    for g in ("requirements", "eval_set"):
-        v = approval_verdict(g, spec, ws)
-        if v.status != "approved":
-            fail("gate %s not approved%s (write %s/requirements.md, then `approve --gate %s` at a terminal)"
-                 % (g, "" if v.status == "missing" else " (%s)" % v.status, ws, g))
-    live_est = live_estimate(a, spec, ws, n, engines, tokens, prices, iterations_left)
-    if live_est["unpriced_models"]: fail("no price for %s; pass --price" % live_est["unpriced_models"])
-    if a.cmd in ("run", "loop"):
-        pf = preflight(spec, [e.name for e in engines], a.run_root)
-        if pf: fail("preflight: " + " | ".join(pf))
-        for e in engines:
-            if e.has_call_cap: continue
-            for kind in ("exec", "trigger"):
-                b = call_bound(e.name, e.model, kind, prices, tokens)
-                if b is not None and b > budget_left:
-                    fail("%s worst-case %s call bound $%.2f exceeds budget $%.2f (%s budget is a soft "
-                         "limit: no per-call cap)" % (e.name, kind, b, budget_left, e.name))
-    if live_est["total_usd"] > budget_left:
-        fail("estimate $%.2f exceeds budget $%.2f\n%s" % (live_est["total_usd"], budget_left, format_estimate(live_est)))
-    return live_est
+    declared = gate_declaration_problem()
+    if declared: raise EvalError(declared)
+    g = _LiveGates(a, spec, problems, ws, n, engines, tokens, prices, budget_left, iterations_left, report)
+    for _, gate in LIVE_GATES: gate(g)
+    return g.live_est
+
+def live_gate_states(a, spec, problems, ws, engines, tokens, prices, pf, verdict_of):
+    """[(id, state)] of LIVE_GATES for this command checked as `run --live` in report mode, starting no process: pass,
+    fail: <first line of the gate's first failure>, or skipped: <the check only a real --live makes>. Without a finite
+    --budget-usd > 0 the two budget gates fail as the live start would refuse."""
+    budget = getattr(a, "budget_usd", None)
+    priced = budget is not None and math.isfinite(budget) and budget > 0
+    g = _LiveGates(argparse.Namespace(**dict(vars(a), cmd="run")), spec, problems, ws, None, engines, tokens, prices,
+                   budget, None, [], verdict_of, pf)
+    out = []
+    for gid, gate in LIVE_GATES:
+        if gid in BUDGET_GATES and not priced:
+            out.append((gid, "fail: " + NO_BUDGET))
+            continue
+        start = len(g.report)
+        try:
+            gate(g)
+        except Exception as ex:
+            out.append((gid, "fail: " + (str(ex).splitlines() or [type(ex).__name__])[0]))
+            continue
+        said = g.report[start:]
+        fails = [m for m in said if m not in (AUTH_STATUS_SKIPPED, CODEX_AUTH_SKIPPED)]
+        out.append((gid, "fail: " + fails[0].splitlines()[0] if fails else "skipped: " + said[0] if said else "pass"))
+    return out
 
 def live_dry_run(a, spec, problems, ws, n, engines, tokens, prices):
     """`--live --dry-run`: the plan of this exact command plus every live gate it would face, collected instead of
@@ -3558,7 +3848,7 @@ def live_dry_run(a, spec, problems, ws, n, engines, tokens, prices):
     live_est = check_live_gates(a, spec, problems, ws, n, engines, tokens, prices, a.budget_usd, report=report)
     skipped = (AUTH_STATUS_SKIPPED, CODEX_AUTH_SKIPPED)
     fails = [r for r in report if r not in skipped]
-    print(plan_text(spec, problems, a, engines, ws, live_est))
+    print(plan_text(spec, problems, a, engines, ws, live_est, tokens, prices))
     print("\nLIVE DRY RUN: nothing was executed (no model call, no `claude auth status`, no files written).")
     print("budget: API-equivalent estimate $%.2f vs --budget-usd $%.2f (%s)" % (
         live_est["total_usd"], a.budget_usd, "fits" if live_est["total_usd"] <= a.budget_usd else "EXCEEDS"))
@@ -3771,7 +4061,7 @@ def _dispatch(a):
         raise EvalError("--dry-run checks the gates of a --live command: add --live (with --dry-run it still executes "
                         "nothing); without --live every command is already a dry run")
     if a.cmd == "plan" or (a.cmd in live_cmds and not a.live and a.cmd != "grade"):
-        print(plan_text(spec, problems, a, engines, ws, est))
+        print(plan_text(spec, problems, a, engines, ws, est, tokens, prices))
         print("\nDRY RUN: nothing was executed. Real runs need --live --budget-usd X (API-equivalent USD), subscription "
               "auth only, approved requirements/eval_set, no validation or preflight problems, and an estimate within budget.")
         return 0
@@ -3781,7 +4071,7 @@ def _dispatch(a):
         grade_iteration(spec, ws, n, None, scope=grade_scope(a)); print("static + human queue only (dry run); LLM items not graded"); return 0
     # --- live: the same gates for run, loop, grade and calibrate ---
     if a.budget_usd is None or not math.isfinite(a.budget_usd) or a.budget_usd <= 0:
-        raise EvalError("--live needs a finite --budget-usd > 0")
+        raise EvalError(NO_BUDGET)
     n = None
     if a.cmd in ("grade", "calibrate"):
         n = a.iteration or (iterations(ws) or [None])[-1]
@@ -3793,8 +4083,10 @@ def _dispatch(a):
         check_live_gates(a, spec, problems, ws, n, engines, tokens, prices, a.budget_usd, report=report)
         fails = [r for r in report if r not in (AUTH_STATUS_SKIPPED, CODEX_AUTH_SKIPPED)]
         if fails: raise EvalError(fails[0])
-        return approvals.Prepared(spec["skill_name"], live_plan_hash(a, spec, ws, builder_text),
-                                  ["live command: " + shlex.join(["python3", "skill_eval.py"] + a.argv), "workspace: " + ws])
+        rules = ruleset_sha256()
+        return approvals.Prepared(spec["skill_name"], live_plan_hash(a, spec, ws, builder_text), rules,
+                                  ["live command: " + shlex.join(["python3", "skill_eval.py"] + a.argv), "workspace: " + ws,
+                                   "ruleset_sha256 " + rules])
     grant = APPROVER["it"].sign("live", a.cmd, prepare, budget_usd=a.budget_usd)
     print("signed %s --live by %s (plan sha256 %s)" % (a.cmd, grant.record["principal"], grant.sha256[:12]), file=sys.stderr)
     check_live_gates(a, spec, problems, ws, n, engines, tokens, prices, a.budget_usd)

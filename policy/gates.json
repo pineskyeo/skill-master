@@ -1,0 +1,26 @@
+{
+  "$comment": "The gates skill_eval.py runs, in order (plan.md:845). live: the gates of check_live_gates, which every --live start, every loop iteration and the plan display run; post_builder: the checks loop runs after each builder call. skill_eval.LIVE_GATES and POST_BUILDER_GATES must hold exactly these ids in this order: plan prints any difference, and check_live_gates and loop refuse. Part of the rule bundle hash (ruleset_sha256).",
+  "source": "plan.md:845 (A5)",
+  "live": [
+    {"id": "eval-set-valid", "label": "The eval set has no validation problem."},
+    {"id": "strict-budget", "label": "Under --strict-budget (the default) every engine under test has an enforceable per-call budget cap."},
+    {"id": "codex-grader-not-under-test", "label": "A codex grader is not used while codex is under test."},
+    {"id": "subscription-auth", "label": "Subscription auth only: no API-key variable, and a claude.ai login wherever claude is called."},
+    {"id": "grader-not-model-under-test", "label": "The claude grader model differs from every claude model under test."},
+    {"id": "rule-review", "label": "Every rule-review finding has a signed decision bound to these exact findings."},
+    {"id": "approvals", "label": "The requirements and eval_set gates carry current signed approvals."},
+    {"id": "priced-models", "label": "Every model the command calls has a price."},
+    {"id": "preflight", "label": "Preflight finds nothing that blocks a live run (skill copies, API keys, isolation)."},
+    {"id": "per-call-bound", "label": "Each engine without a per-call cap has a worst-case call bound within the budget."},
+    {"id": "estimate-within-budget", "label": "The cost estimate fits the budget."}
+  ],
+  "post_builder": [
+    {"id": "builder-wrote-outside", "label": "The builder changed nothing outside its writable set."},
+    {"id": "rules-changed", "label": "The rule bundle hash did not move during the builder call."},
+    {"id": "builder-non-english", "label": "The skill folder passes the static English-only check."},
+    {"id": "builder-parity-missing", "label": "The skill folder passes the multi-tool parity check."},
+    {"id": "builder-review-required", "label": "No rule-review finding lacks a signed decision."},
+    {"id": "builder-failed", "label": "The builder returned 0 and raised nothing."},
+    {"id": "eval-set-invalid", "label": "The reloaded eval set has no validation problem."}
+  ]
+}

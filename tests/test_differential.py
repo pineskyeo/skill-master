@@ -1959,7 +1959,7 @@ class TestPolicy(unittest.TestCase):
             "tuple-as-string": {"eval-policy.json": ("LAYERS", "value", "low"),
                                 "pricing.json": ("DEFAULT_TOKENS", "value", "low"),
                                 "models.json": ("CODEX_EFFORTS", "value", "low")},
-            "float-as-int": {"eval-policy.json": ("AGREEMENT_MIN", "value", 1),
+            "float-as-int": {"eval-policy.json": ("HIGH_VARIANCE_STDDEV", "value", 1),
                              "pricing.json": ("CLAUDE_CAP_HEADROOM", "value", 1),
                              "models.json": ("DEFAULT_GRADER_MODEL", "value", 1)},
         }
@@ -2023,7 +2023,7 @@ def set_entry(name, key, value):
     return f
 
 
-EP, PR, MO = "eval-policy.json", "pricing.json", "models.json"
+EP, PR, MO, GR = "eval-policy.json", "pricing.json", "models.json", "gate.rules.json"
 ROW = "needs float input and output, an https source and a read_on date; "
 # name -> (policy file to edit, the edit, texts the refusal must hold: the file and value name, then the value)
 POLICY_REFUSALS = {
@@ -2043,10 +2043,10 @@ POLICY_REFUSALS = {
                                     ("policy/eval-policy.json: TRIGGER_THRESHOLD: ", "got 1.5")),
     "trigger-threshold-infinite": (EP, set_value("TRIGGER_THRESHOLD", INF),
                                    ("policy/eval-policy.json: TRIGGER_THRESHOLD: ", "got Infinity")),
-    "agreement-min-negative": (EP, set_value("AGREEMENT_MIN", -1.0),
-                               ("policy/eval-policy.json: AGREEMENT_MIN: ", "got -1.0")),
-    "regression-tolerance-above-one": (EP, set_value("REGRESSION_TOLERANCE", 2.0),
-                                       ("policy/eval-policy.json: REGRESSION_TOLERANCE: ", "got 2.0")),
+    "agreement-min-negative": (GR, set_value("AGREEMENT_MIN", -1.0),
+                               ("policy/gate.rules.json: AGREEMENT_MIN: ", "got -1.0")),
+    "regression-tolerance-above-one": (GR, set_value("REGRESSION_TOLERANCE", 2.0),
+                                       ("policy/gate.rules.json: REGRESSION_TOLERANCE: ", "got 2.0")),
     "high-variance-stddev-above-one": (EP, set_value("HIGH_VARIANCE_STDDEV", 1.5),
                                        ("policy/eval-policy.json: HIGH_VARIANCE_STDDEV: ", "got 1.5")),
     "price-input-infinite": (PR, set_price("input", INF),

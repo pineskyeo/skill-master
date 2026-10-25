@@ -155,18 +155,35 @@ class TestRegistrationDecision(unittest.TestCase):
             with open(os.path.join(self.tmp, rel), "rb") as f: out[rel] = f.read()
         return out
 
+    def test_the_golden_iteration_without_a_recorded_ruleset_refuses_and_writes_nothing(self):
+        se.approve("registration", self.spec, self.ws)  # golden's own record is unsigned (H1)
+        before = self.snapshot()
+        with self.assertRaises(se.EvalError) as cm: self.decide()
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(str(cm.exception), "iteration-%d ran under ruleset <unrecorded> but the rules now hash to %s; re-run "
+                         "the eval before registering" % (se.iterations(self.ws)[-1], se.ruleset_sha256()[:12]))
+
     def test_the_decision_reproduces_the_recorded_registration_and_writes_nothing(self):
         reg = se.rjson(os.path.join(self.ws, "registration.json"))
+        self.assertEqual(se.gate_hash("registration", self.spec, self.ws), reg["benchmark_sha256"])
+        self.assertEqual(reg["approval"]["sha256"], reg["benchmark_sha256"])
+        bp = os.path.join(self.it, "benchmark.json")
+        golden_bench = se.rjson(bp)
+        bench = dict(golden_bench, metadata=dict(golden_bench["metadata"], ruleset_sha256=se.ruleset_sha256()))
+        se.wjson(bp, bench)  # golden iteration 4 predates ruleset_sha256 (A5 D5)
         signed = se.approve("registration", self.spec, self.ws)  # golden's own record is unsigned (H1)
         before = self.snapshot()
         rec = self.decide()
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(rec["skill_path"], os.path.realpath(self.skill))
-        drop = ("registered_at", "skill_path", "approval")
-        self.assertEqual({k: v for k, v in rec.items() if k not in drop}, {k: v for k, v in reg.items() if k not in drop})
+        drop = ("registered_at", "skill_path", "approval", "benchmark_sha256")
+        self.assertEqual({k: v for k, v in rec.items() if k not in drop},
+                         dict({k: v for k, v in reg.items() if k not in drop}, ruleset_sha256=se.ruleset_sha256()))
+        self.assertEqual(rec["benchmark_sha256"], se.sha256_files(bp))
+        self.assertNotEqual(rec["benchmark_sha256"], reg["benchmark_sha256"])
         self.assertTrue(se.rjson(os.path.join(self.it, "gate.json"))["needs_approval"])
         self.assertEqual(rec["approval"], signed)
-        self.assertEqual(reg["approval"]["sha256"], signed["sha256"])
+        self.assertEqual(signed["sha256"], rec["benchmark_sha256"])
 
     def test_a_byte_change_to_an_installed_skill_file_refuses(self):
         append(os.path.join(self.skill, "scripts", "clean.py"), "\n")

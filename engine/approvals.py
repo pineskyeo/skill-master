@@ -22,6 +22,9 @@ CHALLENGE_LENGTH = 6
 NO_IDENTITIES = "The agent has no identities."
 TEST_MODULES = ("unittest", "pytest", "_pytest")
 IN_TESTS = "refusing to use the real approver files inside a test process (unittest is loaded)"
+RULES_CHANGED = "rules changed since approval"
+UNSIGNED = "no signature (a record from before signed approvals)"
+UNSIGNED_RULES = UNSIGNED + "; " + RULES_CHANGED
 
 AGENT_NAMES = ("claude", "codex", "opencode", "hermes", "cursor")
 HOST_MARKERS = {
@@ -44,7 +47,7 @@ SIGNERS_LINE_RE = re.compile(r'(?P<principals>\S+)(?P<options>(\s+[A-Za-z-]+(="[
                              r'(\s+.*)?', re.ASCII)
 
 Verdict = collections.namedtuple("Verdict", "status principal reason")
-Prepared = collections.namedtuple("Prepared", "unit sha256 show")
+Prepared = collections.namedtuple("Prepared", "unit sha256 ruleset_sha256 show")
 
 
 class Refused(Exception):
@@ -68,13 +71,14 @@ def label(kind, gate):
     return "%s --live" % gate if kind == "live" else kind
 
 
-def payload(kind, gate, unit, sha256, at, budget_usd=None):
+def payload(kind, gate, unit, sha256, ruleset_sha256, at, budget_usd=None):
     """The canonical bytes a signature covers. Every value is checked, so no two field sets give the same bytes."""
     if kind not in KINDS: raise ValueError("kind %r is not one of %s" % (kind, ", ".join(KINDS)))
     for name, value, rx in (("gate", gate, NAME_RE), ("unit", unit, NAME_RE), ("sha256", sha256, SHA_RE),
-                            ("at", at, AT_RE)):
+                            ("ruleset_sha256", ruleset_sha256, SHA_RE), ("at", at, AT_RE)):
         if not isinstance(value, str) or not rx.fullmatch(value): raise ValueError("%s %r is not valid" % (name, value))
-    lines = ["skill-master-approval v%d" % FORMAT, "kind " + kind, "gate " + gate, "unit " + unit, "sha256 " + sha256]
+    lines = ["skill-master-approval v%d" % FORMAT, "kind " + kind, "gate " + gate, "unit " + unit, "sha256 " + sha256,
+             "ruleset_sha256 " + ruleset_sha256]
     if kind == "live":
         if isinstance(budget_usd, bool) or not isinstance(budget_usd, (int, float)) or not math.isfinite(budget_usd) \
                 or budget_usd <= 0:
@@ -294,7 +298,7 @@ class Approver(object):
         prep = prepare()
         at = now_iso()
         try:
-            data = payload(kind, gate, prep.unit, prep.sha256, at, budget_usd)
+            data = payload(kind, gate, prep.unit, prep.sha256, prep.ruleset_sha256, at, budget_usd)
         except ValueError as ex:
             raise Refused(what, ["%s: cannot sign: %s" % (what, ex)])
         summary = "%s: gate %s, unit %s, sha256 %s" % (what, gate, prep.unit, prep.sha256)
@@ -309,9 +313,9 @@ class Approver(object):
             principal = self.find_principal(signature)
         except (OSError, ValueError, UnicodeDecodeError, subprocess.SubprocessError) as ex:
             raise Refused(what, ["%s: signing failed: %s" % (what, ex)])
-        record = {"format": FORMAT, "method": "ssh-sig", "sha256": prep.sha256, "principal": principal, "at": at,
-                  "signature": signature}
-        v = self.verdict(record, kind, gate, prep.unit, prep.sha256, budget_usd)
+        record = {"format": FORMAT, "method": "ssh-sig", "sha256": prep.sha256, "ruleset_sha256": prep.ruleset_sha256,
+                  "principal": principal, "at": at, "signature": signature}
+        v = self.verdict(record, kind, gate, prep.unit, prep.sha256, prep.ruleset_sha256, budget_usd)
         if v.status != "approved": raise Refused(what, ["%s: the new signature does not verify: %s" % (what, v.reason)])
         return Grant(kind, gate, prep.unit, prep.sha256, record)
 
@@ -329,13 +333,15 @@ class Approver(object):
                              % (first_line(err) if rc != 0 else "%d principals" % len(names)))
         return names[0]
 
-    def verdict(self, record, kind, gate, unit, sha256, budget_usd=None):
+    def verdict(self, record, kind, gate, unit, sha256, ruleset_sha256, budget_usd=None):
         """The first rule that matches decides: missing, unsigned, invalid (a malformed record or no signers file),
-        stale (the gated files are gone or hash elsewhere), invalid (ssh-keygen -Y verify fails), approved. Only a
-        signed record that reaches the verify step starts ssh-keygen."""
+        stale (the gated files are gone or hash elsewhere), stale (RULES_CHANGED: the record binds no ruleset_sha256 or
+        another one than ruleset_sha256, the current bundle hash), invalid (ssh-keygen -Y verify fails), approved. Only
+        a signed record that reaches the verify step starts ssh-keygen."""
         if record is None: return Verdict("missing", None, "no record")
         if isinstance(record, dict) and "signature" not in record and "method" not in record:
-            return Verdict("unsigned", None, "no signature (a record from before signed approvals)")
+            bound = record.get("ruleset_sha256") is not None and record.get("ruleset_sha256") == ruleset_sha256
+            return Verdict("unsigned", None, UNSIGNED if bound else UNSIGNED_RULES)
         problem = record_problem(record)
         if problem: return Verdict("invalid", None, problem)
         if self.refuse_in_tests and in_test_process(): return Verdict("invalid", None, IN_TESTS)
@@ -344,8 +350,10 @@ class Approver(object):
         if not sha256 or record["sha256"] != sha256:
             return Verdict("stale", record["principal"], "the gated files changed since signing" if sha256 else
                            "the gated files are missing")
+        if record.get("ruleset_sha256") is None or record["ruleset_sha256"] != ruleset_sha256:
+            return Verdict("stale", record["principal"], RULES_CHANGED)
         try:
-            data = payload(kind, gate, unit, sha256, record["at"], budget_usd)
+            data = payload(kind, gate, unit, sha256, record["ruleset_sha256"], record["at"], budget_usd)
             problem = self.verify(data, record["signature"], record["principal"])
         except (OSError, ValueError, subprocess.SubprocessError) as ex:
             problem = str(ex)
@@ -368,7 +376,9 @@ def record_problem(record):
     if not isinstance(record, dict): return "the record is not an object"
     if record.get("format") != FORMAT: return "format is %r, not %d" % (record.get("format"), FORMAT)
     if record.get("method") != "ssh-sig": return "method is %r, not ssh-sig" % (record.get("method"),)
-    for name, rx in (("sha256", SHA_RE), ("principal", PRINCIPAL_RE), ("at", AT_RE), ("signature", SIG_RE)):
+    fields = (("sha256", SHA_RE), ("principal", PRINCIPAL_RE), ("at", AT_RE), ("signature", SIG_RE))
+    if "ruleset_sha256" in record: fields += (("ruleset_sha256", SHA_RE),)
+    for name, rx in fields:
         value = record.get(name)
         if not isinstance(value, str) or not rx.fullmatch(value): return "field %s is missing or malformed" % name
     return None

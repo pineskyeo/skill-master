@@ -26,6 +26,7 @@ SKIP_HUMAN = ("no agent ancestor and no agent marker (a human Terminal): skipped
 GATES = ("requirements", "eval_set", "rule_review", "iteration-1", "registration")
 SHA = "ab" * 32
 OTHER = "cd" * 32
+RULES = "ef" * 32
 AT = "2026-10-20T09:41:00Z"
 KOREAN = "".join(map(chr, (0xD55C, 0xAD6D, 0xC5B4, 0x20, 0xD14D, 0xC2A4, 0xD2B8)))
 RLO = chr(0x202E)
@@ -410,7 +411,7 @@ class Keys(unittest.TestCase):
         return self.A.Approver(**args)
 
     def prepared(self, sha=SHA):
-        return lambda: self.A.Prepared("branch-setup", sha, ["eval set files: evals/evals.json"])
+        return lambda: self.A.Prepared("branch-setup", sha, RULES, ["eval set files: evals/evals.json"])
 
     def signed(self, gate="eval_set", sha=SHA, **kw):
         return self.approver(**kw).sign("approve", gate, self.prepared(sha)).record
@@ -491,25 +492,28 @@ class ChallengeAndSign(Keys):
         r = g.record
         self.assertEqual((r["format"], r["method"], r["sha256"], r["principal"]), (1, "ssh-sig", SHA, T.TEST_PRINCIPAL))
         self.assertTrue(r["signature"].startswith("-----BEGIN SSH SIGNATURE-----"))
-        self.assertEqual(self.approver().verdict(r, "approve", "eval_set", "branch-setup", SHA),
+        self.assertEqual(self.approver().verdict(r, "approve", "eval_set", "branch-setup", SHA, RULES),
                          self.A.Verdict("approved", T.TEST_PRINCIPAL, ""))
         self.assertTrue(any("gate eval_set" in s and "branch-setup" in s and SHA in s for s in self.shown), self.shown)
         self.assertIn("eval set files: evals/evals.json", self.shown)
 
     def test_u5_the_terminal_form_signs_from_stdin(self):
         """The CLI form: payload on stdin, signature on stdout, no file (a key without a passphrase, so no prompt)."""
-        data = self.A.payload("approve", "eval_set", "branch-setup", SHA, AT)
+        data = self.A.payload("approve", "eval_set", "branch-setup", SHA, RULES, AT)
         sig = self.A.sign_payload(T.keygen_runner(self.kdir), self.nopass, data, interactive=True)
-        rec = {"format": 1, "method": "ssh-sig", "sha256": SHA, "principal": "nopass", "at": AT, "signature": sig}
-        self.assertEqual(self.approver().verdict(rec, "approve", "eval_set", "branch-setup", SHA).status, "approved")
+        rec = {"format": 1, "method": "ssh-sig", "sha256": SHA, "ruleset_sha256": RULES, "principal": "nopass", "at": AT,
+               "signature": sig}
+        self.assertEqual(self.approver().verdict(rec, "approve", "eval_set", "branch-setup", SHA, RULES).status,
+                         "approved")
 
     def test_payload_bytes(self):
-        self.assertEqual(self.A.payload("live", "run", "branch-setup", SHA, AT, budget_usd=0.01),
-                         ("skill-master-approval v1\nkind live\ngate run\nunit branch-setup\nsha256 %s\nbudget_usd 0.01\n"
-                          "at %s\n" % (SHA, AT)).encode("ascii"))
+        self.assertEqual(self.A.payload("live", "run", "branch-setup", SHA, RULES, AT, budget_usd=0.01),
+                         ("skill-master-approval v1\nkind live\ngate run\nunit branch-setup\nsha256 %s\nruleset_sha256 %s\n"
+                          "budget_usd 0.01\nat %s\n" % (SHA, RULES, AT)).encode("ascii"))
         for bad in (dict(unit="x\n"), dict(unit="-x"), dict(gate="a b"), dict(sha256="AB" * 32), dict(at=AT + "\n"),
-                    dict(kind="other")):
-            args = dict(kind="approve", gate="eval_set", unit="u", sha256=SHA, at=AT); args.update(bad)
+                    dict(kind="other"), dict(ruleset_sha256="AB" * 32)):
+            args = dict(kind="approve", gate="eval_set", unit="u", sha256=SHA, ruleset_sha256=RULES, at=AT)
+            args.update(bad)
             with self.assertRaises(ValueError, msg=bad): self.A.payload(**args)
 
     def test_failed_signing_refuses(self):
@@ -540,8 +544,8 @@ class ChallengeAndSign(Keys):
             with self.subTest(kind):
                 del self.shown[:]
                 with self.assertRaises(self.A.Refused):
-                    self.approver(read_line=lambda p: "\n").sign(kind, gate, lambda: self.A.Prepared("branch-setup", SHA, show),
-                                                                 budget_usd=budget)
+                    self.approver(read_line=lambda p: "\n").sign(
+                        kind, gate, lambda: self.A.Prepared("branch-setup", SHA, RULES, show), budget_usd=budget)
                 self.assertEqual(len(self.shown), 3, self.shown)
                 for line in self.shown: self.assertTrue(line.isprintable(), repr(line))
                 self.assertEqual(self.shown[:2], ["file evals/files/%s.csv" % SPOOF_SHOWN, "mark \\u202e here"])
@@ -554,8 +558,8 @@ class SignedBytes(Keys):
         for kind, gate in (("approve", "eval_set"), ("register", "registration")):
             with self.subTest(kind):
                 rec = self.approver().sign(kind, gate, self.prepared()).record
-                self.assertEqual(self.approver().verdict(rec, kind, gate, "branch-setup", SHA).status, "approved")
-                v = self.approver().verdict(dict(rec, sha256=OTHER), kind, gate, "branch-setup", OTHER)
+                self.assertEqual(self.approver().verdict(rec, kind, gate, "branch-setup", SHA, RULES).status, "approved")
+                v = self.approver().verdict(dict(rec, sha256=OTHER), kind, gate, "branch-setup", OTHER, RULES)
                 self.assertEqual(v.status, "invalid", v)
                 self.assertIn("signature does not verify", v.reason)
 
@@ -564,9 +568,9 @@ class SignedBytes(Keys):
         for signed, read in (("register", "approve"), ("approve", "register")):
             with self.subTest(signed=signed, read=read):
                 rec = self.approver().sign(signed, "registration", self.prepared()).record
-                self.assertEqual(self.approver().verdict(rec, signed, "registration", "branch-setup", SHA).status,
+                self.assertEqual(self.approver().verdict(rec, signed, "registration", "branch-setup", SHA, RULES).status,
                                  "approved")
-                v = self.approver().verdict(rec, read, "registration", "branch-setup", SHA)
+                v = self.approver().verdict(rec, read, "registration", "branch-setup", SHA, RULES)
                 self.assertEqual(v.status, "invalid", v)
 
 
@@ -636,7 +640,7 @@ class Tables(Keys):
 
 class RecordVerdicts(Keys):
     def verdict(self, rec, gate="eval_set", unit="branch-setup", sha=SHA, kind="approve"):
-        return self.approver().verdict(rec, kind, gate, unit, sha)
+        return self.approver().verdict(rec, kind, gate, unit, sha, RULES)
 
     def test_u6_changed_signature_bytes_read_invalid(self):
         """U6."""
@@ -648,22 +652,24 @@ class RecordVerdicts(Keys):
 
     def test_u7_wrong_namespace_reads_invalid(self):
         """U7."""
-        data = self.A.payload("approve", "eval_set", "branch-setup", SHA, AT)
+        data = self.A.payload("approve", "eval_set", "branch-setup", SHA, RULES, AT)
         d = tempfile.mkdtemp(dir=self.kdir); f = os.path.join(d, "payload")
         with open(f, "wb") as fh: fh.write(data)
         rc, out, err = T.keygen_runner(self.kdir)([self.A.SSH_KEYGEN, "-Y", "sign", "-n", "other-namespace", "-f",
                                                    self.nopass, f])
         self.assertEqual(rc, 0, err)
         sig = T.read(f + ".sig")
-        rec = {"format": 1, "method": "ssh-sig", "sha256": SHA, "principal": "nopass", "at": AT, "signature": sig}
+        rec = {"format": 1, "method": "ssh-sig", "sha256": SHA, "ruleset_sha256": RULES, "principal": "nopass", "at": AT,
+               "signature": sig}
         self.assertEqual(self.verdict(rec).status, "invalid")
 
     def test_u8_unknown_principal_reads_invalid(self):
         """U8: a key not in the signers file, under a listed principal or its own name."""
-        data = self.A.payload("approve", "eval_set", "branch-setup", SHA, AT)
+        data = self.A.payload("approve", "eval_set", "branch-setup", SHA, RULES, AT)
         sig = self.A.sign_payload(T.keygen_runner(self.kdir), self.intruder, data, passphrase=T.TEST_PASSPHRASE)
         for who in (T.TEST_PRINCIPAL, "intruder", "nopass"):
-            rec = {"format": 1, "method": "ssh-sig", "sha256": SHA, "principal": who, "at": AT, "signature": sig}
+            rec = {"format": 1, "method": "ssh-sig", "sha256": SHA, "ruleset_sha256": RULES, "principal": who, "at": AT,
+                   "signature": sig}
             self.assertEqual(self.verdict(rec).status, "invalid", who)
 
     def test_u9_tampered_hash_is_not_approved(self):
@@ -795,7 +801,7 @@ class FixedPaths(Keys):
                     ap.sign(kind, gate, sentinel, budget_usd=1.0 if kind == "live" else None)
                 self.assertIn("approver-check: approvers file missing: ~/.config/skill-master/approvers.allowed_signers",
                               str(cm.exception))
-        self.assertEqual(ap.verdict(rec, "approve", "eval_set", "branch-setup", SHA),
+        self.assertEqual(ap.verdict(rec, "approve", "eval_set", "branch-setup", SHA, RULES),
                          self.A.Verdict("invalid", None, "approvers file missing: "
                                         "~/.config/skill-master/approvers.allowed_signers"))
 
@@ -804,7 +810,7 @@ class FixedPaths(Keys):
         msg = "refusing to use the real approver files inside a test process (unittest is loaded)"
         with mock.patch.object(ap, "ssh_add", sentinel), mock.patch.object(ap, "run", sentinel):
             self.assertEqual(ap.key_problems(), [msg])
-            self.assertEqual(ap.verdict(self.signed(), "approve", "eval_set", "branch-setup", SHA).reason, msg)
+            self.assertEqual(ap.verdict(self.signed(), "approve", "eval_set", "branch-setup", SHA, RULES).reason, msg)
 
     def test_the_cli_process_loads_no_test_module(self):
         tmp = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, tmp)
@@ -850,7 +856,8 @@ class SkillGate(T.Base):
         wjson(self.approvals, {"requirements": {"sha256": se.gate_hash("requirements", self.spec, self.ws), "by": "x",
                                                 "at": AT}})
         rc, out, _ = self.cli("plan", self.d, "--workspace", self.ws, "--engines", "claude")
-        self.assertIn("approval gates: requirements=NOT APPROVED (unsigned), eval_set=NOT APPROVED", out)
+        self.assertIn("approval gates: requirements=NOT APPROVED (unsigned; stale: rules changed since approval), "
+                      "eval_set=NOT APPROVED\n", out)
         se.approve("eval_set", self.spec, self.ws)
         wjson(os.path.join(self.d, "evals", "trigger_evals.json"), T.TRIGGERS[::-1])
         rc, out, _ = self.cli("plan", self.d, "--workspace", self.ws, "--engines", "claude")
@@ -1165,10 +1172,11 @@ class RuleReviewReaders(T.Base):
     def test_a_record_signed_outside_the_signers_file_is_not_a_decision(self):
         A, k = gate_module(), T.shared_keys()
         intruder = T.make_key(tempfile.mkdtemp(dir=k["dir"]), "intruder", T.TEST_PASSPHRASE)[0]
-        data = A.payload("approve", "rule_review", "branch-setup", self.h, AT)
+        data = A.payload("approve", "rule_review", "branch-setup", self.h, se.ruleset_sha256(), AT)
         sig = A.sign_payload(T.keygen_runner(k["dir"]), intruder, data, passphrase=T.TEST_PASSPHRASE)
         wjson(self.approvals, {"rule_review": {"format": 1, "method": "ssh-sig", "sha256": self.h,
-                                               "principal": T.TEST_PRINCIPAL, "at": AT, "signature": sig}})
+                                               "ruleset_sha256": se.ruleset_sha256(), "principal": T.TEST_PRINCIPAL,
+                                               "at": AT, "signature": sig}})
         self.refused_everywhere("invalid")
 
 
