@@ -205,11 +205,19 @@ class TestReviewStopsTheLoop(T.Base):
         doc = se.rjson(fp); fn(doc); se.wjson(fp, doc)
 
     def test_a_korean_output_matcher_added_by_the_builder_stops_the_loop(self):
+        """Matchers live in evals/evals.json, outside the builder's writable set (plan.md:501), so a builder that adds one
+        stops the loop with builder-wrote-outside evals/evals.json before the review check runs (plan.md:502, :508).
+        The review check still stops the loop after the builder call on the same matcher planted before the loop."""
         spec, _ = self.spec(); calls = []
         def builder(it, sd):
             calls.append(it)
             self.edit_evals(spec, lambda doc: doc["evals"][0]["assertions"][0]["check"].update(pattern=KO)); return 0
         r = self.loop(builder, spec)
+        self.assertEqual((r["status"], r["iteration"], r["problems"]), ("builder-wrote-outside", 1, ["evals/evals.json"]))
+        self.assertEqual(len(calls), 1); self.assertEqual(se.iterations(self.ws), [1])
+        shutil.rmtree(self.ws); shutil.rmtree(spec["skill_dir"])
+        spec, _ = self.spec(evals=matcher_doc()); calls = []
+        r = self.loop(lambda it, sd: calls.append(it) or 0, spec)
         self.assertEqual((r["status"], r["iteration"]), ("builder-review-required", 1))
         self.assertIn("rule review not recorded", r["problems"][0]); self.assertIn("english-output-matchers", r["problems"][0])
         self.assertEqual(len(calls), 1); self.assertEqual(se.iterations(self.ws), [1])
@@ -225,12 +233,21 @@ class TestReviewStopsTheLoop(T.Base):
         self.assertEqual(r, {"status": "needs-approval", "iteration": 2})
 
     def test_a_changed_matcher_invalidates_the_recorded_decision(self):
+        """A builder edit of the matcher is a write to evals/evals.json, outside the writable set (plan.md:501): it stops
+        the loop with builder-wrote-outside evals/evals.json (plan.md:502, :508). The same change made after the
+        decision was recorded and before the loop still voids the decision at the review check after the builder call."""
         spec, _ = self.spec(evals=matcher_doc()); os.makedirs(self.ws, exist_ok=True)
         se.approve("rule_review", spec, self.ws)
         def builder(it, sd):
             self.edit_evals(spec, lambda doc: doc["evals"][0]["assertions"][0]["check"].update(pattern=KO + "!")); return 0
         r = self.loop(builder, spec)
-        self.assertEqual(r["status"], "builder-review-required")
+        self.assertEqual((r["status"], r["problems"]), ("builder-wrote-outside", ["evals/evals.json"]))
+        shutil.rmtree(self.ws); shutil.rmtree(spec["skill_dir"])
+        spec, _ = self.spec(evals=matcher_doc()); os.makedirs(self.ws, exist_ok=True)
+        se.approve("rule_review", spec, self.ws)
+        self.edit_evals(spec, lambda doc: doc["evals"][0]["assertions"][0]["check"].update(pattern=KO + "!"))
+        r = self.loop(lambda it, sd: 0, spec)
+        self.assertEqual((r["status"], r["iteration"]), ("builder-review-required", 1))
 
     def test_the_precheck_gate_set_also_refuses(self):
         spec, _ = self.spec(evals=matcher_doc())

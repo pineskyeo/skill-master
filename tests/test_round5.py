@@ -24,8 +24,8 @@ EVAL1 = ("claude", "eval-1-start-the-login-fix-task", "with_skill", "run-1")
 def plan_of(ws, n):
     return rjson(os.path.join(ws, "iteration-%d" % n, "plan.json"))
 
-def has_iso_args(cmd):
-    iso = se.claude_isolation_args()
+def has_iso_args(cmd, **form):
+    iso = se.claude_isolation_args(**form)
     return any(cmd[i:i + len(iso)] == iso for i in range(len(cmd)))
 
 def grade_once(g):
@@ -45,14 +45,20 @@ class TestOneClaudeLaunchPath(Base):
         se.ClaudeBuilder("fix", "claude-opus-5-5", se.Budget(10.0), exec_fn=rec(json.dumps({"type": "result", "usage": {}})))(it, spec["skill_dir"])
         calls = [(c, w, e) for c, w, e in [(c, w, self.fc.envs[i]) for i, (c, w) in enumerate(self.fc.calls)]] + seen
         self.assertEqual(len(calls), 4 + 20 + 2)  # 2 cases x (with_skill, without_skill), 20 trigger runs, grader, builder
+        root = os.path.realpath(spec["skill_dir"])
         for cmd, cwd, env in calls:
-            self.assertTrue(has_iso_args(cmd), cmd[:3])
+            form = {"edit_root": root} if cmd is seen[1][0] else {}
+            self.assertTrue(has_iso_args(cmd, **form), cmd[:3])
             self.assertEqual({k: env.get(k) for k in se.CLAUDE_CHILD_ENV}, se.CLAUDE_CHILD_ENV)
             self.assertFalse(set(se.NON_SUBSCRIPTION_ENV) & set(env))
         gcwd = seen[0][1]  # the grader ran in a fresh empty folder (not the caller's cwd), removed afterwards
         self.assertNotEqual(gcwd, os.getcwd()); self.assertFalse(os.path.exists(gcwd))
         self.assertIn("--disable-slash-commands", seen[0][0])
         self.assertEqual(seen[1][1], spec["skill_dir"])
+        bcmd = seen[1][0]
+        hook = json.loads(bcmd[bcmd.index("--settings") + 1])["hooks"]["PreToolUse"][0]["hooks"][0]
+        self.assertEqual((os.path.basename(hook["args"][0]), hook["args"][1:], hook["onFailure"]),
+                         ("claude_bash_gate.py", ["edit-allowlist", root], "block"))
 
     def test_launch_without_isolation_args_is_refused(self):
         calls = []

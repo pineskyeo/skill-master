@@ -14,10 +14,11 @@ variables are refused and scrubbed from every child, and costs are API-equivalen
 
 Usage: python3 skill_eval.py <validate|estimate|plan|run|grade|calibrate|report|approve|register|snapshot|loop> <skill> ...
        python3 skill_eval.py <approver-check|check-builtin-plugins>
+       python3 skill_eval.py builder-check <skill> --workspace <ws> [--compare SAVED]
        (also reachable as: python3 eva.py eval <subcommand> ...)
 """
 import argparse, csv, datetime, errno, hashlib, json, math, mmap, os, platform, random, re, shlex, shutil, subprocess, sys, tempfile, time
-from engine import approvals
+from engine import approvals, writable
 
 LAYERS = ("static", "llm", "human")
 BASELINES = {"none": "without_skill", "old": "old_skill"}  # skill-creator configuration names
@@ -808,23 +809,26 @@ def claude_bundled_skills(path=None, refresh=False):
                              binary=path, scanned=sorted(found), error=err)
     return dict(_BUNDLED_SCAN)
 
-def claude_settings(skill_name=None, bash_gate=None):
+def claude_settings(skill_name=None, bash_gate=None, edit_root=None):
     """The --settings object of every Claude launch: bundled skills off (kill switch plus skillOverrides "off" for every
-    known bundled name except skill_name, the skill under test) and every known built-in plugin disabled."""
+    known bundled name except skill_name, the skill under test) and every known built-in plugin disabled. bash_gate
+    adds the executor's PreToolUse gate; edit_root adds the builder's (edit-allowlist mode for that skill folder)."""
+    if bash_gate and edit_root is not None: raise ValueError("one PreToolUse gate per launch")
     settings = {"disableBundledSkills": True,
             "enabledPlugins": {i: False for i in claude_builtin_plugins()["ids"]},
             "skillOverrides": {n: "off" for n in claude_bundled_skills()["names"] if n != skill_name}}
-    if bash_gate:
+    gate = ([skill_name, bash_gate["script"], bash_gate["sha256"], bash_gate["python3"]] if bash_gate else
+            [writable.ALLOWLIST_MODE, edit_root] if edit_root is not None else None)
+    if gate:
         settings["disableAllHooks"] = False
         settings["hooks"] = {"PreToolUse": [{"matcher": "*", "hooks": [{
             "type": "command", "command": sys.executable,
-            "args": [os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude_bash_gate.py"),
-                     skill_name, bash_gate["script"], bash_gate["sha256"], bash_gate["python3"]],
+            "args": [os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude_bash_gate.py")] + gate,
             "onFailure": "block"}]}]}
     return settings
 
-def claude_settings_json(skill_name=None, bash_gate=None):
-    return json.dumps(claude_settings(skill_name, bash_gate), sort_keys=True)
+def claude_settings_json(skill_name=None, bash_gate=None, edit_root=None):
+    return json.dumps(claude_settings(skill_name, bash_gate, edit_root), sort_keys=True)
 
 # One sanitized launch shape for every claude -p call (executor, grader, builder): project/local setting sources only,
 # no MCP servers, bundled skills and built-in plugins off, auto memory, claude.ai MCP servers and /doctor off,
@@ -832,8 +836,9 @@ def claude_settings_json(skill_name=None, bash_gate=None):
 CLAUDE_CHILD_ENV = {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
                     "DISABLE_DOCTOR_COMMAND": "1"}
 
-def claude_isolation_args(skill_name=None, bash_gate=None):
-    return ["--setting-sources", "project,local", "--strict-mcp-config", "--settings", claude_settings_json(skill_name, bash_gate)]
+def claude_isolation_args(skill_name=None, bash_gate=None, edit_root=None):
+    return ["--setting-sources", "project,local", "--strict-mcp-config", "--settings",
+            claude_settings_json(skill_name, bash_gate, edit_root)]
 
 def builtin_plugin_check_command():
     """Free check (plugin management only, no model call) of what the launch settings do to the built-in plugins."""
@@ -879,14 +884,15 @@ def claude_child_env(config_dir=None):
     if config_dir: env["CLAUDE_CONFIG_DIR"] = config_dir
     return with_account_marker(scrub_env(env), ["claude"])
 
-def launch_claude(exec_fn, cmd, cwd, timeout, env=None, skill_name=None):
+def launch_claude(exec_fn, cmd, cwd, timeout, env=None, skill_name=None, edit_allowlist=False):
     """Grader and builder launch path: refuses (EvalError, before the call) unless cmd carries the isolation args (for
-    skill_name, the skill the launch must not override) and cwd passes claude_launch_problems; the child gets
-    claude_child_env(). The executor uses the same args, env and checks through its Sandbox."""
-    iso = claude_isolation_args(skill_name)
+    skill_name, the skill the launch must not override; with edit_allowlist, the builder's gate for the realpath of
+    cwd) and cwd passes claude_launch_problems; the child gets claude_child_env(). The executor uses the same args, env
+    and checks through its Sandbox."""
+    iso = claude_isolation_args(skill_name, edit_root=os.path.realpath(cwd) if edit_allowlist else None)
     if cmd[:2] != ["claude", "-p"] or not any(cmd[i:i + len(iso)] == iso for i in range(len(cmd))):
         raise EvalError("refusing a claude call without the isolation arguments")
-    probs = claude_launch_problems(cwd)
+    probs = claude_launch_problems(cwd, require_hooks=edit_allowlist)
     if probs: raise EvalError("claude launch refused: " + " | ".join(probs))
     return exec_fn(cmd, cwd, timeout, env=claude_child_env() if env is None else env)
 
@@ -2174,14 +2180,17 @@ def run_cost(res, engine, prices, fallback=0.0):
                           price_for(engine.name, engine.model, prices), fallback)
 
 def append_cost(it_dir, command, usage):
-    """Appends one non-run cost entry (grade, calibrate, builder) to iteration-N/cost.json; runs are in timing.json."""
+    """Appends one non-run cost entry (grade, calibrate, builder) to iteration-N/cost.json; runs are in timing.json.
+    Returns (path, fingerprint value it read, value it wrote), so loop can tell this write from a builder's."""
     fp = os.path.join(it_dir, "cost.json")
+    read = writable.entry(fp)
     data = rjson(fp, {}) or {}
     data.setdefault("billing", BILLING)
     data.setdefault("entries", []).append({"command": command, "at": now_iso(), "calls": usage.get("calls", 0),
         "input_tokens": usage.get("input_tokens", 0), "output_tokens": usage.get("output_tokens", 0),
         "api_equivalent_usd": round(usage.get("api_equivalent_usd", 0.0), 6)})
     wjson(fp, data)
+    return fp, read, writable.entry(fp)
 
 def usage_delta(after, before):
     return {k: after.get(k, 0) - before.get(k, 0) for k in after}
@@ -2977,23 +2986,27 @@ def _register_with(load):
 class ClaudeBuilder:
     """The only builder `loop --live` accepts: one metered `claude -p` call per iteration through live_exec, run in the
     skill folder with file tools only (no Bash, so it cannot start other paid CLIs), a --max-budget-usd cap from the
-    shared Budget, and its cost charged to that Budget. The iteration's comparison.md is inlined into the prompt."""
+    shared Budget, and its cost charged to that Budget. The iteration's comparison.md is inlined into the prompt. Its
+    PreToolUse gate (claude_bash_gate.py edit-allowlist mode) denies every write outside engine/writable.py's set."""
     TOOLS = "Read,Edit,Write,Glob,Grep"
     def __init__(self, instructions, model, budget, prices=None, exec_fn=None, timeout=900, skill_name=None):
         self.instructions, self.model, self.budget, self.prices = instructions, model, budget, prices or {}
         self.exec_fn, self.timeout, self.calls = exec_fn or live_exec, timeout, 0
         self.skill_name = skill_name  # the skill being built: never set off by skillOverrides
         self.usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0, "api_equivalent_usd": 0.0}
-    def command(self, prompt, cap):
+        self.harness_writes = []  # append_cost records: loop does not count them as builder writes
+    def command(self, prompt, cap, skill_dir=""):
+        """skill_dir: the folder the gate lets the builder edit; empty makes the gate deny every edit."""
         cmd = ["claude", "-p", prompt, "--model", self.model, "--output-format", "json", "--no-session-persistence",
                "--permission-mode", "acceptEdits", "--tools", self.TOOLS, "--disable-slash-commands"]
-        cmd += claude_isolation_args(self.skill_name)
+        cmd += claude_isolation_args(self.skill_name, edit_root=os.path.realpath(skill_dir) if skill_dir else "")
         return cmd + (["--max-budget-usd", "%.2f" % cap] if cap is not None else [])
     def _record(self, it_dir, tin, tout, cost):
         if self.budget is not None: self.budget.charge(cost)
         self.usage["calls"] += 1; self.usage["input_tokens"] += tin
         self.usage["output_tokens"] += tout; self.usage["api_equivalent_usd"] += cost
-        append_cost(it_dir, "builder", {"calls": 1, "input_tokens": tin, "output_tokens": tout, "api_equivalent_usd": cost})
+        self.harness_writes.append(append_cost(it_dir, "builder", {"calls": 1, "input_tokens": tin, "output_tokens": tout,
+                                                                   "api_equivalent_usd": cost}))
     def __call__(self, it_dir, skill_dir):
         cap = None
         if self.budget is not None and self.budget.finite():
@@ -3005,15 +3018,14 @@ class ClaudeBuilder:
         if os.path.isfile(rp):
             with open(rp, encoding="utf-8") as f: report = f.read()[:TRANSCRIPT_CHARS]
         import eva
-        prompt = ("%s\n\nYou are improving the agent skill in the current directory (SKILL.md and its files). "
-                  "Do not edit evals/ (the eval set is approved separately; editing it stops the loop). %s %s\n\n"
+        prompt = ("%s\n\nYou are improving the agent skill in the current directory (SKILL.md and its files). %s %s\n\n"
                   "Eval report of the last iteration:\n%s\n" % (self.instructions.strip(), eva.ENGLISH_BUILDER_RULE,
                                                                  eva.PARITY_BUILDER_RULE, report))
         bound = call_bound("builder", self.model, "builder", self.prices, DEFAULT_TOKENS) or 0.0
         fallback = cap if cap is not None else bound  # no usage: the cap
         try:
-            rc, out, err = launch_claude(self.exec_fn, self.command(prompt, cap), skill_dir, self.timeout,
-                                         skill_name=self.skill_name)
+            rc, out, err = launch_claude(self.exec_fn, self.command(prompt, cap, skill_dir), skill_dir, self.timeout,
+                                         skill_name=self.skill_name, edit_allowlist=True)
         except (EvalError, LiveDisabled):
             raise  # refused before launch: nothing spent
         except Exception as ex:
@@ -3053,7 +3065,10 @@ def loop(spec, ws, engines, grader, builder, max_iterations=MAX_AUTO_ITERATIONS,
     """run -> grade -> (calibrate) -> report; stop when the gate is clean; otherwise call builder(iteration_dir,
     skill_dir) and reload the skill. precheck(spec, iterations_left) -> [problems] runs before EVERY iteration (the
     CLI passes the full --live gate set: validation, approvals incl. fixture hashes, preflight, cost vs remaining
-    budget); any problem stops the loop. After every builder call the skill folder must pass the static English-only
+    budget); any problem stops the loop. Every builder call is bracketed by engine/writable.py fingerprints of the skill
+    folder and ws: any change outside the writable set that the harness did not write itself stops the loop with status
+    "builder-wrote-outside" (the problems name every changed path) before anything else runs, also when the builder
+    raised. After every builder call the skill folder must pass the static English-only
     check (eva.english_violations), else the loop stops with status "builder-non-english", and then the multi-tool
     parity check (eva.parity_violations), else with status "builder-parity-missing", before anything more is
     spent. Run outputs are never checked. At most MAX_AUTO_ITERATIONS automatic iterations."""
@@ -3077,14 +3092,24 @@ def loop(spec, ws, engines, grader, builder, max_iterations=MAX_AUTO_ITERATIONS,
         if gate.get("human_pending_only"): return {"status": "needs-human-review", "iteration": n}
         if budget is not None and budget.remaining() <= 0: return {"status": "budget-exhausted", "iteration": n}
         if i == max_iterations - 1 or builder is None: break
-        rc, error = None, None
+        harness = getattr(builder, "harness_writes", [])
+        seen, before = len(harness), writable.fingerprint(spec["skill_dir"], ws)
+        rc, error, crash = None, None, None
         try:
             rc = builder(os.path.join(ws, "iteration-%d" % n), spec["skill_dir"])
         except EvalError as ex:
             error = str(ex)
-        import eva
+        except Exception as ex:
+            crash, error = ex, "builder raised %s: %s" % (type(ex).__name__, ex)
         extra = {} if error is None else {"error": error}
         if rc is not None: extra["returncode"] = rc
+        outside = writable.changed(before, writable.fingerprint(spec["skill_dir"], ws),
+                                   [(writable.name(spec["skill_dir"], p), r, w) for p, r, w in harness[seen:]])
+        if outside:
+            log("builder-wrote-outside " + writable.shown(outside[0]))
+            return dict({"status": "builder-wrote-outside", "iteration": n, "problems": outside}, **extra)
+        if crash is not None: raise crash
+        import eva
         non_english = eva.english_violations(spec["skill_dir"])
         if non_english: return dict({"status": "builder-non-english", "iteration": n, "problems": non_english}, **extra)
         missing = eva.parity_violations(spec["skill_dir"])
@@ -3095,6 +3120,29 @@ def loop(spec, ws, engines, grader, builder, max_iterations=MAX_AUTO_ITERATIONS,
         spec, problems = load_eval_set(spec["skill_dir"])
         if problems: return {"status": "eval-set-invalid", "iteration": n, "problems": problems}
     return {"status": "needs-approval", "iteration": n}
+
+def builder_check(skill, workspace, compare=None):
+    """`builder-check`: prints the builder's writable set and the fingerprint of every entry outside it (one
+    `outside [name, value]` line each, then the aggregate). With compare (a saved earlier output) it also prints every
+    changed name and returns 1 when anything changed. Reads only: no write, no process, no approval."""
+    skill, ws = os.path.realpath(skill), os.path.realpath(workspace)
+    for d in (skill, ws):
+        if not os.path.isdir(d): raise EvalError("%s is not a folder" % d)
+    fp = writable.fingerprint(skill, ws)
+    print("\n".join(["writable " + writable.SHOWN, "skill " + skill, "workspace " + ws] +
+                    ["outside " + json.dumps([k, fp[k]]) for k in sorted(fp)] +
+                    ["fingerprint %s %d entries" % (writable.digest(fp), len(fp))]))
+    if compare is None: return 0
+    try:
+        with open(compare, encoding="utf-8") as f: saved = f.read().splitlines()
+        old = dict(json.loads(l[len("outside "):]) for l in saved if l.startswith("outside "))
+    except (OSError, ValueError, TypeError) as ex:
+        raise EvalError("cannot read %s: %s" % (compare, ex))
+    if not any(l.startswith("fingerprint ") for l in saved):
+        raise EvalError("%s holds no builder-check output" % compare)
+    diff = writable.changed(old, fp)
+    print("\n".join(["changed " + writable.shown(n) for n in diff] + ["compare: %d changed" % len(diff)]))
+    return 1 if diff else 0
 
 # ---------- CLI ----------
 def make_engines(a, spec=None):
@@ -3401,6 +3449,11 @@ def build_parser():
     s = sp.add_parser("snapshot"); common(s, False)
     sp.add_parser("check-builtin-plugins", help="free: `claude --settings <launch settings> plugin list --json` and "
                   "the enabled state of every @builtin plugin (no model call; loaded skills are not shown)")
+    s = sp.add_parser("builder-check", help="free: the loop builder's writable set and the fingerprint of every entry "
+                      "outside it in the skill folder and the workspace; writes nothing, starts no process")
+    s.add_argument("skill"); s.add_argument("--workspace", required=True)
+    s.add_argument("--compare", metavar="SAVED", help="an earlier builder-check output: print every changed path, exit "
+                   "1 when any changed")
     sp.add_parser("approver-check", help="the approver key needs a passphrase and is not loaded in ssh-agent; the "
                   "approvers file lists it (~/.config/skill-master)")
     return p
@@ -3429,6 +3482,7 @@ def main(argv=None):
         _LIVE["on"] = False
 
 def _dispatch(a):
+    if a.cmd == "builder-check": return builder_check(a.skill, a.workspace, a.compare)
     if a.cmd in ("approve", "register"):  # the human gate runs before the eval set is read, the same for every fixture
         def load():
             spec, _ = load_eval_set(a.skill)

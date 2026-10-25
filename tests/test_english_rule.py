@@ -403,20 +403,28 @@ class TestBuilderGate(T.Base):
         self.assertEqual(len(calls), 1); self.assertEqual(se.iterations(self.ws), [1])
 
     def test_each_scanned_location_trips_the_gate(self):
+        """evals/evals.json is outside the builder's writable set (plan.md:501), so a builder write to it stops the loop
+        with builder-wrote-outside before the English gate runs (plan.md:502). The gate still scans that file: Korean
+        text planted there before the loop trips it after a builder call that writes nothing."""
         def write_text(fp):
             with open(fp, "a", encoding="utf-8") as f: f.write("\n# " + KO + "\n")
         def edit_evals(fp):
             with open(fp, encoding="utf-8") as f: doc = json.load(f)
             doc["evals"][0]["prompt"] = KO
             with open(fp, "w", encoding="utf-8") as f: json.dump(doc, f, ensure_ascii=False, indent=1)
-        for rel, edit in (("references/note.md", write_text), ("scripts/helper.py", write_text), ("evals/evals.json", edit_evals)):
+        for rel, edit, status in (("references/note.md", write_text, "builder-non-english"),
+                                  ("scripts/helper.py", write_text, "builder-non-english"),
+                                  ("evals/evals.json", edit_evals, "builder-wrote-outside")):
             spec, _ = self.spec()
             def builder(it, skill_dir, rel=rel, edit=edit):
                 fp = os.path.join(skill_dir, rel); os.makedirs(os.path.dirname(fp), exist_ok=True)
                 edit(fp); return 0
             r = self.loop(builder, spec)
-            self.assertEqual(r["status"], "builder-non-english", rel); self.assertIn(rel, r["problems"][0])
+            self.assertEqual(r["status"], status, rel); self.assertIn(rel, r["problems"][0])
             shutil.rmtree(self.ws, ignore_errors=True); shutil.rmtree(spec["skill_dir"])
+        spec, _ = self.spec(); edit_evals(os.path.join(spec["skill_dir"], "evals", "evals.json"))
+        r = self.loop(lambda it, sd: 0, spec)
+        self.assertEqual(r["status"], "builder-non-english"); self.assertIn("evals/evals.json", r["problems"][0])
 
     def test_gate_is_a_code_gate_independent_of_the_prompt(self):
         spec, _ = self.spec()
@@ -431,13 +439,20 @@ class TestBuilderGate(T.Base):
         self.assertEqual(r, {"status": "needs-approval", "iteration": 2}); self.assertEqual(len(seen), 1)
 
     def test_evals_files_written_by_the_builder_are_exempt(self):
+        """The builder may no longer write evals/files/ (outside its writable set, plan.md:501): the write stops the loop
+        with builder-wrote-outside (plan.md:502). The English gate's exemption of evals/files/ still holds: Korean
+        fixture text planted before the loop lets it run on."""
         spec, _ = self.spec()
         def builder(it, sd):
             os.makedirs(os.path.join(sd, "evals", "files"), exist_ok=True)
             with open(os.path.join(sd, "evals", "files", "in.csv"), "w", encoding="utf-8") as f: f.write(KO)
             return 0
         r = self.loop(builder, spec, max_iterations=2)
-        self.assertEqual(r["status"], "needs-approval")
+        self.assertEqual(r["status"], "builder-wrote-outside"); self.assertIn("evals/files/in.csv", r["problems"])
+        shutil.rmtree(self.ws, ignore_errors=True); shutil.rmtree(spec["skill_dir"])
+        spec, _ = self.spec(extra_files={"evals/files/in.csv": KO})
+        r = self.loop(lambda it, sd: 0, spec, max_iterations=2)
+        self.assertEqual(r, {"status": "needs-approval", "iteration": 2})
 
     def test_failed_builder_keeps_its_own_status(self):
         spec, _ = self.spec()

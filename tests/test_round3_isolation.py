@@ -81,18 +81,23 @@ class TestLoopGates(Base):
         return rc, json.loads(out.strip().splitlines()[-1]) if out.strip() else None, err
 
     def test_loop_stops_when_builder_edits_the_eval_set(self):
+        """The eval set is outside the builder's writable set (plan.md:501): the loop stops right after the call with
+        builder-wrote-outside and the path (plan.md:502), before the next precheck could see the unapproved eval set."""
         d = self.approved_skill(evals=evals_doc(human=False))
         rc, r, err = self.live_loop(d, lambda d: wjson(os.path.join(d, "evals", "trigger_evals.json"), TRIGGERS[::-1]))
         self.assertEqual(rc, 3, err)
-        self.assertEqual(r["status"], "gates-failed"); self.assertIn("gate eval_set not approved", r["problems"][0])
+        self.assertEqual((r["status"], r["problems"]), ("builder-wrote-outside", ["evals/trigger_evals.json"]))
         self.assertEqual(se.iterations(self.ws), [1]); self.assertEqual(len(self.builder_calls), 1)
         self.assertEqual(self.builder_calls[0][1], os.path.realpath(d))  # builder runs in the skill folder
 
     def test_loop_stops_when_builder_edits_a_fixture(self):
+        """An eval fixture is outside the builder's writable set (plan.md:501): the loop stops right after the call with
+        builder-wrote-outside and the path (plan.md:502), before the next precheck could see the changed fixture."""
         ev = evals_doc(human=False); ev["evals"][0]["files"] = ["evals/files/in.csv"]
         d = self.approved_skill(evals=ev, extra_files={"evals/files/in.csv": "a\n"})
         rc, r, err = self.live_loop(d, lambda d: write(os.path.join(d, "evals", "files", "in.csv"), "b\n"))
-        self.assertEqual(r["status"], "gates-failed", err); self.assertEqual(se.iterations(self.ws), [1])
+        self.assertEqual((r["status"], r["problems"]), ("builder-wrote-outside", ["evals/files/in.csv"]), err)
+        self.assertEqual(se.iterations(self.ws), [1]); self.assertEqual(len(self.builder_calls), 1)
 
     def test_loop_rechecks_preflight(self):
         d = self.approved_skill(evals=evals_doc(human=False))

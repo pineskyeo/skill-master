@@ -638,16 +638,25 @@ class TestBuilderParityGate(T.Base):
         self.assertEqual(len(calls), 1); self.assertEqual(se.iterations(self.ws), [1])
 
     def test_each_tool_can_trip_the_gate(self):
+        """agents/openai.yaml is outside the builder's writable set (plan.md:501), so a builder write to it stops the
+        loop with builder-wrote-outside before the parity gate runs (plan.md:502). The codex case still trips the gate
+        when the bad agents/openai.yaml is planted before the loop and the builder writes nothing."""
         cases = {"claude": ("SKILL.md", lambda t: t.replace("Creates a git", "Creates a <git>")),
                  "codex": ("agents/openai.yaml", lambda t: "policy: strict\n"),
                  "opencode": ("SKILL.md", lambda t: t.replace("---\n# Branch", "metadata:\n  v: 1.0\n---\n# Branch", 1)),
                  "hermes": ("SKILL.md", lambda t: t.replace("---\n# Branch", "metadata:\n  hermes: [a]\n---\n# Branch", 1))}
         for tool, (rel, fn) in cases.items():
-            spec, _ = self.spec()
-            r = self.loop(lambda it, sd, rel=rel, fn=fn: self.rewrite(spec, fn, rel) or 0, spec)
-            self.assertEqual(r["status"], "builder-parity-missing", tool)
-            self.assertTrue(any(p.startswith("[%s]" % tool) for p in r["problems"]), (tool, r["problems"]))
-            shutil.rmtree(self.ws, ignore_errors=True); shutil.rmtree(spec["skill_dir"])
+            for planted in ((False, True) if tool == "codex" else (False,)):
+                spec, _ = self.spec()
+                if planted: self.rewrite(spec, fn, rel)
+                r = self.loop(lambda it, sd, rel=rel, fn=fn, planted=planted:
+                              (None if planted else self.rewrite(spec, fn, rel)) or 0, spec)
+                if tool == "codex" and not planted:
+                    self.assertEqual(r["status"], "builder-wrote-outside", tool); self.assertIn(rel, r["problems"])
+                else:
+                    self.assertEqual(r["status"], "builder-parity-missing", (tool, planted))
+                    self.assertTrue(any(p.startswith("[%s]" % tool) for p in r["problems"]), (tool, r["problems"]))
+                shutil.rmtree(self.ws, ignore_errors=True); shutil.rmtree(spec["skill_dir"])
 
     def test_disable_model_invocation_without_equivalents_trips_the_gate(self):
         spec, _ = self.spec()

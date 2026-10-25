@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""PreToolUse gate for file edits and the CSV skill's one permitted Bash invocation."""
+"""PreToolUse gate for file edits and the CSV skill's one permitted Bash invocation, and in edit-allowlist mode
+(argv: edit-allowlist <skill folder realpath>) the loop builder's writable set (engine/writable.py)."""
 import hashlib
 import json
 import os
@@ -128,7 +129,65 @@ def check(payload, root, skill_name, script_relative, script_hash, python3):
     return None
 
 
+COMMAND_TOOLS = ("Bash", "Monitor", "PowerShell")
+
+
+def builder_target_problem(writable, requested, cwd, root):
+    if not isinstance(requested, str) or not requested or "\x00" in requested:
+        return "invalid file edit path"
+    if not os.path.isabs(requested):
+        if not isinstance(cwd, str) or not os.path.isabs(cwd) or not os.path.samefile(cwd, root):
+            return "relative file edit path outside the skill folder"
+        requested = os.path.join(root, requested)
+    resolved = os.path.realpath(requested)
+    for path in (os.path.normpath(requested), resolved):
+        if not writable.is_writable(writable.under(root, path)):
+            return "outside the builder's writable set (%s): %s" % (writable.SHOWN, requested)
+    try: st = os.lstat(resolved)
+    except FileNotFoundError: return None
+    if stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
+        return "file has other hard links: %s" % requested
+    return None
+
+
+def builder_decision(payload, mode, root):
+    """Edit-allowlist mode for the loop builder: None keeps reads in the normal permission flow."""
+    from engine import writable
+    if mode != writable.ALLOWLIST_MODE:
+        return "deny", "unknown gate mode"
+    if not isinstance(root, str) or not os.path.isabs(root) or os.path.realpath(root) != root or not os.path.isdir(root):
+        return "deny", "invalid skill root"
+    if not isinstance(payload, dict) or payload.get("hook_event_name") != "PreToolUse":
+        return "deny", "unexpected hook event"
+    tool, tool_input = payload.get("tool_name"), payload.get("tool_input")
+    if tool in COMMAND_TOOLS or carries_command(tool_input):
+        return "deny", "the builder may not run commands"
+    if tool in READ_TOOLS:
+        return None
+    if tool not in EDIT_TOOLS:
+        return "deny", "tool not permitted for the builder: %s" % (tool,)
+    paths = list(edit_paths(tool_input))
+    if not paths:
+        return "deny", "file edit has no target path"
+    for requested in paths:
+        problem = builder_target_problem(writable, requested, payload.get("cwd"), root)
+        if problem:
+            return "deny", problem
+    return "allow", "edit inside the builder's writable set"
+
+
+def builder_main(mode, root):
+    try:
+        verdict = builder_decision(json.load(sys.stdin), mode, root)
+    except Exception as ex:
+        verdict = ("deny", "gate validation failed: %s" % type(ex).__name__)
+    if verdict:
+        print(json.dumps(decision(*verdict)))
+
+
 def main():
+    if len(sys.argv) == 3:
+        return builder_main(*sys.argv[1:])
     try:
         skill_name, script_relative, script_hash, python3 = sys.argv[1:]
         if len(sys.argv) != 5: raise ValueError("gate configuration")
