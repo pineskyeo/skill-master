@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Generated OpenCode agent",
+  "description": "The frontmatter of wrappers/opencode/<name>.md as eva.py generate writes it (unit B2, plan.md:962, :965-967), read by the frontmatter reader with the permission map. Closed at every level: OpenCode passes an unknown option to the model provider (inputs/agent-master-skills.md section 3.4), so an unknown key is caught here. The permission map sets the wildcard and every recorded key (targets/opencode.json); a generated value is allow or deny, never ask; external_directory is always deny; bash is deny or a pattern map whose wildcard entry grants and whose other entries deny. Key order (the wildcard first) is checked by the parity rows and the byte compare, not here. Whether OpenCode honours the wildcard and the patterns is UNVERIFIED (gates.md G31).",
+  "type": "object",
+  "required": ["description", "mode", "permission"],
+  "additionalProperties": false,
+  "properties": {
+    "description": {"type": "string", "minLength": 1},
+    "name": {"type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$", "maxLength": 64},
+    "mode": {"enum": ["primary", "subagent", "all"]},
+    "model": {"type": "string", "minLength": 1},
+    "permission": {
+      "type": "object",
+      "required": ["*", "read", "edit", "glob", "grep", "list", "bash", "task", "external_directory", "webfetch", "websearch", "lsp", "skill"],
+      "additionalProperties": false,
+      "properties": {
+        "*": {"const": "deny"},
+        "read": {"$ref": "#/$defs/grant"},
+        "edit": {"$ref": "#/$defs/grant"},
+        "glob": {"$ref": "#/$defs/grant"},
+        "grep": {"$ref": "#/$defs/grant"},
+        "list": {"$ref": "#/$defs/grant"},
+        "bash": {"anyOf": [{"const": "deny"}, {"$ref": "#/$defs/patterns"}]},
+        "task": {"$ref": "#/$defs/grant"},
+        "external_directory": {"const": "deny"},
+        "webfetch": {"$ref": "#/$defs/grant"},
+        "websearch": {"$ref": "#/$defs/grant"},
+        "lsp": {"$ref": "#/$defs/grant"},
+        "skill": {"$ref": "#/$defs/grant"}
+      }
+    }
+  },
+  "$defs": {
+    "grant": {"enum": ["allow", "deny"]},
+    "patterns": {
+      "type": "object",
+      "required": ["*"],
+      "properties": {"*": {"const": "allow"}},
+      "additionalProperties": {"const": "deny"}
+    }
+  }
+}

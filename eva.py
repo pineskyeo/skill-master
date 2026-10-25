@@ -1597,10 +1597,15 @@ def main(argv=None):
             s.add_argument("--rules", metavar="DIR", help="run a non-default rule bundle (fixtures); never gives PASS")
     s = sp.add_parser("schema-check"); s.add_argument("schema"); s.add_argument("instance")
     s.add_argument("--unit", metavar="DIR", help="unit root for x-path-exists")
+    s = sp.add_parser("generate", help="render an agent's four tool files or a skill's invocation metadata")
+    s.add_argument("path"); s.add_argument("--check", action="store_true", help="exit 1 when a generated file differs")
     a = p.parse_args(argv)
     if a.cmd == "schema-check":
         from engine import schema
         return schema.cli(a.schema, a.instance, a.unit)
+    if a.cmd == "generate":  # before the bundle load, like schema-check; engine/generate.py loads it (B2 D1)
+        from engine import generate
+        return generate.cli(a.path, a.check)
     if getattr(a, "transcript", None) and a.rules is not None:
         p.error("--rules cannot be combined with --transcript")
     if not getattr(a, "transcript", None):

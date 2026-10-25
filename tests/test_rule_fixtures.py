@@ -37,6 +37,7 @@ EXTRA_SIDES = {
     "english-scenarios": ("na",), "english-wrappers": ("na",), "parity-skill-codex": ("review",),
     "parity-invocation-control": ("na",), "parity-permissions-claude": ("na",), "parity-permissions-codex": ("review", "na"),
     "compatibility-length": ("na",), "reference-toc": ("na",), "version-format": ("na",),
+    "wrappers-generated": ("na",), "tool-metadata-generated": ("na",),
 }
 # Reachable outcomes with no fixture side, and why: an unreadable main file needs non-UTF-8 bytes, which an ASCII-only
 # fixture cannot hold, so tests/test_rule_targets.py builds that case in a temp folder; a refs-exist review needs an

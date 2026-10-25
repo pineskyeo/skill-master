@@ -289,7 +289,7 @@ class TestCodeReviewer(TmpMixin, unittest.TestCase):
         r = eva.check(CR)
         self.assertEqual(r.verdict, "FAIL")  # no wrappers/: only the parity rows fail
         self.assertEqual(self.ids(r), {"parity-wrapper-claude", "parity-wrapper-codex", "parity-wrapper-opencode",
-                                       "parity-wrapper-hermes", "parity-permissions-hermes"})
+                                       "parity-wrapper-hermes", "parity-permissions-hermes", "wrappers-generated"})
         r = minus_parity(minus_language(r))
         self.assertEqual(r.verdict, "PASS", r.failed)
         self.assertNotIn("success-measurable", self.ids(r))
@@ -1493,7 +1493,7 @@ class TestRound7HostFields(SkillMixin, unittest.TestCase):
         r = self.skill(extra="argument-hint: \"[file]\"\ndisable-model-invocation: true\n")
         # the field itself is an allowed host field; relying on it alone now fails the multi-tool parity rule (OpenCode
         # and Codex need their own controls, tests/test_multi_tool_parity.py), and Hermes has none (review)
-        self.assertEqual(self.ids(r, "failed"), {"parity-invocation-control"})
+        self.assertEqual(self.ids(r, "failed"), {"parity-invocation-control", "tool-metadata-generated"})
         self.assertIn("host-specific", next(c["reason"] for c in r.checks if c["id"] == "frontmatter-fields"))
         self.assertEqual(self.skill(extra="argument-hint: \"[file]\"\n").verdict, "PASS")
         self.assertTrue(self.status(self.skill(extra="disable-model-invocation: false\n"), "field-types"))

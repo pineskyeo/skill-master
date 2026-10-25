@@ -2,6 +2,7 @@
 the bundle-non-default cap, ruleset_sha256, the moved readers, and the CLI (plan.md:556-561, :566; D9 to D16 of the A1
 how pass). Every unit and bundle lives in a temp folder; nothing runs a model or a tool binary."""
 import contextlib, inspect, io, json, os, re, shutil, subprocess, sys, tempfile, unittest
+from unittest import mock
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 import eva, skill_eval
@@ -17,8 +18,8 @@ IMPLEMENTED = {"schema", "equals", "subset", "set_equals", "contains_text", "reg
                "heading_present", "description_heuristics", "local_refs", "agent_frontmatter", "host_frontmatter",
                "host_frontmatter_fields",
                "host_field_length", "host_main_file_size", "host_metadata_version", "host_evals_count",
-               "host_tools_declared", "host_success_measurable", "host_scenarios"}
-RESERVED = {"generated_up_to_date"}
+               "host_tools_declared", "host_success_measurable", "host_scenarios", "generated_up_to_date"}
+RESERVED = set()
 
 
 def write(path, text):
@@ -451,13 +452,13 @@ class TestUnitEscape(Base):
 
 
 class TestBundleLoadFails(Base):
-    def test_each_reserved_op_fails_the_load(self):
-        for op in sorted(RESERVED):
-            with self.subTest(op=op):
-                self.assertIn(op, self.load_error({"rules.json": rule_file(rule({"op": op}))}))
-                with self.assertRaises(RR.RuleError) as cm:
-                    RR.compile_check({"op": op})
-                self.assertIn("op '%s' is reserved until" % op, str(cm.exception))
+    def test_a_reserved_op_fails_the_load(self):
+        self.assertEqual(set(RR.RESERVED_OPS), RESERVED)
+        with mock.patch.dict(RR.RESERVED_OPS, {"file_exists": "Z9"}):
+            self.assertIn("file_exists", self.load_error({"rules.json": rule_file(rule(FILE_A))}))
+            with self.assertRaises(RR.RuleError) as cm:
+                RR.compile_check(FILE_A)
+            self.assertIn("op 'file_exists' is reserved until unit Z9", str(cm.exception))
 
     def test_an_unknown_op_fails_the_load(self):
         self.assertIn("frobnicate", self.load_error({"rules.json": rule_file(rule({"op": "frobnicate"}))}))

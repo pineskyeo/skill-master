@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Generated Codex skill invocation policy",
+  "description": "agents/openai.yaml of a skill with disable-model-invocation: true as eva.py generate writes it (unit B2, plan.md:963, :965), read by the strict YAML reader with the YAML 1.1 booleans typed. Closed at every level: policy.allow_implicit_invocation is the only verified Codex field (targets/codex.json skill.verified_fields).",
+  "type": "object",
+  "required": ["policy"],
+  "additionalProperties": false,
+  "properties": {
+    "policy": {
+      "type": "object",
+      "required": ["allow_implicit_invocation"],
+      "additionalProperties": false,
+      "properties": {"allow_implicit_invocation": {"const": false}}
+    }
+  }
+}

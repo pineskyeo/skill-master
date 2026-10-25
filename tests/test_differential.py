@@ -40,6 +40,31 @@ TRANSCRIPT_AGENTS = {"code-reviewer-drill.json": (CR_V1, CR_V2), "research-follo
 B1_AGENT_ROWS = {"agent-frontmatter-v2", "success-measurable", "tools-declared", "tools-subset", "scenarios-present",
                  "scenarios-valid", "scenarios-expected", "multi-turn-scenario", "parity-permissions-claude",
                  "parity-permissions-codex", "parity-permissions-opencode", "parity-permissions-hermes"}
+# Unit B2 (brief B2 D18): the two generated-file rows have no legacy body, so the new side drops exactly them before
+# row_view and drops their reasons from parity_violations. B2_KEY_ROWS: the rows besides B1_AGENT_ROWS that differ on a
+# B2 fixture (the legacy flat TOML reader refuses the generated [features] table, the legacy frontmatter reader the
+# OpenCode "*" key). B2_SCORE_UNITS: the corpus units whose verdict or
+# score the two rows change.
+B2_ROWS = ("wrappers-generated", "tool-metadata-generated")
+B2_KEY_ROWS = {"row-map:tests/rules/wrappers-generated/pass/scout-reader": {"parity-wrapper-codex",
+                                                                           "parity-wrapper-opencode"}}
+B2_SCORE_UNITS = [
+    "tests/fixtures/agents/code-reviewer-v2", "tests/fixtures/agents/research-assistant-v2",
+    "tests/rules/agent-frontmatter-v2/pass/v2-agent", "tests/rules/multi-turn-scenario/fail/single-turn",
+    "tests/rules/multi-turn-scenario/pass/plain-agent", "tests/rules/parity-invocation-control/fail/claude-only",
+    "tests/rules/parity-invocation-control/pass/both-controls", "tests/rules/parity-invocation-hermes/review/both-controls",
+    "tests/rules/parity-permissions-claude/fail/claude-grants-more", "tests/rules/parity-permissions-claude/na/no-claude",
+    "tests/rules/parity-permissions-claude/pass/plain-agent", "tests/rules/parity-permissions-codex/na/no-codex",
+    "tests/rules/parity-permissions-codex/pass/all-caps-agent", "tests/rules/parity-permissions-codex/review/plain-agent",
+    "tests/rules/parity-permissions-opencode/fail/opencode-ask", "tests/rules/parity-permissions-opencode/na/no-opencode",
+    "tests/rules/parity-permissions-opencode/review/plain-agent", "tests/rules/scenarios-expected/fail/no-outcome",
+    "tests/rules/scenarios-expected/pass/plain-agent", "tests/rules/scenarios-present/fail/one-scenario",
+    "tests/rules/scenarios-present/pass/plain-agent", "tests/rules/scenarios-valid/fail/no-turns",
+    "tests/rules/scenarios-valid/pass/plain-agent", "tests/rules/success-measurable/fail/vague-criteria",
+    "tests/rules/success-measurable/pass/plain-agent", "tests/rules/tool-metadata-generated/fail/stale-skill",
+    "tests/rules/tool-metadata-generated/pass/quiet-skill", "tests/rules/tools-declared/pass/plain-agent",
+    "tests/rules/tools-subset/fail/undeclared-tool", "tests/rules/tools-subset/pass/plain-agent",
+    "tests/rules/wrappers-generated/fail/bare-agent", "tests/rules/wrappers-generated/pass/scout-reader"]
 CHANGED = "; changed: "
 SUFFIX_RE = re.compile(r" \[(?:rule [a-z-]+, )?([a-z-]+\.schema\.json)#(/[^,\]]*), keyword ([^\]]+)\]$")
 DISAGREE = "rule and eva.py disagree"
@@ -207,6 +232,17 @@ def row_view(rep):
 def legacy_check(unit):
     with legacy():
         return eva.check(unit, EMPTY_BUNDLE)
+
+
+def without_b2_rows(rep):
+    """rep without the B2 rows; score, verdict and categories are computed from the rows that stay."""
+    rep.checks = [c for c in rep.checks if c["id"] not in B2_ROWS]
+    return rep
+
+
+def b2_free_violations(unit):
+    """eva.parity_violations without the reasons of the B2 rows (the legacy parity rows never hold them)."""
+    return [c["reason"] for c in eva.parity_report(unit).failed if c["id"] not in B2_ROWS]
 
 
 # ---------- the base unit that every skill variant edits once ----------
@@ -923,7 +959,7 @@ def a3_functions(unit):
     """The A3 public functions on one unit, compared legacy against new on every corpus unit and variant."""
     kind = eva.detect_kind(unit)
     out = {"parity_status": eva.parity_status(unit), "review_items": eva.review_items(unit),
-           "english_violations": eva.english_violations(unit), "parity_violations": eva.parity_violations(unit)}
+           "english_violations": eva.english_violations(unit), "parity_violations": b2_free_violations(unit)}
     out["parity_line"] = eva.parity_line(out["parity_status"])
     s = eva.english_scan(unit)
     out["english_scan"] = (s.kind, s.groups, s.review)
@@ -1215,7 +1251,7 @@ def area_rows():
     for key, u in units:
         with legacy():
             old, old_fn = a3_row_view(eva.check(u, EMPTY_BUNDLE)), a3_functions(u)
-        new = eva.check(u)
+        new = without_b2_rows(eva.check(u))
         new_rows, new_fn = a3_row_view(new), a3_functions(u)
         compared.append(key)
         if old != new_rows:
@@ -1394,7 +1430,7 @@ class TestIntentionalFile(unittest.TestCase):
                 continue
             with self.subTest(key):
                 self.assertIn("agent-frontmatter-v2", detail["new"]["rows"])
-                self.assertLessEqual(set(changed_names(key, detail)), B1_AGENT_ROWS)
+                self.assertLessEqual(set(changed_names(key, detail)), B1_AGENT_ROWS | B2_KEY_ROWS.get(key, set()))
 
     def test_every_b1_row_map_reason_names_the_unit_version(self):
         diffs = all_differences()
@@ -1418,6 +1454,31 @@ class TestIntentionalFile(unittest.TestCase):
 
     def test_no_difference_outside_the_file(self):
         self.assertEqual(unrecorded(all_differences()), {})
+
+
+class TestB2Rows(unittest.TestCase):
+    def test_the_dropped_rows_are_exactly_the_two_generated_file_rules(self):
+        ops = sorted(r.id for r in RR.default_bundle().rules if r.node.get("op") == "generated_up_to_date")
+        self.assertEqual(ops, sorted(B2_ROWS))
+        self.assertEqual(len(B2_ROWS), 2)
+        u = os.path.join(ROOT, CR_V2)
+        full = eva.check(u)
+        dropped = without_b2_rows(eva.check(u))
+        self.assertEqual(sorted({c["id"] for c in full.checks} - {c["id"] for c in dropped.checks}), ["wrappers-generated"])
+        self.assertEqual([c for c in full.checks if c["id"] not in B2_ROWS], dropped.checks)
+        violations = eva.parity_violations(u)
+        self.assertEqual([v for v in violations if v not in b2_free_violations(u)],
+                         [c["reason"] for c in eva.parity_report(u).failed if c["id"] in B2_ROWS])
+
+    def test_the_units_whose_verdict_or_score_the_two_rows_change_are_pinned(self):
+        changed = []
+        for u in corpus_units():
+            full = eva.check(u)
+            before = (full.verdict, full.score)
+            after = without_b2_rows(full)
+            if (after.verdict, after.score) != before:
+                changed.append(rel(u))
+        self.assertEqual(changed, B2_SCORE_UNITS)
 
 
 class TestCorpusRows(unittest.TestCase):
@@ -1552,7 +1613,7 @@ class TestA3Variants(unittest.TestCase):
             with legacy():
                 old_rep = eva.check(u, EMPTY_BUNDLE)
                 old, old_fn = a3_row_view(old_rep), a3_functions(u)
-            new, new_fn = a3_row_view(eva.check(v2)), a3_functions(v2)
+            new, new_fn = a3_row_view(without_b2_rows(eva.check(v2))), a3_functions(v2)
         self.assertEqual(old["rows"]["parity-permissions-opencode"][0], "pass")
         self.assertIn("match the AGENT.md tools (compared by capability class",
                       old["reasons"]["parity-permissions-opencode"])

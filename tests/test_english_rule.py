@@ -252,7 +252,7 @@ class TestAgents(E.TmpMixin, unittest.TestCase):
 
     def test_english_agent_passes(self):
         d, r = self.agent()
-        self.assertEqual(failed_ids(r), {P.HERMES_ROW}, r.failed); self.assertEqual(r.kind, "agent")
+        self.assertEqual(failed_ids(r), {P.HERMES_ROW, "wrappers-generated"}, r.failed); self.assertEqual(r.kind, "agent")
         for cid in ("english-agent-md", "english-scenarios"): self.assertTrue(E.SkillMixin.status(self, r, cid), cid)
 
     def test_agent_md_frontmatter_and_body_fail(self):
@@ -276,7 +276,7 @@ class TestAgents(E.TmpMixin, unittest.TestCase):
 
     def test_must_include_is_review_not_fail(self):
         d, r = self.agent(s1=dict(self.S1, must_include=[KO]))
-        self.assertEqual(failed_ids(r), {P.HERMES_ROW}, r.failed)
+        self.assertEqual(failed_ids(r), {P.HERMES_ROW, "wrappers-generated"}, r.failed)
         self.assertEqual([c["id"] for c in r.needs_review],
                          ["english-output-matchers", "parity-permissions-codex", "parity-permissions-opencode"])
         self.assertIn("scenarios/01.json:", reason(r, "english-output-matchers"))

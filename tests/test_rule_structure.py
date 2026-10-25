@@ -146,8 +146,8 @@ class TestRuleFiles(unittest.TestCase):
 
 class TestOps(unittest.TestCase):
     def test_the_a4_ops_left_the_reserved_table(self):
-        self.assertEqual(set(RR.RESERVED_OPS), {"generated_up_to_date"})
-        for op in ("heading_present", "description_heuristics", "local_refs") + RR.HOST_OPS:
+        self.assertEqual(set(RR.RESERVED_OPS), set())
+        for op in ("heading_present", "description_heuristics", "local_refs", "generated_up_to_date") + RR.HOST_OPS:
             self.assertIn(op, RR.OPS, op)
         with open(os.path.join(ROOT, "schemas", "rules.schema.json"), encoding="utf-8") as f:
             enum = json.load(f)["$defs"]["node"]["properties"]["op"]["enum"]

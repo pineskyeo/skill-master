@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Generated Claude Code wrapper",
+  "description": "The frontmatter of wrappers/claude/<name>.md as eva.py generate writes it (unit B2, plan.md:962, :965), read by the strict frontmatter reader. Closed at every level: Claude Code ignores a field it does not recognize (inputs/agent-master-skills.md section 3.4), so an unknown key is caught here, not by the parity rows. Properties: the target's required keys plus its wrapper fields (targets/claude.json).",
+  "type": "object",
+  "required": ["name", "description", "tools"],
+  "additionalProperties": false,
+  "properties": {
+    "name": {"type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$", "maxLength": 64},
+    "description": {"type": "string", "minLength": 1},
+    "tools": {"type": "string", "minLength": 1},
+    "model": {"type": "string", "minLength": 1},
+    "effort": {"type": "string", "minLength": 1}
+  }
+}

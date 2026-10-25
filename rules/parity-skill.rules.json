@@ -68,6 +68,17 @@
       "check": {"op": "parity_invocation", "tools": ["hermes"]},
       "message": "{reason}",
       "fix": "A human confirms that auto-selection by Hermes is acceptable, or the skill stops relying on invocation control."
+    },
+    {
+      "id": "tool-metadata-generated",
+      "applies_to": ["skill"],
+      "category": "parity",
+      "severity": "fail",
+      "protects": ["codex", "opencode"],
+      "source": {"house": "plan.md:963, :965 (unit B2): with disable-model-invocation: true, eva.py generate renders agents/openai.yaml and the metadata.opencode/autoinvoke line, which must equal that render byte for byte; without it no generated file may remain", "verified": "2026-10-25"},
+      "check": {"op": "generated_up_to_date", "scope": "tool-metadata"},
+      "message": "{reason}",
+      "fix": "Run python3 eva.py generate <skill folder> to rewrite or remove the generated invocation metadata from SKILL.md, then python3 eva.py generate --check <skill folder>; edit SKILL.md, never agents/openai.yaml."
     }
   ]
 }

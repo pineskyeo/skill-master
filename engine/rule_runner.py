@@ -16,7 +16,7 @@ RULES_SCHEMA = "schemas/rules.schema.json"
 HASHED_TREES = ("schemas", "targets")
 POLICY_FILES = ("policy/eval-policy.json", "policy/gates.json", "policy/gate.rules.json")
 NON_DEFAULT_ID = "bundle-non-default"
-RESERVED_OPS = {"generated_up_to_date": "B2"}
+RESERVED_OPS = {}
 # Ops whose callable eva.py installs (install_host_ops), because they read eva's parsers or outcome checkers and engine
 # modules never import eva. A rule on one of them with no installed callable fails at compile (fail closed).
 HOST_OPS = ("host_frontmatter", "host_frontmatter_fields", "host_field_length", "host_main_file_size",
@@ -672,6 +672,9 @@ def _primitive(name):
         elif name == "agent_frontmatter":
             from engine.primitives import transcript as mod
             make, args = mod.AgentFrontmatterCheck, (node, root)
+        elif name == "generated_up_to_date":
+            from engine import generate as mod
+            make, args = mod.GeneratedCheck, (node, root)
         elif name in PRIMITIVES:
             make, args = getattr(importlib.import_module("engine.primitives." + name), PRIMITIVES[name]), (node, folder)
         else:
@@ -688,7 +691,7 @@ def _primitive(name):
 PRIMITIVES = {"heading_present": "HeadingCheck", "description_heuristics": "DescriptionCheck", "local_refs": "RefsCheck",
               "agent_frontmatter": "AgentFrontmatterCheck"}
 for _name in ("script_denylist", "parity_skill", "parity_invocation", "parity_agent_name", "parity_wrapper",
-              "parity_permissions") + tuple(PRIMITIVES):
+              "parity_permissions", "generated_up_to_date") + tuple(PRIMITIVES):
     OPS[_name] = _primitive(_name)
 
 

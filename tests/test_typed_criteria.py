@@ -664,7 +664,7 @@ class TestAgentRows(Tmp):
             self.assertEqual(bad, set(), unit)
             self.assertEqual({c["id"] for c in r.failed}, {"parity-wrapper-claude", "parity-wrapper-codex",
                                                            "parity-wrapper-opencode", "parity-wrapper-hermes",
-                                                           "parity-permissions-hermes"})
+                                                           "parity-permissions-hermes", "wrappers-generated"})
 
 
 class TestNoCriterionShapeRaises(Tmp):

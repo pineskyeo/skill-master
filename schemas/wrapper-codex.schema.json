@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Generated Codex CLI custom agent",
+  "description": "wrappers/codex/<name>.toml as eva.py generate writes it (unit B2, plan.md:962, :965), read by the strict TOML reader with tables. Closed at every level. Properties: the target's required keys plus its wrapper fields (targets/codex.json); features.shell_tool is false exactly when the agent has no shell capability, and its effect is UNVERIFIED (gates.md G2).",
+  "type": "object",
+  "required": ["name", "description", "developer_instructions", "features"],
+  "additionalProperties": false,
+  "properties": {
+    "name": {"type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$", "maxLength": 64},
+    "description": {"type": "string", "minLength": 1},
+    "developer_instructions": {"type": "string", "minLength": 1},
+    "model": {"type": "string", "minLength": 1},
+    "model_reasoning_effort": {"type": "string", "minLength": 1},
+    "features": {
+      "type": "object",
+      "required": ["shell_tool"],
+      "additionalProperties": false,
+      "properties": {"shell_tool": {"type": "boolean"}}
+    }
+  }
+}

@@ -4,7 +4,7 @@ reasons stay byte-equal (they are hashed into rule_review records). Ops: parity_
 parity_agent_name, parity_wrapper, parity_permissions. Standard library only; no import of eva or skill_eval
 (engine/writable.py)."""
 import os, re, unicodedata
-from engine.loaders import TomlError, parse_frontmatter_ex, parse_toml, yaml_typed_keys
+from engine.loaders import TomlError, parse_frontmatter_ex, parse_frontmatter_maps, parse_toml, yaml_typed_keys
 from engine.primitives.script_denylist import WRAPPER_OUT, _within, read_text
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -274,31 +274,60 @@ def _wrapper_common(meta_name, meta_desc, name, desc, body):
     return p
 
 
+def _pattern_grant(p, perm, rel, key, k, wild, patterned, closed):
+    """The grant of permission key k: its value, or for a pattern map the value of its first, wildcard entry (B2 D7)."""
+    v = perm[k]
+    if not isinstance(v, dict):
+        return v
+    if k not in patterned:
+        p.append("%s: %s.%s: a pattern map is allowed only for %s" % (rel, key, k, ", ".join(patterned) or "no key"))
+        return None
+    if not v or wild is None or list(v)[0] != wild:
+        p.append("%s: %s.%s: a pattern map must start with '%s'" % (rel, key, k, wild))
+        return None
+    for pat, x in list(v.items())[1:]:
+        if x != closed:
+            p.append("%s: %s.%s: pattern '%s' must be %s, because only the first '%s' entry may grant"
+                     % (rel, key, k, pat, closed, wild))
+    return v[wild]
+
+
 def _permission_field(st, tgt, perm, rel, key):
     p, pm = st["problems"], tgt["permissions"]
     grants, actions, granting = pm["grants"], pm["actions"], pm["granting"]
+    wild, patterned = pm.get("wildcard"), pm.get("pattern_keys", [])
     if not isinstance(perm, dict):
         p.append("%s: %s: a mapping that sets every recorded %s permission key is required" % (rel, key, tgt["label"]))
         return
     closed = [a for a in actions if a not in granting][0]
+    if wild is not None and wild in perm:
+        if list(perm)[0] != wild:
+            p.append("%s: %s: the wildcard key '%s' must be the first key (OpenCode applies the last matching rule, "
+                     "UNVERIFIED)" % (rel, key, wild))
+        elif perm[wild] != closed:
+            p.append("%s: %s: the wildcard key '%s' must be %s" % (rel, key, wild, closed))
+    grant = {k: _pattern_grant(p, perm, rel, key, k, wild, patterned, closed) for k in grants if k in perm}
     for k, cap in grants.items():
         if k not in perm: p.append("%s: %s.%s must be set explicitly" % (rel, key, k))
-        elif perm[k] not in actions:
+        elif isinstance(perm[k], dict) and grant[k] is None: pass
+        elif grant[k] not in actions:
             p.append("%s: %s.%s must be one of %s" % (rel, key, k, "/".join(actions)))
-        elif cap is None and perm[k] in granting:
+        elif cap is None and grant[k] in granting:
             p.append("%s: %s.%s must be %s, because no capability class covers it" % (rel, key, k, closed))
-    unknown = sorted(k for k in perm if k not in grants)
+    unknown = sorted(k for k in perm if k not in grants and k != wild)
     if unknown: p.append("%s: %s keys %s are not in the recorded %s permission key list" % (rel, key, unknown, tgt["label"]))
     if not any(x.startswith("%s: %s" % (rel, key)) for x in p):
-        st["caps"] = {cap for k, cap in grants.items() if cap and perm[k] in granting}
+        st["caps"] = {cap for k, cap in grants.items() if cap and grant[k] in granting}
 
 
 def _frontmatter_wrapper(st, tgt, fp, rel, name, desc):
     p, w = st["problems"], tgt["wrapper"]
-    _, m, err = _frontmatter_of(fp)
+    maps = [k for k, f in w["fields"].items() if f["kind"] == "permission"]
+    raw, err = read_text(fp)
+    m, body, ferr = (None, None, err) if raw is None else \
+        parse_frontmatter_maps(raw, maps) if maps else parse_frontmatter_ex(raw)
     if m is None:
-        p.append("%s: frontmatter unusable: %s" % (rel, err)); return
-    body = parse_frontmatter_ex(read_text(fp)[0])[1]
+        p.append("%s: frontmatter unusable: %s" % (rel, ferr)); return
     for k in w["required"]:
         if not _nonempty_str(m.get(k)): p.append("%s: %s: non-empty string required" % (rel, k))
     p += ["%s: %s" % (rel, x) for x in _wrapper_common(m.get("name") if _nonempty_str(m.get("name")) else None,

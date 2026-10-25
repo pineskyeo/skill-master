@@ -100,6 +100,17 @@
       "check": {"op": "parity_permissions", "tool": "hermes"},
       "message": "{reason}",
       "fix": "See notes/multi-tool-parity-plan.md section 2.4. Until a Hermes permission format is verified and recorded in targets/hermes.json this row fails for every agent by design; see the README section on multi-tool parity."
+    },
+    {
+      "id": "wrappers-generated",
+      "applies_to": ["agent"],
+      "category": "parity",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "plan.md:962-965 (unit B2): the four tool files of an AGENT.md v2 agent are rendered by eva.py generate from AGENT.md and targets/*.json and must equal that render byte for byte and pass their closed schemas", "verified": "2026-10-25"},
+      "check": {"op": "generated_up_to_date", "scope": "wrappers"},
+      "message": "{reason}",
+      "fix": "Run python3 eva.py generate <agent folder> to rewrite the generated files from AGENT.md, then python3 eva.py generate --check <agent folder>; edit AGENT.md, never a generated file."
     }
   ]
 }

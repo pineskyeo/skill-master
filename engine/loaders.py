@@ -207,6 +207,109 @@ def parse_frontmatter_ex(text):
         if bad: return bad
     return meta, "\n".join(lines[end + 1:]), None
 
+_MAP_BARE_KEY_RE = re.compile(r"^([A-Za-z_][\w./-]*):(.*)$")
+_TOP_KEY_RE = re.compile(r"^([A-Za-z_][\w-]*):(?:\s+(.*))?$")
+
+def _map_entry(s):
+    """(key, raw value, error) of one 'key: value' line of a map block, the indentation already removed. A key is bare or
+    double-quoted (decoded as a YAML double-quoted scalar)."""
+    if s.startswith('"'):
+        end = _quoted_end(s)
+        if end < 0: return None, None, "unterminated double-quoted key"
+        key, e = _unquote(s[:end + 1])
+        if e: return None, None, e
+        rest = s[end + 1:]
+        if not rest.startswith(":"): return None, None, "expected ':' after the key %s" % s[:end + 1]
+    elif s.startswith("'"):
+        return None, None, "only bare or double-quoted keys are allowed in this map, got a single-quoted key"
+    else:
+        m = _MAP_BARE_KEY_RE.match(s)
+        if not m: return None, None, "expected a bare or double-quoted key followed by ':'"
+        key, rest = m.group(1), ":" + m.group(2)
+    rest = rest[1:]
+    if rest and not rest[0].isspace(): return None, None, "expected ': ' after the key %r" % key
+    return key, _strip_comment(rest), None
+
+def _map_block(key, block):
+    """({entry: value or {pattern: value}}, (line number, error)) of the indented lines of the map key."""
+    out, sub, sub_key, last, closed = {}, None, None, None, False
+    for n, ln in block:
+        if "\t" in ln: return None, (n, "tab in the '%s' map (YAML allows spaces only)" % key)
+        indent = len(ln) - len(ln.lstrip(" "))
+        if indent not in (2, 4):
+            return None, (n, "indentation of %d spaces is not allowed under '%s' (entries at 2 spaces, one sub-map level "
+                             "at 4)" % (indent, key))
+        k, v, e = _map_entry(ln[indent:])
+        if e: return None, (n, e)
+        if indent == 2:
+            if sub is not None and not sub:
+                return None, (n, "empty sub-map under '%s.%s'" % (key, sub_key))
+            if k in out: return None, (n, "duplicate key '%s.%s'" % (key, k))
+            if v == "":
+                sub, sub_key = {}, k
+                out[k] = sub
+            else:
+                if v.startswith("{"): return None, (n, "flow map under '%s.%s' is not supported" % (key, k))
+                pe = _plain_scalar_error(v)
+                if pe: return None, (n, pe)
+                out[k], sub, sub_key = _scalar(v), None, None
+            last = k
+            continue
+        if sub is None:
+            if last is not None:
+                return None, (n, "key '%s.%s' already has a scalar value; nested lines not allowed" % (key, last))
+            return None, (n, "indentation of 4 spaces is allowed only under an entry of '%s' with no value" % key)
+        if k in sub: return None, (n, "duplicate key '%s.%s.%s'" % (key, sub_key, k))
+        if v == "": return None, (n, "the pattern entry '%s.%s.%s' needs a value" % (key, sub_key, k))
+        if v.startswith("{"): return None, (n, "flow map under '%s.%s.%s' is not supported" % (key, sub_key, k))
+        pe = _plain_scalar_error(v)
+        if pe: return None, (n, pe)
+        sub[k] = _scalar(v)
+    if sub is not None and not sub:
+        return None, (block[-1][0], "empty sub-map under '%s.%s'" % (key, sub_key))
+    return out or None, None
+
+def parse_frontmatter_maps(text, keys):
+    """parse_frontmatter_ex, but each top-level key in keys whose value is empty is read as a map block with indentation
+    tracking (unit B2 D7): entries at 2 spaces, one sub-map level at 4 spaces, bare or double-quoted keys. Refused with a
+    'frontmatter line N' error: a second block of the key, a key repeated after decoding at either level, any other
+    indentation, nested lines under a scalar entry, an empty sub-map, a tab, a flow map. A block whose first line is a
+    '- item', a scalar value or a text without the key reads exactly as parse_frontmatter_ex reads it."""
+    lines = text.splitlines()
+    if not lines or lines[0] != "---" or "---" not in lines[1:]:
+        return parse_frontmatter_ex(text)
+    end = lines.index("---", 1)
+    maps, seen, i = {}, set(), 1
+    out = list(lines)
+    while i < end:
+        m = _TOP_KEY_RE.match(lines[i]) if lines[i][:1] not in ("", " ", "\t", "#") else None
+        if not m or m.group(1) not in keys:
+            i += 1; continue
+        key, val = m.group(1), _strip_comment(m.group(2) or "")
+        if key in seen: return None, text, "frontmatter line %d: duplicate key '%s'" % (i + 1, key)
+        seen.add(key)
+        if val.startswith("{"):
+            return None, text, "frontmatter line %d: flow map on '%s' is not supported" % (i + 1, key)
+        j, block = i + 1, []
+        while j < end and (not lines[j].strip() or lines[j][0] in " \t#"):
+            if lines[j].strip() and not lines[j].lstrip().startswith("#"):
+                block.append((j + 1, lines[j]))
+            j += 1
+        if val == "" and block and not block[0][1].lstrip(" \t").startswith("- "):
+            parsed, err = _map_block(key, block)
+            if err: return None, text, "frontmatter line %d: %s" % err
+            maps[key] = parsed
+            for k in range(i + 1, j):
+                out[k] = ""
+        i = j
+    if not maps:
+        return parse_frontmatter_ex(text)
+    meta, body, err = parse_frontmatter_ex("\n".join(out))
+    if meta is None:
+        return None, text, err
+    meta.update(maps)
+    return meta, body, None
+
 # YAML 1.1 implicit types (what PyYAML's safe_load resolves): an unquoted value matching these is
 # loaded as bool/null/int/float/date, not a string.
 _YAML_TYPED_RE = re.compile(
