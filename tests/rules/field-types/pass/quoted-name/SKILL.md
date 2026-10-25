@@ -1,0 +1,12 @@
+---
+name: quoted-name
+description: Counts the words in one text file. Use when a rule fixture needs quoted frontmatter scalars.
+compatibility: "yes"
+---
+# Quoted Name
+## Inputs
+- text_path: the text file to count
+## Outputs
+- word_count: the number of words
+## Example
+Input: `notes.txt` with "a b c". Output: 3.

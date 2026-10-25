@@ -20,57 +20,191 @@ Usage: python3 skill_eval.py <validate|estimate|plan|run|grade|calibrate|report|
 import argparse, csv, datetime, errno, hashlib, json, math, mmap, os, platform, random, re, shlex, shutil, subprocess, sys, tempfile, time
 from engine import approvals, writable
 
-LAYERS = ("static", "llm", "human")
-BASELINES = {"none": "without_skill", "old": "old_skill"}  # skill-creator configuration names
-PRIMARY = "with_skill"
-DEFAULT_RUNS = 3
-TRIGGER_THRESHOLD = 0.5           # run_eval.py --trigger-threshold default / agentskills.io "0.5 is a reasonable default"
-TRIGGER_POS = TRIGGER_NEG = 10     # house rule (H): exactly 10 + 10 (skill-creator / agentskills.io say 8-10 each)
-MAX_AUTO_ITERATIONS = 5            # skill-creator run_loop --max-iterations 5 / agentskills.io "Five iterations"
-AGREEMENT_MIN = 0.8                # H: grader-vs-human agreement below this is a gate problem
-REGRESSION_TOLERANCE = 0.0         # H: any drop of mean pass_rate counts as regression
-HIGH_VARIANCE_STDDEV = 0.3         # H: per-eval pass_rate stddev that gets a "flaky" note
+POLICY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "policy")
+POLICY_TYPES = {"tuple": tuple, "dict": dict, "int": int, "float": float, "str": str}
+
+class PolicyError(ValueError): pass
+
+def _finite(lo, hi=math.inf, kind=(int, float)):
+    return lambda x: isinstance(x, kind) and not isinstance(x, bool) and math.isfinite(x) and lo <= x <= hi
+
+def _real_date(s):
+    try:
+        return isinstance(s, str) and bool(re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", s)
+                                           and datetime.date.fromisoformat(s))
+    except ValueError:
+        return False
+
+def _https_url(s):
+    return isinstance(s, str) and bool(re.fullmatch(
+        r"https://[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*(?::[0-9]+)?(?:[/?#][!-~]*)?", s))
+
+def _each(ok):
+    """Check of a non-empty tuple or dict whose items (dict: values) all pass ok: None, or (where, the bad value)."""
+    def check(v):
+        if not v:
+            return "", v
+        for k, x in (v.items() if isinstance(v, dict) else enumerate(v)):
+            if not ok(x):
+                return (".%s" % k if isinstance(v, dict) else "[%d]" % k), x
+    return check
+
+def _whole(ok):
+    return lambda v: None if ok(v) else ("", v)
+
+def _pair(ok):
+    return lambda x: isinstance(x, tuple) and len(x) == 2 and all(ok(y) for y in x)
+
+_STRING = lambda x: isinstance(x, str)
+_FRACTION = _whole(_finite(0, 1))
+_COUNT = _whole(_finite(1, kind=int))
+class PolicySpec:
+    """file: the policy file; type: the POLICY_TYPES key; check: the value after the type conversion -> None or
+    (where, bad value); need: what check accepts; priced: each model id in it needs a PRICES row; unverified: the
+    entry needs "verified": false."""
+    def __init__(self, file, type, check, need, priced=False, unverified=False):
+        self.file, self.type, self.check, self.need = file, type, check, need
+        self.priced, self.unverified = priced, unverified
+
+POLICY_SPECS = {
+    "LAYERS": PolicySpec("eval-policy.json", "tuple", _each(_STRING), "a non-empty list of strings"),
+    "BASELINES": PolicySpec("eval-policy.json", "dict", _each(_STRING), "a non-empty map to strings"),
+    "PRIMARY": PolicySpec("eval-policy.json", "str", _whole(_STRING), "a string"),
+    "DEFAULT_RUNS": PolicySpec("eval-policy.json", "int", _COUNT, "an integer >= 1"),
+    "TRIGGER_THRESHOLD": PolicySpec("eval-policy.json", "float", _FRACTION, "a finite number from 0 to 1"),
+    "TRIGGER_POS": PolicySpec("eval-policy.json", "int", _COUNT, "an integer >= 1"),
+    "TRIGGER_NEG": PolicySpec("eval-policy.json", "int", _COUNT, "an integer >= 1"),
+    "MAX_AUTO_ITERATIONS": PolicySpec("eval-policy.json", "int", _COUNT, "an integer >= 1"),
+    "AGREEMENT_MIN": PolicySpec("eval-policy.json", "float", _FRACTION, "a finite number from 0 to 1"),
+    "REGRESSION_TOLERANCE": PolicySpec("eval-policy.json", "float", _FRACTION, "a finite number from 0 to 1"),
+    "HIGH_VARIANCE_STDDEV": PolicySpec("eval-policy.json", "float", _FRACTION, "a finite number from 0 to 1"),
+    "PRICES": PolicySpec("pricing.json", "dict", _each(_pair(_finite(0))), "a non-empty map of model ids to price rows"),
+    "DEFAULT_TOKENS": PolicySpec("pricing.json", "dict", _each(_pair(_finite(0, kind=int))),
+                                 "a non-empty map to [input, output] token counts, integers >= 0"),
+    "CLAUDE_CAP_HEADROOM": PolicySpec("pricing.json", "float", _FRACTION, "a finite number from 0 to 1"),
+    "WORST_CASE_FACTOR": PolicySpec("pricing.json", "float", _whole(_finite(1)), "a finite number >= 1"),
+    "DEFAULT_EXECUTOR_MODELS": PolicySpec("models.json", "dict", _each(lambda x: x is None or _STRING(x)),
+                                          "a non-empty map to model ids or null", priced=True),
+    "DEFAULT_GRADER_MODEL": PolicySpec("models.json", "str", _whole(_STRING), "a model id", priced=True),
+    "DEFAULT_BUILDER_MODEL": PolicySpec("models.json", "str", _whole(_STRING), "a model id", priced=True),
+    "CLAUDE_EFFORTS": PolicySpec("models.json", "tuple", _each(_STRING), "a non-empty list of strings"),
+    "CODEX_EFFORTS": PolicySpec("models.json", "tuple", _each(_STRING), "a non-empty list of strings"),
+    "CODEX_EFFORT_CONFIG": PolicySpec("models.json", "str", _whole(_STRING), "a string", unverified=True),
+    "GRADER_ENGINES": PolicySpec("models.json", "tuple", _each(_STRING), "a non-empty list of strings"),
+}
+POLICY_FILES = ("eval-policy.json", "pricing.json", "models.json")
+PRICE_ROW = {  # field of a PRICES row -> (valid, what a valid field is)
+    "input": (_finite(0, kind=float), "a finite float >= 0"),
+    "output": (_finite(0, kind=float), "a finite float >= 0"),
+    "source": (_https_url, "an https:// URL with a host"),
+    "read_on": (_real_date, "a real date YYYY-MM-DD"),
+}
+
+def _policy_value(where, entry):
+    if not (isinstance(entry, dict) and entry.get("type") in POLICY_TYPES and "value" in entry
+            and isinstance(entry.get("source"), str) and entry["source"].strip()):
+        raise PolicyError("%s: needs value, a source and a type from %s" % (where, sorted(POLICY_TYPES)))
+    v, kind, item = entry["value"], entry["type"], entry.get("item_type")
+    if item not in (None, "tuple", "price"):
+        raise PolicyError("%s: unknown item_type %r" % (where, item))
+    if kind == "tuple" and isinstance(v, list):
+        v = tuple(v)
+    elif kind == "dict" and isinstance(v, dict) and item == "tuple":
+        if not all(isinstance(x, list) for x in v.values()):
+            raise PolicyError("%s: every value must be a list" % where)
+        v = {k: tuple(x) for k, x in v.items()}
+    elif kind == "dict" and isinstance(v, dict) and item == "price":
+        for k, row in v.items():
+            for field, (ok, need) in PRICE_ROW.items():
+                if not (isinstance(row, dict) and ok(row.get(field))):
+                    raise PolicyError("%s.%s: needs float input and output, an https source and a read_on date; %s "
+                                      "must be %s, got %s" % (where, k, field, need,
+                                                              json.dumps(row.get(field) if isinstance(row, dict) else row)))
+        v = {k: (row["input"], row["output"]) for k, row in v.items()}
+    if type(v) is not POLICY_TYPES[kind]:
+        raise PolicyError("%s: value is %s, not %s" % (where, type(v).__name__, kind))
+    return v
+
+def load_policy(fname):
+    """The values that POLICY_SPECS places in policy/<fname> next to this file (never the current directory), as Python
+    values; raises PolicyError on a missing or unreadable file, non-strict JSON, a missing or unknown name, or a value
+    of the wrong type or outside its spec."""
+    from engine import schema
+    names = [n for n, spec in POLICY_SPECS.items() if spec.file == fname]
+    where = "policy/" + fname
+    try:
+        doc = schema.load(os.path.join(POLICY_DIR, fname))
+    except schema.JsonError as e:
+        raise PolicyError("%s: %s" % (where, e)) from None
+    values = doc.get("values") if isinstance(doc, dict) else None
+    if not isinstance(values, dict) or sorted(values) != sorted(names):
+        raise PolicyError("%s: values must name exactly %s" % (where, ", ".join(sorted(names))))
+    if fname == "pricing.json" and not (isinstance(doc.get("codex"), dict) and doc["codex"].get("verified") is False):
+        raise PolicyError("%s: codex.verified must be false (no Codex or OpenAI price is verified)" % where)
+    out = {}
+    for n in names:
+        spec, entry = POLICY_SPECS[n], values[n]
+        out[n] = _policy_value("%s: %s" % (where, n), entry)
+        if entry["type"] != spec.type:
+            raise PolicyError("%s: %s: type must be %s, got %s" % (where, n, json.dumps(spec.type),
+                                                                     json.dumps(entry["type"])))
+        bad = spec.check(out[n])
+        if bad:
+            raise PolicyError("%s: %s%s: must be %s, got %s" % (where, n, bad[0], spec.need, json.dumps(bad[1])))
+        if spec.unverified and entry.get("verified") is not False:
+            raise PolicyError("%s: %s: verified must be false (not verified from a primary source), got %s"
+                              % (where, n, json.dumps(entry.get("verified"))))
+    return out
+
+def load_all_policy():
+    """Every POLICY_SPECS value from the three policy files; each default model id needs a PRICES row."""
+    policy = {}
+    for fname in POLICY_FILES:
+        policy.update(load_policy(fname))
+    for n, spec in POLICY_SPECS.items():
+        ids = (policy[n].items() if isinstance(policy[n], dict) else [("", policy[n])]) if spec.priced else ()
+        for k, model in ids:
+            if model is not None and model not in policy["PRICES"]:
+                raise PolicyError("policy/%s: %s%s: must name a PRICES row of policy/pricing.json, got %s"
+                                  % (spec.file, n, k and "." + k, json.dumps(model)))
+    return policy
+
+try:
+    _POLICY = load_all_policy()
+except PolicyError as e:
+    if __name__ == "__main__":
+        sys.exit("skill_eval: policy error: %s" % e)
+    raise
+
+LAYERS = _POLICY["LAYERS"]
+BASELINES = _POLICY["BASELINES"]
+PRIMARY = _POLICY["PRIMARY"]
+DEFAULT_RUNS = _POLICY["DEFAULT_RUNS"]
+TRIGGER_THRESHOLD = _POLICY["TRIGGER_THRESHOLD"]
+TRIGGER_POS = _POLICY["TRIGGER_POS"]
+TRIGGER_NEG = _POLICY["TRIGGER_NEG"]
+MAX_AUTO_ITERATIONS = _POLICY["MAX_AUTO_ITERATIONS"]
+AGREEMENT_MIN = _POLICY["AGREEMENT_MIN"]
+REGRESSION_TOLERANCE = _POLICY["REGRESSION_TOLERANCE"]
+HIGH_VARIANCE_STDDEV = _POLICY["HIGH_VARIANCE_STDDEV"]
 STATIC_TYPES = ("regex", "not_regex", "tool_call", "skill_triggered", "file_exists",
                 "file_equals_fixture", "csv_cleaned", "csv_rows")
 CSV_ROWS_KEYS = ("type", "path", "rows", "min", "max", "normalize", "unique")
 
-# USD per million tokens (input, output). Source: https://platform.claude.com/docs/en/about-claude/pricing,
-# read 2026-10-15 (base input / output columns; Haiku 5.5 row "for prompts up to 100,000 tokens").
-# Codex/OpenAI prices are not listed: not verified from a primary source. Pass --price codex=IN,OUT.
-PRICES = {
-    "claude-fable-5-1": (10.0, 50.0),
-    "claude-opus-5-5": (4.0, 20.0),
-    "claude-sonnet-5-5": (2.0, 10.0),
-    "claude-haiku-5-5": (0.10, 0.50),
-}
-DEFAULT_EXECUTOR_MODELS = {"claude": "claude-opus-5-5", "codex": None}  # codex: CLI default (model unknown)
-DEFAULT_GRADER_MODEL = "claude-sonnet-5-5"
-# Assumed tokens per call (input, output). Assumptions, not measurements: replace with --tokens after a pilot.
-DEFAULT_TOKENS = {"exec": (60000, 4000), "trigger": (25000, 500), "grader": (12000, 800), "pairwise": (16000, 800),
-                  "builder": (80000, 8000)}
-DEFAULT_BUILDER_MODEL = "claude-opus-5-5"
-# Effort levels. Claude: `--effort` CLI flag; low/medium/high, xhigh and max are named in the Claude Code changelog
-# (~/.claude/cache/changelog.md: "Available via `/effort`, `--effort`"). Codex: values accepted by the Codex plugin
-# runtime (~/.claude/plugins/cache/openai-codex/codex/1.0.4/skills/codex-cli-runtime/SKILL.md: none, minimal, low,
-# medium, high, xhigh). The `codex exec` spelling `-c model_reasoning_effort=<level>` is NOT verified from a primary
-# source in this repo (UNVERIFIED): check `codex exec --help` / the Codex config docs before a live run.
-CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
-CODEX_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
-CODEX_EFFORT_CONFIG = "model_reasoning_effort=%s"  # (UNVERIFIED) config key, see above
+PRICES = _POLICY["PRICES"]
+DEFAULT_EXECUTOR_MODELS = _POLICY["DEFAULT_EXECUTOR_MODELS"]
+DEFAULT_GRADER_MODEL = _POLICY["DEFAULT_GRADER_MODEL"]
+DEFAULT_TOKENS = _POLICY["DEFAULT_TOKENS"]
+DEFAULT_BUILDER_MODEL = _POLICY["DEFAULT_BUILDER_MODEL"]
+CLAUDE_EFFORTS = _POLICY["CLAUDE_EFFORTS"]
+CODEX_EFFORTS = _POLICY["CODEX_EFFORTS"]
+CODEX_EFFORT_CONFIG = _POLICY["CODEX_EFFORT_CONFIG"]  # UNVERIFIED config key (policy/models.json)
 CODEX_ADMIN_SKILLS = os.path.join("/etc", "codex", "skills")  # admin-scope skills: load in every Codex call
-GRADER_ENGINES = ("claude", "codex")
-# Codex grader price per million tokens (input, output). OpenAI/Codex prices are not verified from a primary source
-# here, so the most expensive row of PRICES is used as a conservative assumption (UNVERIFIED: not shown to be an upper
-# bound of the real price). Override with --price grader=IN,OUT. Every Codex grader call is charged at least its
-# worst-case bound (assumed tokens x WORST_CASE_FACTOR x this price): Codex has no per-call cap.
+GRADER_ENGINES = _POLICY["GRADER_ENGINES"]
+# UNVERIFIED assumption: no Codex price is verified, so the most expensive PRICES row stands in (policy/pricing.json).
 CODEX_GRADER_ASSUMED_PRICE = max(PRICES.values(), key=lambda p: p[0] + p[1])
-# Per-call budget control (H). Claude: --max-budget-usd gets only this share of the remaining budget, because how far
-# the CLI can overshoot its cap is not documented. Codex has no per-call cap, so its budget is a SOFT LIMIT: a call
-# starts only when its estimated worst-case bound (assumed tokens x WORST_CASE_FACTOR x price) fits the remaining
-# budget, but nothing stops one call from costing more. --strict-budget (the default) refuses live runs of such
-# engines; --no-strict-budget is an explicit, risky opt-out.
-CLAUDE_CAP_HEADROOM = 0.5
-WORST_CASE_FACTOR = 3.0
+CLAUDE_CAP_HEADROOM = _POLICY["CLAUDE_CAP_HEADROOM"]
+WORST_CASE_FACTOR = _POLICY["WORST_CASE_FACTOR"]
 SOFT_LIMIT_NOTE = ("SOFT LIMIT: %s has no per-call budget cap; the worst-case bound is an estimate, so one call can "
                    "exceed the remaining budget (--live refuses it by default; --no-strict-budget allows it, risky)")
 NO_STRICT_WARNING = ("--no-strict-budget: %s runs with a SOFT budget limit (one call can exceed --budget-usd) and its "
@@ -240,7 +374,72 @@ def _check_problems(where, chk):
             e.append("%s.check.data_rows: integer >= 0 required" % where)
     return e
 
+def check_object_problems(where, chk):
+    """Problems of one static check object per schemas/evals.schema.json#/$defs/check."""
+    import eva
+    return eva.shape_schema("evals.schema.json").problems(chk, start=("$defs", "check"), where=where)
+
 def load_eval_set(skill_dir):
+    """Returns (spec, problems). spec: skill_name, skill_dir, description, cases[], triggers[] (or None if missing).
+    The document shape is eva.evals_errors (schemas/evals.schema.json), each check object check_object_problems."""
+    skill_dir = os.path.realpath(skill_dir)
+    import eva  # frontmatter parser and the static evals-valid rules
+    problems = []
+    text, err = eva.read_text(os.path.join(skill_dir, "SKILL.md"))
+    meta = (eva.parse_frontmatter(text)[0] if not err else None) or {}
+    name = meta.get("name") if isinstance(meta.get("name"), str) else os.path.basename(skill_dir)
+    if not safe_name(name):  # it becomes the install folder <work>/<skills_rel>/<name> and the workspace name
+        problems.append("SKILL.md name: %r must match %s without '..' (one path component)" % (name, SAFE_NAME_RE.pattern))
+    _, errs = eva.evals_errors(skill_dir, name)
+    problems += ["evals.json: " + x for x in errs]
+    data = rjson(os.path.join(skill_dir, "evals", "evals.json"), {}) if not errs else {}
+    claude_script = data.get("claude_python_script")
+    if claude_script is not None:
+        if (not isinstance(claude_script, str) or not re.fullmatch(r"scripts/[A-Za-z0-9_./-]+\.py", claude_script)
+                or ".." in claude_script.split("/") or not os.path.isfile(os.path.join(skill_dir, claude_script))):
+            problems.append("evals.json.claude_python_script: existing relative scripts/*.py path required")
+            claude_script = None
+    cases = []
+    for c in (data.get("evals") or []):
+        default_layer = c.get("layer") or "llm"
+        items = []
+        raw = c.get("assertions") or c.get("expectations") or []
+        for i, a in enumerate(raw):
+            where = "evals[id=%s].assertions[%d]" % (c["id"], i)
+            it = {"id": "%s.%d" % (c["id"], i), "text": a, "layer": default_layer, "check": None} if isinstance(a, str) \
+                else {"id": "%s.%d" % (c["id"], i), "text": a["text"], "layer": a["layer"], "check": a.get("check")}
+            if it["layer"] == "static":
+                if it["check"] is None:
+                    problems.append("%s: static layer needs a machine check object {\"text\", \"layer\": \"static\", "
+                                    "\"check\": {\"type\": ...}} (%r)" % (where, it["text"]))
+                else:
+                    problems += check_object_problems(where, it["check"])
+                    if isinstance(it["check"], dict) and it["check"].get("type") in ("file_equals_fixture", "csv_cleaned"):
+                        fixture = it["check"].get("fixture")
+                        if isinstance(fixture, str) and fixture not in (c.get("files") or []):
+                            problems.append("%s.check.fixture: must be one of this case's files" % where)
+            items.append(it)
+        pressure = c.get("pressure")
+        if pressure is not None and not (isinstance(pressure, dict) and isinstance(pressure.get("kinds"), list)
+                                         and pressure["kinds"] and all(isinstance(k, str) and k for k in pressure["kinds"])
+                                         and isinstance(pressure.get("context", ""), str)):
+            problems.append("evals[id=%s].pressure: {\"kinds\": [str, ...], \"context\": str} required" % c.get("id"))
+            pressure = None
+        if "name" in c and not safe_name(c["name"]):
+            problems.append("evals[id=%s].name: %r must match %s without '..' (one path component)"
+                            % (c["id"], c["name"], SAFE_NAME_RE.pattern))
+        name_ = c["name"] if safe_name(c.get("name")) else (slug(c["prompt"]) or str(c["id"]))
+        cases.append({"id": c["id"], "name": name_, "prompt": c["prompt"],
+                      "expected_output": c["expected_output"], "files": c.get("files") or [], "items": items,
+                      "pressure": pressure})
+    triggers, tp = load_triggers(skill_dir)
+    problems += tp
+    problems += ["english-only rule: " + x for x in eva.english_violations(skill_dir)]
+    problems += ["multi-tool parity rule: " + x for x in eva.parity_violations(skill_dir)]
+    return {"skill_name": name, "skill_dir": skill_dir, "description": meta.get("description") or "",
+            "claude_python_script": claude_script, "cases": cases, "triggers": triggers}, problems
+
+def _legacy_load_eval_set(skill_dir):
     """Returns (spec, problems). spec: skill_name, skill_dir, description, cases[], triggers[] (or None if missing)."""
     skill_dir = os.path.realpath(skill_dir)
     import eva  # frontmatter parser and the static evals-valid rules
@@ -300,6 +499,26 @@ def load_eval_set(skill_dir):
             "claude_python_script": claude_script, "cases": cases, "triggers": triggers}, problems
 
 def load_triggers(skill_dir):
+    """evals/trigger_evals.json: skill-creator eval-set format [{"query": str, "should_trigger": bool}], shape per
+    schemas/trigger-evals.schema.json. Returns (the well-formed queries or None, problems)."""
+    fp = os.path.join(skill_dir, "evals", "trigger_evals.json")
+    if not os.path.isfile(fp):
+        return None, ["trigger_evals.json: missing evals/trigger_evals.json (%d should-trigger + %d should-not queries)"
+                      % (TRIGGER_POS, TRIGGER_NEG)]
+    try:
+        data = rjson(fp)
+    except ValueError as ex:
+        return None, ["trigger_evals.json: invalid JSON: %s" % ex]
+    import eva
+    shape = eva.shape_schema("trigger-evals.schema.json")
+    if not isinstance(data, list):
+        return None, shape.problems(data)
+    item = shape.sub(("$defs", "trigger-item"))
+    out = [{"query": q["query"], "should_trigger": q["should_trigger"]} for q in data if not item.validate(q)]
+    pos = sum(q["should_trigger"] for q in out)
+    return out, shape.problems(data, pos=pos, neg=len(out) - pos)
+
+def _legacy_load_triggers(skill_dir):
     """evals/trigger_evals.json: skill-creator eval-set format [{"query": str, "should_trigger": bool}]."""
     fp = os.path.join(skill_dir, "evals", "trigger_evals.json")
     if not os.path.isfile(fp):

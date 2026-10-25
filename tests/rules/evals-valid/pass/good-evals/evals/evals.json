@@ -1,0 +1,9 @@
+{
+  "skill_name": "good-evals",
+  "evals": [
+    {"id": 1, "prompt": "How many words are in notes.txt?", "expected_output": "One word count."},
+    {"id": 2, "prompt": "Count the words in the empty file empty.txt.", "expected_output": "0"},
+    {"id": 3, "prompt": "Count the words in README.md, code blocks included.", "expected_output": "One count that includes code blocks.",
+     "assertions": ["the count includes code blocks", {"text": "the answer is one number", "layer": "llm"}]}
+  ]
+}

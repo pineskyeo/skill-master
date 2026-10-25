@@ -1380,11 +1380,194 @@ def _toc_first(text):
         heads = heads[1:]
     return bool(heads) and bool(re.search(r"contents|목차|\btoc\b", heads[0][1], re.I))
 
+# ---------- schema-backed shape checks (schemas/*.schema.json) ----------
+SCHEMA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schemas")
+SHAPE_ROWS = ("evals-valid", "field-types")  # rows that a default-bundle rule now decides (rules/skill-*.rules.json)
+DISAGREE = "rule and eva.py disagree"
+_PER_ERROR_KEYS = ("value", "repr", "key", "key_ascii", "path_reason", "type", "got", "error", "dup_index")
+_SHAPES = {}
+
+def shape_schema(name):
+    """The ShapeSchema of schemas/<name>, compiled once per process."""
+    if name not in _SHAPES:
+        _SHAPES[name] = ShapeSchema(name)
+    return _SHAPES[name]
+
+class ShapeSchema:
+    """A schema whose message rules are the $defs entries with a description: the description is the English message
+    template (%(key)s), the other keywords are its constraint. The other nodes on the way only route ($ref, allOf,
+    if/then/else, properties, items). Accept or reject comes from the whole schema; the messages come from the message
+    rules the instance reaches and fails, each with the rule (if any), the schema pointer and the failing keyword."""
+    def __init__(self, name):
+        from engine import schema
+        self.name, self._schema = name, schema
+        self.doc = schema.load(os.path.join(SCHEMA_DIR, name))
+        self.root = schema.compile_schema(self.doc)
+        self._subs = {}
+
+    def sub(self, path):
+        """The compiled subschema at path, a tuple of tokens under $defs."""
+        if path not in self._subs:
+            self._subs[path] = self._schema.compile_schema({"$defs": self.doc["$defs"], "$ref": self._schema.pointer(path)})
+        return self._subs[path]
+
+    def node(self, path):
+        n = self.doc
+        for tok in path:
+            n = n[tok]
+        return n
+
+    def problems(self, inst, start=None, rule=None, unit_root=None, typed_keys=None, where="", **extra):
+        """Messages for inst ([] when valid); start is the tuple path of the node to begin at (default: the root $ref)."""
+        path = start or tuple(self._schema.parse_pointer(self.doc["$ref"][1:]))
+        whole = self.root if start is None else self.sub(path)
+        errs = whole.validate(inst, unit_root, typed_keys)
+        if any(kw == "depth" for _, kw, _ in errs):
+            inst = _cut(inst, self._schema.MAX_DEPTH - 1)
+            errs = whole.validate(inst, unit_root, typed_keys)
+        if not errs:
+            return []
+        opt = dict(rule=rule, unit_root=unit_root, typed=typed_keys, where=where, extra=extra)
+        out = []
+        self._walk(self.node(path), path, inst, None, out, opt)
+        return out
+
+    def _walk(self, node, path, inst, index, out, opt):
+        if not isinstance(node, dict) or not node:
+            return
+        if "description" in node:
+            errs = self.sub(path).validate(inst, opt["unit_root"], opt["typed"])
+            if errs:
+                out += self._render(node, path, inst, errs, index, opt)
+        elif "$ref" in node:
+            ref = tuple(self._schema.parse_pointer(node["$ref"][1:]))
+            self._walk(self.node(ref), ref, inst, index, out, opt)
+        elif "allOf" in node:
+            for j, sub in enumerate(node["allOf"]):
+                self._walk(sub, path + ("allOf", j), inst, index, out, opt)
+        elif "if" in node:
+            branch = "else" if self.sub(path + ("if",)).validate(inst, opt["unit_root"], opt["typed"]) else "then"
+            if branch in node:
+                self._walk(node[branch], path + (branch,), inst, index, out, opt)
+        elif "properties" in node:
+            if isinstance(inst, dict):
+                for k, sub in node["properties"].items():
+                    if k in inst:
+                        self._walk(sub, path + ("properties", k), inst[k], index, out, opt)
+        elif "items" in node and isinstance(inst, list):
+            for i, x in enumerate(inst):
+                self._walk(node["items"], path + ("items",), x, i, out, opt)
+
+    def _render(self, node, path, inst, errs, index, opt):
+        template = node["description"]
+        tag = " [%s%s%s, keyword %%s]" % ("rule %s, " % opt["rule"] if opt["rule"] else "", self.name,
+                                          self._schema.pointer(path))
+        dup_at = iter(self._duplicates(node, inst)[1])
+        per_error = any("%%(%s)s" % k in template for k in _PER_ERROR_KEYS)
+        out, seen = [], set()
+        for e in (errs if per_error else errs[:1]):
+            epath, kw, msg = e
+            ctx = _MessageContext(self, node, inst, errs, e, index, opt, dup_at if kw == "x-unique-by" else None)
+            text = template % ctx
+            if (epath, text) not in seen:
+                seen.add((epath, text))
+                out.append(text + tag % kw)
+        return out
+
+    def _duplicates(self, node, inst):
+        """(sorted duplicate values, indices of the later duplicates) of the leaf's x-unique-by key."""
+        key = node.get("x-unique-by")
+        if key is None or not isinstance(inst, list):
+            return [], []
+        seen, dups, later = set(), [], []
+        for i, item in enumerate(inst):
+            if isinstance(item, dict) and key in item:
+                c = self._schema.canon(item[key])
+                if c in seen:
+                    later.append(i)
+                    if item[key] not in dups:
+                        dups.append(item[key])
+                seen.add(c)
+        return dups, later
+
+class _MessageContext(dict):
+    """The %(key)s values of one message, computed on first use."""
+    def __init__(self, shape, node, inst, errs, err, index, opt, dup_at):
+        dict.__init__(self, i=index, where=opt["where"], **opt["extra"])
+        self.shape, self.node, self.inst, self.errs, self.err, self.opt, self.dup_at = \
+            shape, node, inst, errs, err, opt, dup_at
+
+    def __missing__(self, key):
+        v = self.inst
+        for tok in self.err[0]:
+            v = v[tok]
+        last = self.err[0][-1] if self.err[0] else ""
+        if key == "value": return _shown(v, str)
+        if key == "repr": return _shown(v, repr)
+        if key == "type": return type(v).__name__
+        if key == "got": return "empty" if v is None or v == "" else type(v).__name__
+        if key == "key": return last
+        if key == "key_ascii": return str(last).encode("ascii", "backslashreplace").decode("ascii")
+        if key == "error": return self.err[2]
+        if key == "extra": return str(sorted({e[0][-1] for e in self.errs if e[0]}))
+        if key == "dup_index": return next(self.dup_at)
+        if key == "dups":
+            dups = self.shape._duplicates(self.node, self.inst)[0]
+            ints = all(isinstance(x, int) and not isinstance(x, bool) for x in dups)
+            return str(sorted(dups)) if ints else "[%s]" % ", ".join(json.dumps(x, ensure_ascii=False) for x in dups)
+        if key == "path_reason":
+            why = self.shape._schema.path_problem(v)
+            if why: return why
+            return "not found" if not os.path.isfile(os.path.join(self.opt["unit_root"], v)) else self.err[2]
+        raise KeyError(key)
+
+def _shown(v, show):
+    """show(v), or a stand-in when v nests deeper than the Python recursion limit allows."""
+    try:
+        return show(v)
+    except RecursionError:
+        return "[...]" if isinstance(v, list) else "{...}"
+
+class _Cut(list):
+    """A list or object nested past engine.schema.MAX_DEPTH, which canon() refuses, while the legacy checks compared
+    such values with == and printed them with repr. A _Cut holds one NaN of its own, so it equals no other value
+    (NaN != NaN, and strict JSON has no NaN), and it prints as the value it stands for."""
+    def __init__(self, original):
+        list.__init__(self, [float("nan")])
+        self.original = original
+
+    def __repr__(self):
+        return _shown(self.original, repr)
+
+def _cut(doc, depth):
+    """A copy of doc with each list or object `depth` levels down replaced by a _Cut. Iterative, because doc may nest
+    deeper than the recursion limit allows."""
+    top = [None]
+    todo = [(top, 0, doc, 0)]
+    while todo:
+        parent, key, v, level = todo.pop()
+        if isinstance(v, (list, dict)) and level >= depth:
+            parent[key] = _Cut(v)
+        elif isinstance(v, list):
+            parent[key] = part = [None] * len(v)
+            todo += [(part, i, x, level + 1) for i, x in enumerate(v)]
+        elif isinstance(v, dict):
+            parent[key] = part = dict.fromkeys(v)
+            todo += [(part, k, x, level + 1) for k, x in v.items()]
+        else:
+            parent[key] = v
+    return top[0]
+
 # skill-creator quick_validate loads with yaml.safe_load and rejects these when not str. skills-ref (strictyaml)
 # reads every scalar as a string, so other fields (metadata values included) are not forced to be quoted.
 PYYAML_STR_FIELDS = ("name", "description", "compatibility")
 
 def _field_type_errors(meta, typed):
+    """Spec types per schemas/skill-frontmatter.schema.json (rule field-types). typed: keys whose unquoted value
+    YAML 1.1 (PyYAML) would load as bool/null/number/date (yaml_typed_keys)."""
+    return shape_schema("skill-frontmatter.schema.json").problems(meta, rule="field-types", typed_keys=typed)
+
+def _legacy_field_type_errors(meta, typed):
     """Spec types: name/description/license/compatibility/allowed-tools are strings, metadata maps string->string.
     typed: keys whose unquoted value YAML 1.1 (PyYAML) would load as bool/null/number/date (yaml_typed_keys)."""
     e = []
@@ -1426,6 +1609,26 @@ def _assertion_list(v):
     return True
 
 def evals_errors(path, name):
+    """Validate evals/evals.json against schemas/evals.schema.json (rule evals-valid). Returns (n_cases, errors).
+    skill_name must equal name (the NFKC frontmatter name), a cross-file check kept here. JSON is read strictly
+    (engine.schema.loads), as the rule's json: selector reads it."""
+    fp = os.path.join(path, "evals", "evals.json")
+    if not os.path.isfile(fp):
+        return 0, ["missing evals/evals.json"]
+    raw, err = read_text(fp)
+    if err: return 0, [err]
+    from engine import schema
+    try:
+        data = schema.loads(raw)
+    except schema.JsonError as ex:
+        return 0, ["invalid JSON: %s" % ex]
+    e = shape_schema("evals.schema.json").problems(data, rule="evals-valid", unit_root=path)
+    if isinstance(data, dict) and data.get("skill_name") != name:
+        e.insert(0, "skill_name %r must equal frontmatter name %r" % (data.get("skill_name"), name))
+    items = data.get("evals") if isinstance(data, dict) else None
+    return (len(items) if isinstance(items, list) and items else 0), e
+
+def _legacy_evals_errors(path, name):
     """Validate evals/evals.json against the skill-creator / agentskills.io format. Returns (n_cases, errors).
     Format: {"skill_name": <frontmatter name>, "evals": [{"id": int (unique), "prompt": str, "expected_output": str,
     "files": [str] (optional, relative to skill root, must exist), "assertions"|"expectations": [str|object] (optional),
@@ -1498,8 +1701,9 @@ def check_skill(path):
           "그 밖의 값은 metadata: 아래 문자열로 두세요." % extra, must=True)
     te = _field_type_errors(meta, typed)
     r.add("field-types", "structure", not te, "field types per spec" + (": %s" % te if te else ""),
-          "spec 타입에 맞추세요: name·description·license·compatibility·allowed-tools는 문자열(allowed-tools는 공백 구분), "
-          "metadata는 '키: 문자열' 매핑. name·description·compatibility가 숫자·날짜·yes/no처럼 보이면 따옴표로 감싸세요.", must=True)
+          "Use the spec types: name, description, license, compatibility and allowed-tools are strings (allowed-tools "
+          "space-separated), metadata is a 'key: string' mapping. Quote a name, description or compatibility that "
+          "looks like a number, a date or yes/no.", must=True)
     name, desc = _common_name(r, meta, path)
     bad_words = [w for w in RESERVED_NAME_WORDS if w in name.lower()]
     r.add("name-reserved", "single-task", not bad_words,
@@ -1617,8 +1821,8 @@ def check_skill(path):
         r.na("version-format", "structure", "no metadata.version (optional)", must=True)
     n, ee = evals_errors(path, name)
     r.add("evals-valid", "evaluation", not ee, "evals/evals.json format" + (": %s" % ee if ee else " valid"),
-          "evals/evals.json을 {\"skill_name\": \"%s\", \"evals\": [{\"id\": 1, \"prompt\": ..., \"expected_output\": ..., "
-          "\"files\"(선택), \"assertions\"(선택)}]} 형식으로 쓰세요." % name, must=True)
+          "Write evals/evals.json as {\"skill_name\": \"<frontmatter name>\", \"evals\": [{\"id\": 1, \"prompt\": ..., "
+          "\"expected_output\": ..., \"files\" (optional), \"assertions\" (optional)}]}.", must=True)
     r.add("evals-count", "evaluation", n >= MIN_EVALS, "%d eval cases (need >= %d)" % (n, MIN_EVALS),
           "실제 사용자 요청처럼 쓴 테스트 케이스를 %d개 이상 두세요(경계 상황 1개 이상 포함)." % MIN_EVALS, must=True)
     add_english_checks(r, path)
@@ -1638,6 +1842,10 @@ def _strs(v):
     return [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
 
 def scenario_errors(s):
+    """Shape errors of one scenario per schemas/scenario.schema.json."""
+    return shape_schema("scenario.schema.json").problems(s)
+
+def _legacy_scenario_errors(s):
     """Shape errors of one scenario. Required: id, turns, expected_tools, must_include, expected_outcome."""
     if not isinstance(s, dict):
         return ["scenario must be a JSON object, got %s" % type(s).__name__]
@@ -1741,7 +1949,25 @@ def check(path, bundle=None):
         r = Report(path, "unknown")
         r.add("frontmatter", "structure", False, "no SKILL.md or AGENT.md", "폴더에 SKILL.md 또는 AGENT.md를 넣으세요.")
     (rule_runner.default_bundle() if bundle is None else bundle).apply(r)
+    _merge_shape_rows(r)
     return r
+
+def _merge_shape_rows(r):
+    """A bundle row for an id in SHAPE_ROWS keeps its place, status and fix, takes the reason of the check_skill row,
+    which is dropped, so the id appears once, and is must when either row is. When the two disagree on pass, the row
+    fails."""
+    for rid in SHAPE_ROWS:
+        rows = [c for c in r.checks if c["id"] == rid]
+        if len(rows) != 2:
+            continue
+        built, ruled = rows
+        if built["passed"] is not ruled["passed"]:
+            ruled.update(status="fail", passed=False, must=True, fix=ruled["fix"] or built["fix"],
+                         reason="%s (%s, failing closed: the rule says %s: %s)" % (
+                             built["reason"], DISAGREE, ruled["status"], ruled["reason"]))
+        else:
+            ruled.update(reason=built["reason"], must=ruled["must"] or built["must"])
+        r.checks = [c for c in r.checks if c is not built]
 
 def find_units(root):
     """Folders holding SKILL.md/AGENT.md. Symlinked folders are followed (skills are often installed as links,
@@ -1759,6 +1985,23 @@ def find_units(root):
 
 # ---------- transcript grading (agent side; slated for split-out with the agent checks) ----------
 def load_transcript(path):
+    """Parse a transcript and validate it against schemas/transcript.schema.json. Returns (run, errors); run is None
+    when errors. run = {"scenario", "final", "workspace", "calls": [{"tool", "input", "result"}], "results": [str]}"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            t = json.load(f)
+    except (OSError, ValueError) as e:
+        return None, ["cannot load transcript JSON: %s" % e]
+    e = shape_schema("transcript.schema.json").problems(t)
+    if e:
+        return None, e
+    calls = [{"tool": c, "input": None, "result": None} if isinstance(c, str) else
+             {"tool": c["tool"], "input": c.get("input"), "result": c.get("result")} for c in t["tool_calls"]]
+    results = [c["result"] for c in calls if c["result"]] + list(t.get("tool_results", []))
+    return {"scenario": t["scenario"], "final": t["final"], "workspace": t.get("workspace"),
+            "calls": calls, "results": results}, []
+
+def _legacy_load_transcript(path):
     """Parse + validate a transcript. Returns (run, errors); run is None when errors.
     Format: {"scenario": str, "final": str, "workspace": str (optional),
              "tool_calls": [ "<tool>" | {"tool": str, "input": str|object (optional), "result": str (optional)} ],

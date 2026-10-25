@@ -1,0 +1,18 @@
+{
+  "$comment": "Evaluation thresholds that skill_eval.py reads at import (the module constants keep their names, types and values). Each value: value, type (the Python type: a JSON list becomes a tuple when type is tuple), source (skill-creator, agentskills.io, or house) and note.",
+  "policy": "eval-policy",
+  "version": "1.0.0",
+  "values": {
+    "LAYERS": {"value": ["static", "llm", "human"], "type": "tuple", "source": "house", "note": "Grading layers of an assertion; no source note in skill_eval.py. Same values as eva.py EVAL_LAYERS and the evals.schema.json layer enum."},
+    "BASELINES": {"value": {"none": "without_skill", "old": "old_skill"}, "type": "dict", "source": "skill-creator", "note": "skill-creator configuration names."},
+    "PRIMARY": {"value": "with_skill", "type": "str", "source": "house", "note": "Name of the configuration with the skill; no source note in skill_eval.py."},
+    "DEFAULT_RUNS": {"value": 3, "type": "int", "source": "house", "note": "Runs per case and configuration; no source note in skill_eval.py."},
+    "TRIGGER_THRESHOLD": {"value": 0.5, "type": "float", "source": "skill-creator, agentskills.io", "note": "skill-creator run_eval.py --trigger-threshold default; agentskills.io: 0.5 is a reasonable default."},
+    "TRIGGER_POS": {"value": 10, "type": "int", "source": "house", "note": "House rule (H): exactly 10 should-trigger queries; skill-creator and agentskills.io say 8-10 each. trigger-evals.schema.json x-count-where uses the same bound."},
+    "TRIGGER_NEG": {"value": 10, "type": "int", "source": "house", "note": "House rule (H): exactly 10 should-not queries; skill-creator and agentskills.io say 8-10 each. trigger-evals.schema.json x-count-where uses the same bound."},
+    "MAX_AUTO_ITERATIONS": {"value": 5, "type": "int", "source": "skill-creator, agentskills.io", "note": "skill-creator run_loop --max-iterations 5; agentskills.io: five iterations."},
+    "AGREEMENT_MIN": {"value": 0.8, "type": "float", "source": "house", "note": "H: grader-vs-human agreement below this is a gate problem."},
+    "REGRESSION_TOLERANCE": {"value": 0.0, "type": "float", "source": "house", "note": "H: any drop of mean pass_rate counts as regression."},
+    "HIGH_VARIANCE_STDDEV": {"value": 0.3, "type": "float", "source": "house", "note": "H: per-eval pass_rate stddev that gets a flaky note."}
+  }
+}

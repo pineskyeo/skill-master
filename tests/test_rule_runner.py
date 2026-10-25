@@ -678,15 +678,19 @@ class TestNonDefaultBundle(Base):
         named.apply(r)
         self.assertEqual(r.verdict, "REVIEW")
 
-    def test_the_default_bundle_adds_nothing(self):
+    def test_the_default_bundle_is_cached_and_an_empty_default_folder_adds_nothing(self):
         b = RR.default_bundle()
         self.assertTrue(b.default)
-        self.assertEqual(b.rules, [])
+        self.assertIs(RR.default_bundle(), b)
+        troot = os.path.join(self.tmp, "root")
+        os.makedirs(os.path.join(troot, "rules"))
+        empty = RR.load_bundle(root=troot)
+        self.assertTrue(empty.default)
+        self.assertEqual(empty.rules, [])
         r = eva.Report(self.unit(), "skill")
         r.add("x", "structure", True, "ok")
-        b.apply(r)
+        empty.apply(r)
         self.assertEqual((r.verdict, len(r.checks)), ("PASS", 1))
-        self.assertIs(RR.default_bundle(), b)
 
     def test_eva_check_runs_the_given_bundle(self):
         b = RR.load_bundle(SELFTEST)

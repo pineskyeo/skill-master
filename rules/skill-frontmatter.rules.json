@@ -1,0 +1,23 @@
+{
+  "ruleset": "skill-frontmatter",
+  "version": "1.0.0",
+  "rules": [
+    {
+      "id": "field-types",
+      "applies_to": ["skill"],
+      "category": "structure",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "eva.py _field_type_errors: agentskills.io specification field types and skill-creator quick_validate (PyYAML) quoting, plus the Claude Code host fields argument-hint and disable-model-invocation (sources as cited in eva.py; no verified date in the repository)"},
+      "check": {
+        "op": "any",
+        "of": [
+          {"op": "equals", "left": {"sel": "markdown:SKILL.md"}, "right": {"sel": "text:SKILL.md"}},
+          {"op": "schema", "sel": "frontmatter:", "schema": "skill-frontmatter.schema.json"}
+        ]
+      },
+      "message": "SKILL.md frontmatter field types follow schemas/skill-frontmatter.schema.json; a SKILL.md without a parsable frontmatter block passes here and fails the frontmatter row ({errors})",
+      "fix": "Use the spec types: name, description, license, compatibility and allowed-tools are strings (allowed-tools space-separated), metadata is a 'key: string' mapping. Quote a name, description or compatibility that looks like a number, a date or yes/no."
+    }
+  ]
+}

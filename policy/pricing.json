@@ -1,0 +1,33 @@
+{
+  "$comment": "Cost model that skill_eval.py reads at import. PRICES rows are USD per million tokens (input, output), each with its source and the date it was read. No Codex or OpenAI price is verified from a primary source: see codex. Costs are API-equivalent (usage x API prices), not spend.",
+  "policy": "pricing",
+  "version": "1.0.0",
+  "codex": {
+    "verified": false,
+    "prices": null,
+    "note": "UNVERIFIED: Codex/OpenAI prices are not listed because they are not verified from a primary source; pass --price codex=IN,OUT. The Codex grader price assumption (skill_eval.py CODEX_GRADER_ASSUMED_PRICE) is the most expensive PRICES row by input + output, computed in code, and is also unverified: it is not shown to be an upper bound of the real price. Override with --price grader=IN,OUT."
+  },
+  "values": {
+    "PRICES": {
+      "type": "dict",
+      "item_type": "price",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "Base input / output columns.",
+      "value": {
+        "claude-fable-5-1": {"input": 10.0, "output": 50.0, "source": "https://platform.claude.com/docs/en/about-claude/pricing", "read_on": "2026-10-15", "note": "base input / output columns"},
+        "claude-opus-5-5": {"input": 4.0, "output": 20.0, "source": "https://platform.claude.com/docs/en/about-claude/pricing", "read_on": "2026-10-15", "note": "base input / output columns"},
+        "claude-sonnet-5-5": {"input": 2.0, "output": 10.0, "source": "https://platform.claude.com/docs/en/about-claude/pricing", "read_on": "2026-10-15", "note": "base input / output columns"},
+        "claude-haiku-5-5": {"input": 0.10, "output": 0.50, "source": "https://platform.claude.com/docs/en/about-claude/pricing", "read_on": "2026-10-15", "note": "Haiku 5.5 row for prompts up to 100,000 tokens"}
+      }
+    },
+    "DEFAULT_TOKENS": {
+      "value": {"exec": [60000, 4000], "trigger": [25000, 500], "grader": [12000, 800], "pairwise": [16000, 800], "builder": [80000, 8000]},
+      "type": "dict",
+      "item_type": "tuple",
+      "source": "house",
+      "note": "Assumed tokens per call (input, output). Assumptions, not measurements: replace with --tokens after a pilot."
+    },
+    "CLAUDE_CAP_HEADROOM": {"value": 0.5, "type": "float", "source": "house", "note": "H: Claude --max-budget-usd gets only this share of the remaining budget, because how far the CLI can overshoot its cap is not documented."},
+    "WORST_CASE_FACTOR": {"value": 3.0, "type": "float", "source": "house", "note": "H: the worst-case bound of a call is assumed tokens x this factor x price. Codex has no per-call cap, so its budget is a SOFT LIMIT: a call starts only when this bound fits the remaining budget, and every Codex grader call is charged at least this bound."}
+  }
+}

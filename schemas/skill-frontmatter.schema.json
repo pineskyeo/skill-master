@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SKILL.md frontmatter field types",
+  "description": "Spec types of the SKILL.md frontmatter: name, description, license, compatibility and allowed-tools are non-empty strings, metadata maps string keys to string values, name, description and compatibility are not scalars that PyYAML would type, plus the Claude Code host fields argument-hint and disable-model-invocation. The instance is the parsed frontmatter; x-yaml-string reads the typed-key set of the strict YAML reader. A $defs entry with a description is a message rule. Fix: give each field the spec type (allowed-tools is one space-separated string, metadata is 'key: string' pairs) and quote a name, description or compatibility that looks like a number, a date or yes/no.",
+  "$comment": "source: agentskills.io specification field types and skill-creator quick_validate (PyYAML), as cited in the eva.py comments at PYYAML_STR_FIELDS and HOST_SKILL_FIELDS (URLs not re-verified in A2); house: argument-hint and disable-model-invocation typing; severity: fail (field-types row, must); protects: claude, codex, opencode, hermes.",
+  "$ref": "#/$defs/frontmatter",
+  "$defs": {
+    "nonblank": {"type": "string", "pattern": "\\S"},
+    "frontmatter": {"allOf": [
+      {"$ref": "#/$defs/name"},
+      {"$ref": "#/$defs/name-typed"},
+      {"$ref": "#/$defs/description"},
+      {"$ref": "#/$defs/description-typed"},
+      {"$ref": "#/$defs/license"},
+      {"$ref": "#/$defs/compatibility"},
+      {"$ref": "#/$defs/compatibility-typed"},
+      {"$ref": "#/$defs/allowed-tools"},
+      {"$ref": "#/$defs/metadata"},
+      {"$ref": "#/$defs/argument-hint"},
+      {"$ref": "#/$defs/argument-hint-typed"},
+      {"$ref": "#/$defs/disable-model-invocation"}
+    ]},
+    "name": {"description": "name: non-empty string required, got %(got)s", "properties": {"name": {"$ref": "#/$defs/nonblank"}}},
+    "name-typed": {
+      "description": "name: PyYAML (skill-creator quick_validate) loads '%(value)s' as non-string; quote it",
+      "if": {"properties": {"name": {"$ref": "#/$defs/nonblank"}}},
+      "then": {"properties": {"name": {"x-yaml-string": true}}}
+    },
+    "description": {"description": "description: non-empty string required, got %(got)s", "properties": {"description": {"$ref": "#/$defs/nonblank"}}},
+    "description-typed": {
+      "description": "description: PyYAML (skill-creator quick_validate) loads '%(value)s' as non-string; quote it",
+      "if": {"properties": {"description": {"$ref": "#/$defs/nonblank"}}},
+      "then": {"properties": {"description": {"x-yaml-string": true}}}
+    },
+    "license": {"description": "license: non-empty string required, got %(got)s", "properties": {"license": {"$ref": "#/$defs/nonblank"}}},
+    "compatibility": {"description": "compatibility: non-empty string required, got %(got)s", "properties": {"compatibility": {"$ref": "#/$defs/nonblank"}}},
+    "compatibility-typed": {
+      "description": "compatibility: PyYAML (skill-creator quick_validate) loads '%(value)s' as non-string; quote it",
+      "if": {"properties": {"compatibility": {"$ref": "#/$defs/nonblank"}}},
+      "then": {"properties": {"compatibility": {"x-yaml-string": true}}}
+    },
+    "allowed-tools": {"description": "allowed-tools: non-empty string required, got %(got)s", "properties": {"allowed-tools": {"$ref": "#/$defs/nonblank"}}},
+    "metadata": {"if": {"$ref": "#/$defs/metadata-object"}, "then": {"$ref": "#/$defs/metadata-values"}, "else": {"$ref": "#/$defs/metadata-object"}},
+    "metadata-object": {"description": "metadata: mapping of string keys to string values required, got %(got)s", "properties": {"metadata": {"type": "object"}}},
+    "metadata-values": {"description": "metadata.%(key)s: string value required, got %(type)s", "properties": {"metadata": {"additionalProperties": {"type": "string"}}}},
+    "argument-hint": {"description": "argument-hint: non-empty string required", "properties": {"argument-hint": {"$ref": "#/$defs/nonblank"}}},
+    "argument-hint-typed": {
+      "description": "argument-hint: YAML loads unquoted '%(value)s' as non-string; quote it",
+      "if": {"properties": {"argument-hint": {"$ref": "#/$defs/nonblank"}}},
+      "then": {"properties": {"argument-hint": {"x-yaml-string": true}}}
+    },
+    "disable-model-invocation": {
+      "description": "disable-model-invocation: unquoted boolean true/false required, got %(repr)s",
+      "properties": {"disable-model-invocation": {"type": "string", "pattern": "^(?:[Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee])\\Z", "not": {"x-yaml-string": true}}}
+    }
+  }
+}

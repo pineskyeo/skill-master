@@ -1,0 +1,23 @@
+{
+  "ruleset": "skill-evals",
+  "version": "1.0.0",
+  "rules": [
+    {
+      "id": "evals-valid",
+      "applies_to": ["skill"],
+      "category": "evaluation",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "eva.py evals_errors: the skill-creator references/schemas.md and agentskills.io evaluating-skills evals.json format with the house layer, name and assertion-object extensions (sources as cited in eva.py; no verified date in the repository)"},
+      "check": {
+        "op": "all",
+        "of": [
+          {"op": "schema", "sel": "json:evals/evals.json#", "schema": "evals.schema.json"},
+          {"op": "equals", "left": {"sel": "json:evals/evals.json#/skill_name"}, "right": {"sel": "frontmatter:#/name", "normalize": ["strip", "nfkc"]}}
+        ]
+      },
+      "message": "evals/evals.json follows schemas/evals.schema.json and its skill_name equals the frontmatter name ({errors})",
+      "fix": "Write evals/evals.json as {\"skill_name\": \"<frontmatter name>\", \"evals\": [{\"id\": 1, \"prompt\": ..., \"expected_output\": ..., \"files\" (optional), \"assertions\" (optional)}]}."
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "$comment": "Model ids, effort levels and engine names that skill_eval.py reads at import (the module constants keep their names, types and values).",
+  "policy": "models",
+  "version": "1.0.0",
+  "values": {
+    "DEFAULT_EXECUTOR_MODELS": {"value": {"claude": "claude-opus-5-5", "codex": null}, "type": "dict", "source": "house", "note": "codex: the CLI default model (model unknown)."},
+    "DEFAULT_GRADER_MODEL": {"value": "claude-sonnet-5-5", "type": "str", "source": "house", "note": "No source note in skill_eval.py."},
+    "DEFAULT_BUILDER_MODEL": {"value": "claude-opus-5-5", "type": "str", "source": "house", "note": "No source note in skill_eval.py."},
+    "CLAUDE_EFFORTS": {"value": ["low", "medium", "high", "xhigh", "max"], "type": "tuple", "source": "Claude Code changelog (~/.claude/cache/changelog.md)", "note": "Claude --effort CLI flag; low/medium/high, xhigh and max are named in the Claude Code changelog: Available via /effort, --effort."},
+    "CODEX_EFFORTS": {"value": ["none", "minimal", "low", "medium", "high", "xhigh"], "type": "tuple", "source": "Codex plugin runtime (~/.claude/plugins/cache/openai-codex/codex/1.0.4/skills/codex-cli-runtime/SKILL.md)", "note": "Values accepted by the Codex plugin runtime."},
+    "CODEX_EFFORT_CONFIG": {"value": "model_reasoning_effort=%s", "type": "str", "source": "house", "verified": false, "note": "UNVERIFIED: the codex exec spelling -c model_reasoning_effort=<level> is not verified from a primary source in this repo; check codex exec --help or the Codex config docs before a live run."},
+    "GRADER_ENGINES": {"value": ["claude", "codex"], "type": "tuple", "source": "house", "note": "Engines that can grade; no source note in skill_eval.py."}
+  }
+}

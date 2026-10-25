@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Skill trigger eval set (evals/trigger_evals.json)",
+  "description": "The skill-creator eval-set format [{\"query\": str, \"should_trigger\": bool}] with the house rule of exactly 10 should-trigger and 10 should-not queries (skill_eval.py TRIGGER_POS, TRIGGER_NEG). A $defs entry with a description is a message rule. Fix: write 10 distinct queries that should load the skill and 10 that should not, each {\"query\": \"...\", \"should_trigger\": true|false}.",
+  "$comment": "source: skill-creator eval-set format (skill_eval.py load_triggers docstring); house: exactly 10 + 10 (skill-creator and agentskills.io say 8-10 each); severity: fail (a skill_eval.py validate problem; no bundle rule, brief D2); protects: claude, codex, opencode, hermes.",
+  "$ref": "#/$defs/doc",
+  "$defs": {
+    "doc": {
+      "if": {"$ref": "#/$defs/doc-list"},
+      "then": {"allOf": [{"items": {"$ref": "#/$defs/trigger-item"}}, {"$ref": "#/$defs/unique-query"}, {"$ref": "#/$defs/trigger-counts"}]},
+      "else": {"$ref": "#/$defs/doc-list"}
+    },
+    "doc-list": {"description": "trigger_evals.json: top level must be a list", "type": "array"},
+    "trigger-item": {
+      "description": "trigger_evals.json[%(i)s]: {\"query\": str, \"should_trigger\": bool} required",
+      "type": "object",
+      "required": ["query", "should_trigger"],
+      "properties": {"query": {"type": "string", "pattern": "\\S"}, "should_trigger": {"type": "boolean"}}
+    },
+    "unique-query": {"description": "trigger_evals.json[%(dup_index)s]: duplicate query", "x-unique-by": "query"},
+    "trigger-counts": {
+      "description": "trigger_evals.json: need 10 should-trigger + 10 should-not, got %(pos)s + %(neg)s",
+      "allOf": [
+        {"x-count-where": {"where": {"$ref": "#/$defs/trigger-item", "properties": {"should_trigger": {"const": true}}}, "min": 10, "max": 10}},
+        {"x-count-where": {"where": {"$ref": "#/$defs/trigger-item", "properties": {"should_trigger": {"const": false}}}, "min": 10, "max": 10}}
+      ]
+    }
+  }
+}

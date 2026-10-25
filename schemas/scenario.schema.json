@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Agent scenario (scenarios/*.json)",
+  "description": "One agent scenario: id, turns, expected_tools, must_include, expected_outcome, and an optional success_criteria. A $defs entry with a description is a message rule. Fix: write each scenario as a JSON object with id (string), turns ([{\"user\": ...}]), expected_tools and must_include (lists of strings), and expected_outcome.",
+  "$comment": "source: house (eva.py scenario_errors, scenario v1); severity: fail (the scenarios-valid row of check_agent, must; no bundle rule, brief D2); protects: claude, codex, opencode, hermes.",
+  "$ref": "#/$defs/scenario",
+  "$defs": {
+    "nonblank": {"type": "string", "pattern": "\\S"},
+    "nonblank-list": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/nonblank"}},
+    "text-or-list": {"anyOf": [{"$ref": "#/$defs/nonblank"}, {"$ref": "#/$defs/nonblank-list"}]},
+    "scenario": {
+      "if": {"$ref": "#/$defs/scenario-object"},
+      "then": {"allOf": [
+        {"$ref": "#/$defs/id"},
+        {"$ref": "#/$defs/turns"},
+        {"$ref": "#/$defs/expected-tools"},
+        {"$ref": "#/$defs/must-include"},
+        {"$ref": "#/$defs/expected-outcome"},
+        {"$ref": "#/$defs/success-criteria"}
+      ]},
+      "else": {"$ref": "#/$defs/scenario-object"}
+    },
+    "scenario-object": {"description": "scenario must be a JSON object, got %(type)s", "type": "object"},
+    "id": {"description": "id: non-empty string required", "required": ["id"], "properties": {"id": {"$ref": "#/$defs/nonblank"}}},
+    "turns": {
+      "description": "turns: non-empty list of {\"user\": \"<text>\"} required",
+      "required": ["turns"],
+      "properties": {"turns": {"type": "array", "minItems": 1, "items": {"type": "object", "required": ["user"], "properties": {"user": {"$ref": "#/$defs/nonblank"}}}}}
+    },
+    "expected-tools": {"description": "expected_tools: non-empty list of strings required", "required": ["expected_tools"], "properties": {"expected_tools": {"$ref": "#/$defs/nonblank-list"}}},
+    "must-include": {"description": "must_include: non-empty list of strings required", "required": ["must_include"], "properties": {"must_include": {"$ref": "#/$defs/nonblank-list"}}},
+    "expected-outcome": {"description": "expected_outcome: non-empty string or list of strings required", "required": ["expected_outcome"], "properties": {"expected_outcome": {"$ref": "#/$defs/text-or-list"}}},
+    "success-criteria": {"description": "success_criteria: non-empty string or list of strings required", "properties": {"success_criteria": {"$ref": "#/$defs/text-or-list"}}}
+  }
+}

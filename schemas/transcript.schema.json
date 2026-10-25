@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Agent run transcript (eva.py check --transcript)",
+  "description": "{\"scenario\": str, \"final\": str, \"workspace\": str (optional), \"tool_calls\": [\"<tool>\" | {\"tool\": str, \"input\": any (optional), \"result\": str (optional)}], \"tool_results\": [str] (optional)}. A $defs entry with a description is a message rule. Fix: write the transcript as {\"scenario\": str, \"tool_calls\": [...], \"final\": str} (see LOOP.md).",
+  "$comment": "source: house (eva.py load_transcript, transcript v1); severity: fail (the transcript-valid row of grade_transcript, must; no bundle rule, brief D2: a transcript is not a unit); protects: claude, codex, opencode, hermes.",
+  "$ref": "#/$defs/transcript",
+  "$defs": {
+    "nonblank": {"type": "string", "pattern": "\\S"},
+    "transcript": {
+      "if": {"$ref": "#/$defs/transcript-object"},
+      "then": {"allOf": [
+        {"$ref": "#/$defs/scenario"},
+        {"$ref": "#/$defs/final"},
+        {"$ref": "#/$defs/workspace"},
+        {"$ref": "#/$defs/tool-calls"},
+        {"$ref": "#/$defs/tool-results"}
+      ]},
+      "else": {"$ref": "#/$defs/transcript-object"}
+    },
+    "transcript-object": {"description": "transcript must be a JSON object, got %(type)s", "type": "object"},
+    "scenario": {"description": "scenario: non-empty string required", "required": ["scenario"], "properties": {"scenario": {"$ref": "#/$defs/nonblank"}}},
+    "final": {"description": "final: string required", "required": ["final"], "properties": {"final": {"type": "string"}}},
+    "workspace": {"description": "workspace: non-empty string required", "properties": {"workspace": {"$ref": "#/$defs/nonblank"}}},
+    "tool-calls": {
+      "if": {"$ref": "#/$defs/tool-calls-list"},
+      "then": {"properties": {"tool_calls": {"items": {"$ref": "#/$defs/tool-call"}}}},
+      "else": {"$ref": "#/$defs/tool-calls-list"}
+    },
+    "tool-calls-list": {"description": "tool_calls: list required", "required": ["tool_calls"], "properties": {"tool_calls": {"type": "array"}}},
+    "tool-call": {
+      "if": {"$ref": "#/$defs/tool-call-shape"},
+      "then": {"if": {"type": "object"}, "then": {"allOf": [{"$ref": "#/$defs/tool-call-result"}, {"$ref": "#/$defs/tool-call-fields"}]}},
+      "else": {"$ref": "#/$defs/tool-call-shape"}
+    },
+    "tool-call-shape": {
+      "description": "tool_calls[%(i)s]: tool name string or {\"tool\": str, \"input\", \"result\"} object required",
+      "anyOf": [{"$ref": "#/$defs/nonblank"}, {"type": "object", "required": ["tool"], "properties": {"tool": {"$ref": "#/$defs/nonblank"}}}]
+    },
+    "tool-call-result": {"description": "tool_calls[%(i)s].result: string required", "properties": {"result": {"type": "string"}}},
+    "tool-call-fields": {
+      "description": "tool_calls[%(i)s]: unknown fields %(extra)s",
+      "properties": {"tool": true, "input": true, "result": true},
+      "additionalProperties": {"not": {}}
+    },
+    "tool-results": {"description": "tool_results: list of strings required", "properties": {"tool_results": {"type": "array", "items": {"type": "string"}}}}
+  }
+}

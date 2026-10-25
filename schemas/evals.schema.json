@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Skill eval set (evals/evals.json)",
+  "description": "The skill-creator / agentskills.io evals.json format with the house extensions (layer, name, assertion objects). The root is the evals-valid rule's document shape; #/$defs/check is the static check object that skill_eval.py load_eval_set validates. A $defs entry with a description is a message rule: its description is the English message template (%(name)s keys) and its other keywords are the constraint. Fix: write evals/evals.json as {\"skill_name\": \"<frontmatter name>\", \"evals\": [{\"id\": 1, \"prompt\": \"...\", \"expected_output\": \"...\", \"files\": [...] (optional), \"assertions\": [...] (optional)}]}.",
+  "$comment": "source: skill-creator references/schemas.md and agentskills.io evaluating-skills, as cited in eva.py evals_errors and skill_eval.py; house: layer, name, assertion objects, check objects; severity: fail (evals-valid row, must); protects: claude, codex, opencode, hermes. skill_name must equal the frontmatter name: a cross-file equals in rules/skill-evals.rules.json and code in eva.evals_errors.",
+  "$ref": "#/$defs/doc",
+  "$defs": {
+    "nonblank": {"type": "string", "pattern": "\\S"},
+    "rel-path": {"type": "string", "minLength": 1, "not": {"anyOf": [{"pattern": "^/"}, {"pattern": "(?:^|[/\\\\])\\.\\.(?:[/\\\\]|\\Z)"}]}},
+    "no-surrogate": {"pattern": "^[^\\ud800-\\udfff]*\\Z"},
+    "nonneg-int": {"type": "integer", "minimum": 0},
+    "assertion-list": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"anyOf": [
+        {"$ref": "#/$defs/nonblank"},
+        {"type": "object", "required": ["text", "layer"], "properties": {"text": {"$ref": "#/$defs/nonblank"}, "layer": {"enum": ["static", "llm", "human"]}, "check": {"type": "object"}}}
+      ]}
+    },
+    "doc": {"if": {"$ref": "#/$defs/doc-object"}, "then": {"$ref": "#/$defs/doc-evals"}, "else": {"$ref": "#/$defs/doc-object"}},
+    "doc-object": {"description": "top level must be an object {\"skill_name\": ..., \"evals\": [...]}, got %(type)s", "type": "object"},
+    "doc-evals": {
+      "if": {"$ref": "#/$defs/evals-list"},
+      "then": {"properties": {"evals": {"allOf": [{"items": {"$ref": "#/$defs/case"}}, {"$ref": "#/$defs/unique-ids"}]}}},
+      "else": {"$ref": "#/$defs/evals-list"}
+    },
+    "evals-list": {"description": "evals: non-empty list required", "required": ["evals"], "properties": {"evals": {"type": "array", "minItems": 1}}},
+    "case": {
+      "if": {"$ref": "#/$defs/case-object"},
+      "then": {"allOf": [
+        {"$ref": "#/$defs/case-id"},
+        {"$ref": "#/$defs/case-prompt"},
+        {"$ref": "#/$defs/case-expected-output"},
+        {"$ref": "#/$defs/case-files"},
+        {"$ref": "#/$defs/case-assertions"},
+        {"$ref": "#/$defs/case-expectations"},
+        {"$ref": "#/$defs/case-name"},
+        {"$ref": "#/$defs/case-layer"}
+      ]},
+      "else": {"$ref": "#/$defs/case-object"}
+    },
+    "case-object": {"description": "evals[%(i)s]: object required", "type": "object"},
+    "case-id": {"description": "evals[%(i)s].id: integer required", "required": ["id"], "properties": {"id": {"type": "integer"}}},
+    "case-prompt": {"description": "evals[%(i)s].prompt: non-empty string required", "required": ["prompt"], "properties": {"prompt": {"$ref": "#/$defs/nonblank"}}},
+    "case-expected-output": {"description": "evals[%(i)s].expected_output: non-empty string required", "required": ["expected_output"], "properties": {"expected_output": {"$ref": "#/$defs/nonblank"}}},
+    "case-files": {"if": {"$ref": "#/$defs/case-files-list"}, "then": {"$ref": "#/$defs/case-files-exist"}, "else": {"$ref": "#/$defs/case-files-list"}},
+    "case-files-list": {"description": "evals[%(i)s].files: list of paths required", "properties": {"files": {"type": "array", "items": {"$ref": "#/$defs/nonblank"}}}},
+    "case-files-exist": {"description": "evals[%(i)s].files %(value)s: %(path_reason)s", "properties": {"files": {"items": {"x-path-exists": "unit"}}}},
+    "case-assertions": {"description": "evals[%(i)s].assertions: non-empty list of strings or {\"text\", \"layer\"} objects required", "properties": {"assertions": {"$ref": "#/$defs/assertion-list"}}},
+    "case-expectations": {"description": "evals[%(i)s].expectations: non-empty list of strings or {\"text\", \"layer\"} objects required", "properties": {"expectations": {"$ref": "#/$defs/assertion-list"}}},
+    "case-name": {
+      "description": "evals[%(i)s].name: %(repr)s must match ^[a-z0-9][a-z0-9._-]{0,63}$ without '..' (it becomes a directory name)",
+      "properties": {"name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$", "not": {"pattern": "\\.\\."}}}
+    },
+    "case-layer": {"description": "evals[%(i)s].layer: must be one of static|llm|human (lowercase), got %(repr)s", "properties": {"layer": {"enum": ["static", "llm", "human"]}}},
+    "unique-ids": {"description": "duplicate ids %(dups)s", "x-unique-by": "id"},
+
+    "check": {
+      "$comment": "A static assertion check object (skill_eval.py load_eval_set). Not reached from the root: the evals-valid row accepts any check object, as before.",
+      "if": {"$ref": "#/$defs/check-type"},
+      "then": {"allOf": [
+        {"if": {"properties": {"type": {"enum": ["regex", "not_regex"]}}}, "then": {"$ref": "#/$defs/check-regex"}},
+        {"if": {"properties": {"type": {"const": "tool_call"}}}, "then": {"$ref": "#/$defs/check-tool-call"}},
+        {"if": {"properties": {"type": {"const": "skill_triggered"}}}, "then": {"$ref": "#/$defs/skill-triggered-expected"}},
+        {"if": {"properties": {"type": {"const": "csv_rows"}}}, "then": {"$ref": "#/$defs/check-csv-rows"}},
+        {"if": {"properties": {"type": {"enum": ["file_exists", "file_equals_fixture", "csv_cleaned"]}}}, "then": {"$ref": "#/$defs/file-path"}},
+        {"if": {"properties": {"type": {"enum": ["file_equals_fixture", "csv_cleaned"]}}}, "then": {"$ref": "#/$defs/file-fixture"}},
+        {"if": {"properties": {"type": {"const": "csv_cleaned"}}}, "then": {"$ref": "#/$defs/csv-cleaned-data-rows"}}
+      ]},
+      "else": {"$ref": "#/$defs/check-type"}
+    },
+    "check-type": {
+      "description": "%(where)s.check.type: one of regex|not_regex|tool_call|skill_triggered|file_exists|file_equals_fixture|csv_cleaned|csv_rows required",
+      "type": "object",
+      "required": ["type"],
+      "properties": {"type": {"enum": ["regex", "not_regex", "tool_call", "skill_triggered", "file_exists", "file_equals_fixture", "csv_cleaned", "csv_rows"]}}
+    },
+    "check-regex": {"allOf": [{"$ref": "#/$defs/regex-pattern-string"}, {"$ref": "#/$defs/regex-pattern-compiles"}, {"$ref": "#/$defs/regex-target"}]},
+    "regex-pattern-string": {"description": "%(where)s.check.pattern: non-empty string required", "required": ["pattern"], "properties": {"pattern": {"type": "string", "minLength": 1}}},
+    "regex-pattern-compiles": {"description": "%(where)s.check.pattern: %(error)s", "properties": {"pattern": {"x-python-regex": true}}},
+    "regex-target": {"description": "%(where)s.check.target: final|transcript", "properties": {"target": {"enum": ["final", "transcript"]}}},
+    "check-tool-call": {"allOf": [{"$ref": "#/$defs/tool-call-tool"}, {"$ref": "#/$defs/check-min"}, {"$ref": "#/$defs/check-max"}, {"$ref": "#/$defs/tool-call-input-regex"}]},
+    "tool-call-tool": {"description": "%(where)s.check.tool: non-empty string required", "required": ["tool"], "properties": {"tool": {"type": "string", "minLength": 1}}},
+    "check-min": {"description": "%(where)s.check.min: integer >= 0 required", "properties": {"min": {"$ref": "#/$defs/nonneg-int"}}},
+    "check-max": {"description": "%(where)s.check.max: integer >= 0 required", "properties": {"max": {"$ref": "#/$defs/nonneg-int"}}},
+    "tool-call-input-regex": {"description": "%(where)s.check.input_regex: %(error)s", "properties": {"input_regex": {"type": "string", "x-python-regex": true}}},
+    "skill-triggered-expected": {"description": "%(where)s.check.expected: true|false required", "required": ["expected"], "properties": {"expected": {"type": "boolean"}}},
+    "file-path": {"description": "%(where)s.check.path: relative path required", "required": ["path"], "properties": {"path": {"$ref": "#/$defs/rel-path"}}},
+    "file-fixture": {"description": "%(where)s.check.fixture: relative path required", "required": ["fixture"], "properties": {"fixture": {"$ref": "#/$defs/rel-path"}}},
+    "csv-cleaned-data-rows": {"description": "%(where)s.check.data_rows: integer >= 0 required", "required": ["data_rows"], "properties": {"data_rows": {"$ref": "#/$defs/nonneg-int"}}},
+    "check-csv-rows": {"allOf": [
+      {"$ref": "#/$defs/csv-rows-keys"},
+      {"$ref": "#/$defs/file-path"},
+      {"$ref": "#/$defs/csv-rows-path-surrogate"},
+      {"$ref": "#/$defs/csv-rows-rows"},
+      {"$ref": "#/$defs/csv-rows-rows-surrogate"},
+      {"$ref": "#/$defs/check-min"},
+      {"$ref": "#/$defs/check-max"},
+      {"$ref": "#/$defs/csv-rows-rows-required"},
+      {"$ref": "#/$defs/csv-rows-max-default-min"},
+      {"$ref": "#/$defs/csv-rows-max-ge-min"},
+      {"$ref": "#/$defs/csv-rows-min-zero"},
+      {"$ref": "#/$defs/csv-rows-empty-rows-bounds"},
+      {"$ref": "#/$defs/csv-rows-normalize"},
+      {"$ref": "#/$defs/csv-rows-unique"},
+      {"$ref": "#/$defs/csv-rows-asserts-nothing"}
+    ]},
+    "csv-rows-keys": {
+      "description": "%(where)s.check.%(key_ascii)s: not a csv_rows key (allowed: type, path, rows, min, max, normalize, unique)",
+      "properties": {"type": true, "path": true, "rows": true, "min": true, "max": true, "normalize": true, "unique": true},
+      "additionalProperties": {"not": {}}
+    },
+    "csv-rows-path-surrogate": {
+      "description": "%(where)s.check.path: lone surrogate (U+D800..U+DFFF) not allowed",
+      "if": {"$ref": "#/$defs/file-path"},
+      "then": {"properties": {"path": {"$ref": "#/$defs/no-surrogate"}}}
+    },
+    "csv-rows-ok": {
+      "required": ["rows"],
+      "properties": {"rows": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}}},
+      "anyOf": [{"properties": {"rows": {"minItems": 1}}}, {"required": ["unique"], "properties": {"unique": {"const": true}}}]
+    },
+    "csv-rows-rows": {
+      "description": "%(where)s.check.rows: non-empty list of lists of strings required (an empty inner list matches a blank line; an empty outer list is allowed only with unique: true)",
+      "if": {"required": ["rows"]},
+      "then": {"$ref": "#/$defs/csv-rows-ok"}
+    },
+    "csv-rows-rows-surrogate": {
+      "description": "%(where)s.check.rows: lone surrogate (U+D800..U+DFFF) not allowed in a cell",
+      "if": {"$ref": "#/$defs/csv-rows-ok"},
+      "then": {"properties": {"rows": {"items": {"items": {"$ref": "#/$defs/no-surrogate"}}}}}
+    },
+    "csv-rows-rows-required": {
+      "description": "%(where)s.check.rows: required when min/max are given",
+      "if": {"anyOf": [{"required": ["min"]}, {"required": ["max"]}]},
+      "then": {"required": ["rows"]}
+    },
+    "csv-rows-max-default-min": {
+      "description": "%(where)s.check.max: below the default min 1; set min: 0 too (row must be absent)",
+      "if": {"required": ["max"], "not": {"required": ["min"]}, "properties": {"max": {"$ref": "#/$defs/nonneg-int"}}},
+      "then": {"properties": {"max": {"minimum": 1}}}
+    },
+    "csv-rows-max-ge-min": {
+      "description": "%(where)s.check.max: must be >= min",
+      "if": {"required": ["min", "max"], "properties": {"min": {"$ref": "#/$defs/nonneg-int"}, "max": {"$ref": "#/$defs/nonneg-int"}}},
+      "then": {"x-le": ["min", "max"]}
+    },
+    "csv-rows-min-zero": {
+      "description": "%(where)s.check.min: 0 without max asserts nothing about the listed rows; set max or a min >= 1",
+      "if": {"allOf": [{"$ref": "#/$defs/csv-rows-ok"}, {"required": ["min"], "properties": {"rows": {"minItems": 1}, "min": {"type": "integer", "const": 0}}, "not": {"required": ["max"]}}]},
+      "then": {"required": ["max"]}
+    },
+    "csv-rows-empty-rows-bounds": {
+      "description": "%(where)s.check.rows: min/max need a non-empty rows list (an empty list checks only unique)",
+      "if": {"allOf": [{"$ref": "#/$defs/csv-rows-ok"}, {"properties": {"rows": {"maxItems": 0}}}]},
+      "then": {"not": {"anyOf": [{"required": ["min"]}, {"required": ["max"]}]}}
+    },
+    "csv-rows-normalize": {"description": "%(where)s.check.normalize: none|strip", "properties": {"normalize": {"enum": ["none", "strip"]}}},
+    "csv-rows-unique": {"description": "%(where)s.check.unique: true|false required", "properties": {"unique": {"type": "boolean"}}},
+    "csv-rows-asserts-nothing": {
+      "description": "%(where)s.check: needs a non-empty rows list or unique: true (otherwise it asserts nothing)",
+      "if": {"not": {"required": ["rows"]}},
+      "then": {"required": ["unique"], "properties": {"unique": {"const": true}}}
+    }
+  }
+}
