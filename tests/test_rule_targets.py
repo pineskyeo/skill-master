@@ -131,6 +131,16 @@ def doc_pins(docs):
     return out
 
 
+# The A4 eva.OPENCODE_PERMISSION_GRANTS (now kept by tests/differential for the legacy bodies) with glob, grep and list
+# granting search (unit B1 D6).
+B1_OPENCODE_GRANTS = {"read": "read", "edit": "write", "glob": "search", "grep": "search", "list": "search", "bash": "shell",
+                      "task": "delegate", "external_directory": None, "webfetch": "web_fetch", "websearch": "web_search",
+                      "lsp": "read", "skill": "skill"}
+# Unit B1 (D7, D9) changes on purpose the agent rows that read AGENT.md v2 fields and the permission reasons.
+B1_AGENT_ROWS = ("agent-frontmatter-v2", "success-measurable", "tools-declared", "tools-subset", "scenarios-present",
+                 "scenarios-valid", "scenarios-expected", "multi-turn-scenario", "parity-permissions-")
+
+
 def target_pins():
     """{tool: {leaf path: (value, legacy source text or None)}}: every target field with the legacy eva.py constant or
     the legacy body line it replaces, so data and oracle cannot drift. Empty values (no derive table, no extra file)
@@ -154,7 +164,7 @@ def target_pins():
         "wrapper.fields.tools.kind": ("tools", 'names = _tool_names(m.get("tools"))'),
         "wrapper.fields.model.kind": ("string", '"%s: model must be a non-empty string"'),
         "wrapper.forbidden": ({}, None), "wrapper.unknown_keys": ("allow", None), "wrapper.extra_files": ([], None),
-        "permissions.compare": ("names", 'have, need = sorted(st["names"]), sorted(tool_keys(tools))'),
+        "permissions.compare": ("tool-classes", None),
         "permissions.derive": ({}, None), "permissions.unrestrictable": ([], None), "permissions.fixed": (None, None)})
     codex = dict(common["codex"], **doc_pins([
         ("https://developers.openai.com/codex/subagents", "Codex custom agents", "2026-10-19", NOTE9),
@@ -201,7 +211,7 @@ def target_pins():
         "permissions.granting": (["allow", "ask"], 'perm[k] != "deny"'), "permissions.derive": ({}, None),
         "permissions.unrestrictable": ([], None), "permissions.complete": (eva.OPENCODE_PERMISSION_KEYS_COMPLETE, None),
         "permissions.fixed": (None, None)})
-    opencode.update({"permissions.grants." + k: (v, None) for k, v in eva.OPENCODE_PERMISSION_GRANTS.items()})
+    opencode.update({"permissions.grants." + k: (v, None) for k, v in B1_OPENCODE_GRANTS.items()})
     hermes = dict(common["hermes"], **doc_pins([
         ("https://hermes-agent.nousresearch.com/docs/user-guide/profiles", "Hermes profiles (SOUL.md, config.yaml)",
          "2026-10-19", NOTE9),
@@ -257,7 +267,7 @@ class TestTargets(Tmp):
         self.assertEqual(t["skill"]["forbidden_chars"], "<>")
         self.assertEqual(t["wrapper"]["required"], ["name", "description"])
         self.assertEqual(list(t["wrapper"]["fields"]), ["tools", "model"])
-        self.assertEqual(t["permissions"]["compare"], "names")
+        self.assertEqual(t["permissions"]["compare"], "tool-classes")
 
     def test_codex_values(self):
         t = self.target("codex")
@@ -281,7 +291,7 @@ class TestTargets(Tmp):
         self.assertEqual(t["skill"]["autoinvoke_key"], eva.OPENCODE_AUTOINVOKE_KEY)
         self.assertEqual(t["wrapper"]["fields"]["mode"]["values"], list(eva.OPENCODE_MODES))
         self.assertEqual(list(t["wrapper"]["fields"]), ["name", "mode", "model", "permission"])
-        self.assertEqual(list(t["permissions"]["grants"].items()), list(eva.OPENCODE_PERMISSION_GRANTS.items()))
+        self.assertEqual(list(t["permissions"]["grants"].items()), list(B1_OPENCODE_GRANTS.items()))
         self.assertEqual(t["permissions"]["actions"], list(eva.PERMISSION_ACTIONS))
         self.assertEqual(t["permissions"]["complete"], eva.OPENCODE_PERMISSION_KEYS_COMPLETE)
         self.assertIs(t["permissions"]["complete"], False)
@@ -309,9 +319,13 @@ class TestTargets(Tmp):
 
     def test_the_vocabulary_constants_equal_eva(self):
         PR = parity()
-        self.assertEqual(PR.CAPABILITY_BY_TOOL, eva.CAPABILITY_BY_TOOL)
-        self.assertEqual(PR.NEUTRAL_TOOLS, eva.NEUTRAL_TOOLS)
-        self.assertEqual(PR.TOOL_ALIASES, eva.TOOL_ALIASES)
+        for mod in (PR, eva):
+            for name in ("CAPABILITY_BY_TOOL", "NEUTRAL_TOOLS", "TOOL_ALIASES", "tool_keys"):
+                self.assertFalse(hasattr(mod, name), (mod.__name__, name))
+        table, neutral = PR.capability_table()
+        self.assertLessEqual(set(table.values()), set(PR.vocabulary()))
+        self.assertEqual(neutral, ("todowrite", "todo_write"))
+        self.assertEqual(set(B1_OPENCODE_GRANTS.values()) - {None}, set(PR.vocabulary()))
 
     def test_rule_protects_follow_the_parity_row_tools(self):
         for rule in RR.default_bundle().rules:
@@ -617,14 +631,23 @@ class TestProvenance(Tmp):
                 with D.legacy():
                     old = eva.check(unit, D.EMPTY_BUNDLE)
                 new = eva.check(unit)
+                agent = new.kind == "agent"
+                kept = lambda rid: not agent or not rid.startswith(B1_AGENT_ROWS)
                 rows = [c for c in new.checks if c["id"].startswith(RULE_ROW_PREFIXES)]
                 self.assertTrue(rows and all("rule" in c for c in rows))
                 self.assertFalse(any("rule" in c for c in old.checks))
-                self.assertEqual({c["id"]: c["reason"] for c in rows},
-                                 {c["id"]: c["reason"] for c in old.checks if c["id"].startswith(RULE_ROW_PREFIXES)})
+                self.assertEqual({c["id"]: c["reason"] for c in rows if kept(c["id"])},
+                                 {c["id"]: c["reason"] for c in old.checks
+                                  if c["id"].startswith(RULE_ROW_PREFIXES) and kept(c["id"])})
+
+                def lines(r):
+                    out = quiet(eva.print_report, r)[1].splitlines()
+                    if not agent:
+                        return sorted(out)
+                    return sorted(ln for ln in out if ln.startswith("  ") and not ln.startswith("  category below floor")
+                                  and kept(ln.split()[1]))
                 # row order in the text output is out of scope (check-row-text); every line must stay
-                self.assertEqual(sorted(quiet(eva.print_report, new)[1].splitlines()),
-                                 sorted(quiet(eva.print_report, old)[1].splitlines()))
+                self.assertEqual(lines(new), lines(old))
 
 
 class TestEnglishOperands(unittest.TestCase):

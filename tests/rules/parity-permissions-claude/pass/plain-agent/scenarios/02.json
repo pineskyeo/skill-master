@@ -9,14 +9,19 @@
   }
  ],
  "expected_tools": [
-  "grep",
-  "read_file"
+  "search",
+  "read"
  ],
  "must_include": [
   "test"
  ],
  "expected_outcome": [
-  "explains the test folder from the earlier turn",
-  "no file changes"
+  {
+   "type": "llm",
+   "text": "explains the test folder from the earlier turn"
+  },
+  {
+   "type": "no_writes"
+  }
  ]
 }

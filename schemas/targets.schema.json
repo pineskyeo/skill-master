@@ -26,7 +26,7 @@
     "text": {"type": "string", "minLength": 1},
     "date": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
     "texts": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/text"}},
-    "class": {"enum": ["read", "write", "shell", "web_fetch", "web_search", "delegate", "skill"]},
+    "class": {"enum": ["read", "search", "write", "shell", "web_fetch", "web_search", "delegate", "skill"]},
     "doc": {
       "type": "object",
       "required": ["url", "section", "verified", "note"],
@@ -136,7 +136,7 @@
       "then": {"required": ["grants", "actions", "granting", "complete"]},
       "else": {"not": {"required": ["complete"]}},
       "properties": {
-        "compare": {"enum": ["names", "classes", "none"]},
+        "compare": {"enum": ["tool-classes", "classes", "none"]},
         "grants": {"type": "object", "additionalProperties": {"anyOf": [{"$ref": "#/$defs/class"}, {"type": "null"}]}},
         "actions": {"$ref": "#/$defs/texts"},
         "granting": {"$ref": "#/$defs/texts"},

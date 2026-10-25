@@ -230,15 +230,17 @@ class TestEvalsFiles(E.SkillMixin, unittest.TestCase):
 
 class TestAgents(E.TmpMixin, unittest.TestCase):
     AGENT = ("---\nname: code-scout\ndescription: Reads a repository read-only and explains it. Use when the user asks for an overview.\n"
-             "goal: Explain the repository structure with file and line evidence.\ntools: [list_dir, grep, read_file]\n"
-             "success_criteria:\n  - at least 2 file:line citations\n  - no file changes (read-only)\n---\n# Code Scout\n"
-             "## Tools\n- list_dir: map the structure / grep: find places / read_file: confirm lines\n"
+             "goal: Explain the repository structure with file and line evidence.\ncapabilities: [search, read]\n"
+             "model_policy: judgment\nsuccess_criteria:\n  - '{\"type\": \"file_line_citations\", \"min\": 2}'\n"
+             "  - '{\"type\": \"llm\", \"text\": \"No file changes (read-only).\"}'\n"
+             "targets: [claude, codex, opencode, hermes]\n---\n# Code Scout\n"
+             "## Tools\n- search: map the structure and find places / read: confirm lines\n"
              "## Memory & Handoff\nRemember the topic of earlier turns and hand open questions to the next agent.\n")
-    S1 = {"id": "overview", "turns": [{"user": "Give me an overview of this repo"}], "expected_tools": ["list_dir"],
-          "must_include": ["tests"], "expected_outcome": "an overview with file:line evidence"}
+    S1 = {"id": "overview", "turns": [{"user": "Give me an overview of this repo"}], "expected_tools": ["search"],
+          "must_include": ["tests"], "expected_outcome": [{"type": "file_line_citations", "min": 2}]}
     S2 = {"id": "drill", "turns": [{"user": "Give me an overview"}, {"user": "Explain the test folder you just mentioned"}],
-          "expected_tools": ["grep", "read_file"], "must_include": ["test"],
-          "expected_outcome": ["explains the test folder from the earlier turn", "no file changes"]}
+          "expected_tools": ["search", "read"], "must_include": ["test"],
+          "expected_outcome": [{"type": "llm", "text": "Explains the test folder from the earlier turn."}, {"type": "no_writes"}]}
 
     def agent(self, md=None, s1=None, s2=None, raw1=None):
         d = os.path.join(self.tmp, "code-scout"); os.makedirs(os.path.join(d, "scenarios"))
@@ -255,7 +257,7 @@ class TestAgents(E.TmpMixin, unittest.TestCase):
 
     def test_agent_md_frontmatter_and_body_fail(self):
         for old, new, where in (("goal: Explain", "goal: %s Explain" % KO, "(frontmatter)"),
-                                ("  - no file changes (read-only)", "  - %s" % KO, "(frontmatter)"),
+                                ("No file changes (read-only).", KO, "(frontmatter)"),
                                 ("Remember the topic", "%s Remember the topic" % KO, "(body)")):
             d, r = self.agent(md=self.AGENT.replace(old, new))
             self.assertEqual(r.verdict, "FAIL", old); self.assertIn("english-agent-md", failed_ids(r))
@@ -264,8 +266,8 @@ class TestAgents(E.TmpMixin, unittest.TestCase):
 
     def test_scenario_prompt_and_expectations_fail(self):
         for key, s in (("user", dict(self.S1, turns=[{"user": KO}])),
-                       ("expected_outcome", dict(self.S1, expected_outcome=KO)),
-                       ("success_criteria", dict(self.S1, success_criteria=[KO]))):
+                       ("expected_outcome", dict(self.S1, expected_outcome=[{"type": "llm", "text": KO}])),
+                       ("success_criteria", dict(self.S1, success_criteria=[{"type": "llm", "text": KO}]))):
             d, r = self.agent(s1=s)
             self.assertEqual(r.verdict, "FAIL", key); self.assertIn("english-scenarios", failed_ids(r), key)
             self.assertIn("scenarios/01.json:%d [Hangul]" % line_of(os.path.join(d, "scenarios", "01.json"), KO),
@@ -280,10 +282,13 @@ class TestAgents(E.TmpMixin, unittest.TestCase):
         self.assertIn("scenarios/01.json:", reason(r, "english-output-matchers"))
 
     def test_scenario_json_escapes_are_decoded(self):
-        d, r = self.agent(raw1=json.dumps(dict(self.S1, expected_outcome=KO), indent=1))
+        d, r = self.agent(raw1=json.dumps(dict(self.S1, expected_outcome=[{"type": "llm", "text": KO}]), indent=1))
         self.assertIn("english-scenarios", failed_ids(r))
 
 WRAPPERS_MISSING = {"parity-wrapper-" + t for t in eva.TOOLS} | {P.HERMES_ROW}
+# AGENT.md v1 rows (unit B1 D9): the golden agents stay v1, so they also fail the rows that read the v2 fields.
+V1_AGENT_ROWS = {"agent-frontmatter-v2", "success-measurable", "tools-declared", "tools-subset", "scenarios-valid",
+                 "scenarios-present"}
 
 class TestIndexAndGolden(E.SkillMixin, unittest.TestCase):
     def test_index_records_the_english_verdict(self):
@@ -297,8 +302,8 @@ class TestIndexAndGolden(E.SkillMixin, unittest.TestCase):
         want = {"skills/csv-cleaner": {"english-skill-md", "english-evals"},
                 "skills/korean-proofreader": {"english-skill-md", "english-evals"},
                 "skills/pdf-summarizer": {"english-skill-md", "english-bundled-files", "english-evals"},
-                "agents/code-reviewer": {"english-agent-md", "english-scenarios"} | WRAPPERS_MISSING,
-                "agents/research-assistant": {"english-agent-md", "english-scenarios"} | WRAPPERS_MISSING}
+                "agents/code-reviewer": {"english-agent-md", "english-scenarios"} | WRAPPERS_MISSING | V1_AGENT_ROWS,
+                "agents/research-assistant": {"english-agent-md", "english-scenarios"} | WRAPPERS_MISSING | V1_AGENT_ROWS}
         for rel, ids in want.items():
             r = eva.check(E.p("golden", *rel.split("/")))
             self.assertEqual((r.verdict, failed_ids(r)), ("FAIL", ids), rel)

@@ -669,6 +669,9 @@ def _primitive(name):
             from engine.primitives import script_denylist as mod
             make = mod.RuleCheck
             args = (node, folder)
+        elif name == "agent_frontmatter":
+            from engine.primitives import transcript as mod
+            make, args = mod.AgentFrontmatterCheck, (node, root)
         elif name in PRIMITIVES:
             make, args = getattr(importlib.import_module("engine.primitives." + name), PRIMITIVES[name]), (node, folder)
         else:
@@ -682,7 +685,8 @@ def _primitive(name):
     return build
 
 
-PRIMITIVES = {"heading_present": "HeadingCheck", "description_heuristics": "DescriptionCheck", "local_refs": "RefsCheck"}
+PRIMITIVES = {"heading_present": "HeadingCheck", "description_heuristics": "DescriptionCheck", "local_refs": "RefsCheck",
+              "agent_frontmatter": "AgentFrontmatterCheck"}
 for _name in ("script_denylist", "parity_skill", "parity_invocation", "parity_agent_name", "parity_wrapper",
               "parity_permissions") + tuple(PRIMITIVES):
     OPS[_name] = _primitive(_name)

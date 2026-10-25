@@ -2,10 +2,12 @@
 name: no-claude
 description: Reads a repository read-only and explains it. Use when the user asks for an overview.
 goal: Explain the repository structure with file and line evidence.
-tools: [glob, grep, read_file]
+capabilities: [search, read]
+model_policy: judgment
 success_criteria:
-  - at least 2 file:line citations
-  - no file changes (read-only)
+  - '{"type": "file_line_citations", "min": 2}'
+  - '{"type": "no_writes"}'
+targets: [claude, codex, opencode, hermes]
 ---
 # Code Scout
 ## Tools

@@ -17,7 +17,7 @@ CODEX_REL = "wrappers/codex/code-scout.toml"
 REMOVE = "sandbox_mode in a Codex custom agent file does not override the parent session; remove it"
 READ_ONLY = ("Codex cannot restrict write, shell, web_fetch, web_search, delegate, skill per agent; the agent runs with the "
              "parent session's sandbox")
-ALL_CAPS_MD = P.AGENT_MD.replace("[glob, grep, read_file]", "[read_file, write_file, bash, web_fetch, web_search, task, skill]")
+ALL_CAPS_MD = P.AGENT_MD.replace("[search, read]", "[read, write, shell, web_fetch, web_search, delegate, skill]")
 _patches = []
 
 def setUpModule():
@@ -84,14 +84,14 @@ class TestCodexPermissionRow(P.AgentBase, unittest.TestCase):
         self.assertEqual(P.tool_status(d)["codex"], "review")
 
     def test_the_message_names_each_missing_class_in_the_codex_unrestrictable_order(self):
-        for tools, missing in (("[read_file, bash]", "write, web_fetch, web_search, delegate, skill"),
-                               ("[read_file, write_file]", "shell, web_fetch, web_search, delegate, skill"),
-                               ("[read_file, write_file, bash]", "web_fetch, web_search, delegate, skill"),
+        for tools, missing in (("[read, shell]", "write, web_fetch, web_search, delegate, skill"),
+                               ("[read, write]", "shell, web_fetch, web_search, delegate, skill"),
+                               ("[read, write, shell]", "web_fetch, web_search, delegate, skill"),
                                ("[web_fetch]", "write, shell, web_search, delegate, skill"),
-                               ("[web_search, task]", "write, shell, web_fetch, skill"),
-                               ("[read_file, write_file, bash, web_fetch, web_search, task]", "skill")):
+                               ("[web_search, delegate]", "write, shell, web_fetch, skill"),
+                               ("[read, write, shell, web_fetch, web_search, delegate]", "skill")):
             with self.subTest(tools):
-                d, r = self.agent(md=P.AGENT_MD.replace("[glob, grep, read_file]", tools), replace={CODEX_REL: codex_wrapper()})
+                d, r = self.agent(md=P.AGENT_MD.replace("[search, read]", tools), replace={CODEX_REL: codex_wrapper()})
                 self.assertEqual(P.row(r, ROW)["reason"], "needs-review: [codex] Codex cannot restrict %s per agent; "
                                                           "the agent runs with the parent session's sandbox" % missing)
                 shutil.rmtree(d)
@@ -129,7 +129,7 @@ class TestCodexReviewReachesTheRuleReviewGate(P.CliBase):
         self.assertEqual(se.approve("rule_review", spec, self.ws)["sha256"], se.rule_review_hash(d))
         self.assertEqual(se.rule_review_problems(spec, self.ws), [])
         self.assertIn("rule review decision recorded for these exact findings", self.cli("validate", d, "--workspace", self.ws)[1])
-        self.agent_dir(P.AGENT_MD.replace("[glob, grep, read_file]", "[glob, grep, read_file, bash]"))
+        self.agent_dir(P.AGENT_MD.replace("[search, read]", "[search, read, shell]"))
         again = se.rule_review_problems(spec, self.ws)
         self.assertEqual(len(again), 1, again); self.assertIn("Codex cannot restrict write, web_fetch, web_search, delegate, skill per agent", again[0])
 

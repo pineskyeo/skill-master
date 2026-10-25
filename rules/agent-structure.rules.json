@@ -14,6 +14,17 @@
       "fix": "Start AGENT.md with a first line of exactly '---', write the frontmatter as a 'key: value' mapping (name, description, goal, tools, success_criteria), and close it with a '---' line."
     },
     {
+      "id": "agent-frontmatter-v2",
+      "applies_to": ["agent"],
+      "category": "structure",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "AGENT.md v2: agent-master-skills.md section 3.3 and assessment section 4.5 (plan.md:787-789); the frontmatter matches schemas/agent-frontmatter.schema.json; no dated record", "verified": null},
+      "check": {"op": "agent_frontmatter", "schema": "agent-frontmatter.schema.json"},
+      "message": {"pass": "AGENT.md v2 frontmatter matches schemas/agent-frontmatter.schema.json", "fail": "{version}: {problems}"},
+      "fix": "Migrate AGENT.md to v2: rename tools to capabilities and list values from read, search, write, shell, web_fetch, web_search, delegate, skill; write each success criterion as one typed JSON object in single quotes, one per list item: '{\"type\": \"min_verified_sources\", \"min\": N}', '{\"type\": \"file_line_citations\", \"min\": N}', '{\"type\": \"no_writes\"}', '{\"type\": \"max_chars\", \"max\": N}', '{\"type\": \"markdown_table\"}' or '{\"type\": \"llm\", \"text\": \"...\"}'; add model_policy (a role name such as judgment) and targets: [claude, codex, opencode, hermes]. Every AGENT.md must match schemas/agent-frontmatter.schema.json."
+    },
+    {
       "id": "goal-present",
       "applies_to": ["agent"],
       "category": "goal",
@@ -30,10 +41,10 @@
       "category": "goal",
       "severity": "fail",
       "protects": ["claude", "codex", "opencode", "hermes"],
-      "source": {"house": "AGENT.md v1: at least one success criterion an outcome checker recognizes (eva.outcome_evidence until unit B1 types the criteria; no dated record)", "verified": null},
+      "source": {"house": "AGENT.md v2: at least one typed success criterion whose type is not llm (assessment section 4.5 line 381, plan.md:809; no dated record)", "verified": null},
       "check": {"op": "host_success_measurable"},
       "message": "{checkable}/{total} success criteria machine-checkable{detail}",
-      "fix": "Write at least one success criterion a machine can check (for example 'at least 3 source links', 'at most 800 characters', 'a comparison table', 'at least 2 file:line citations', 'read-only'). Keep the criteria that cannot be checked automatically next to them."
+      "fix": "Add at least one machine-checkable typed criterion to success_criteria: min_verified_sources, file_line_citations, no_writes, max_chars or markdown_table. Keep the llm criteria for what a machine cannot check."
     },
     {
       "id": "scenarios-present",
@@ -52,10 +63,10 @@
       "category": "goal",
       "severity": "fail",
       "protects": ["claude", "codex", "opencode", "hermes"],
-      "source": {"house": "AGENT.md v1: every scenario follows schemas/scenario.schema.json (README agent section; no dated record)", "verified": null},
+      "source": {"house": "scenario v2: every scenario follows schemas/scenario.schema.json (plan.md:778, assessment line 154; no dated record)", "verified": null},
       "check": {"op": "host_scenarios", "measure": "valid"},
       "message": "scenario shape valid{detail}",
-      "fix": "Write each scenario as a JSON object and fill in id (a string), turns ([{\"user\": ...}]), expected_tools, must_include (lists of strings) and expected_outcome."
+      "fix": "Write each scenario as a scenario v2 JSON object: id (a string), turns ([{\"user\": ...}]), expected_tools (capabilities such as read or search), must_include (a list of strings) and expected_outcome (typed criterion objects such as {\"type\": \"no_writes\"})."
     },
     {
       "id": "scenarios-expected",
@@ -74,10 +85,10 @@
       "category": "tool-use",
       "severity": "fail",
       "protects": ["claude", "codex", "opencode", "hermes"],
-      "source": {"house": "AGENT.md v1: frontmatter tools lists the tools the agent uses (README agent section; no dated record)", "verified": null},
+      "source": {"house": "AGENT.md v2: frontmatter capabilities lists what the agent may do (agent-master-skills.md section 3.3; no dated record)", "verified": null},
       "check": {"op": "host_tools_declared"},
-      "message": "tools declared: {tools}",
-      "fix": "Declare the tools the agent uses in the frontmatter tools: list."
+      "message": "capabilities declared: {tools}",
+      "fix": "Declare what the agent may do in the frontmatter capabilities: list (read, search, write, shell, web_fetch, web_search, delegate, skill)."
     },
     {
       "id": "tools-subset",
@@ -85,10 +96,10 @@
       "category": "tool-use",
       "severity": "soft",
       "protects": ["claude", "codex", "opencode", "hermes"],
-      "source": {"house": "AGENT.md v1: scenario expected_tools are declared in tools (README agent section; no dated record)", "verified": null},
+      "source": {"house": "AGENT.md v2: every scenario expected_tools value is one of the AGENT.md capabilities (assessment line 358, plan.md:810; no dated record)", "verified": null},
       "check": {"op": "host_scenarios", "measure": "tools_subset"},
-      "message": "scenario expected_tools within declared{detail}",
-      "fix": "Declare {undeclared} in tools or remove them from the scenarios."
+      "message": "scenario expected_tools within capabilities{detail}",
+      "fix": "Add {undeclared} to the AGENT.md capabilities or remove them from the scenarios' expected_tools."
     },
     {
       "id": "tools-documented",

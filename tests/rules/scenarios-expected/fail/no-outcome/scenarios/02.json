@@ -6,7 +6,7 @@
   }
  ],
  "expected_tools": [
-  "read_file"
+  "read"
  ],
  "must_include": [
   "src"

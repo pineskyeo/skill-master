@@ -10,20 +10,10 @@ from engine.primitives.script_denylist import WRAPPER_OUT, _within, read_text
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 TOOLS = ("claude", "codex", "opencode", "hermes")
 TARGETS_SCHEMA = "schemas/targets.schema.json"
-# The AGENT.md vocabulary is tool-independent, so it stays here, pinned equal to eva.py (A3 how D5).
-CAPABILITY_BY_TOOL = {}
-for _cap, _names in (("read", "read_file read grep glob list_dir ls find search view cat"),
-                     ("write", "write_file edit_file write edit multiedit create_file delete_file notebookedit apply_patch"),
-                     ("shell", "bash shell terminal exec run_command"),
-                     ("web_fetch", "web_fetch webfetch"), ("web_search", "web_search websearch"),
-                     ("delegate", "task"), ("skill", "skill")):
-    for _n in _names.split():
-        CAPABILITY_BY_TOOL[_n] = _cap
-NEUTRAL_TOOLS = ("todowrite", "todo_write")
-TOOL_ALIASES = {"read": "read", "read_file": "read", "write": "write", "write_file": "write", "edit": "edit",
-                "edit_file": "edit", "bash": "shell", "shell": "shell", "websearch": "web_search", "web_search": "web_search",
-                "webfetch": "web_fetch", "web_fetch": "web_fetch"}
+CAPABILITY_DATA = "rules/data/capabilities.json"
+AGENT_SCHEMA = "schemas/agent-frontmatter.schema.json"
 CLASSES = " (compared by capability class, because OpenCode permission keys are not tool names)"
+TOOL_CLASSES = " (compared by capability class, rules/data/capabilities.json)"
 
 
 class TargetError(ValueError):
@@ -104,17 +94,35 @@ def _tool_names(v):
     return out if out and len(out) == len(v) else None
 
 
-def tool_keys(names):
-    keys = {n.strip().lower() for n in names}
-    return {TOOL_ALIASES.get(k, k) for k in keys if k not in NEUTRAL_TOOLS}
+_DATA = {}
+
+
+def _load(rel):
+    if rel not in _DATA:
+        from engine import schema
+        _DATA[rel] = schema.load(os.path.join(ROOT, *rel.split("/")))
+    return _DATA[rel]
+
+
+def vocabulary():
+    """The AGENT.md v2 capability vocabulary: the enum of schemas/agent-frontmatter.schema.json."""
+    return tuple(_load(AGENT_SCHEMA)["$defs"]["capability"]["enum"])
+
+
+def capability_table():
+    """({lower-case tool name: capability}, neutral names) from rules/data/capabilities.json, read once per process."""
+    data = _load(CAPABILITY_DATA)
+    return data["tools"], tuple(data["neutral"])
 
 
 def capabilities(names):
+    """(set of capabilities, unmapped names) of a list of tool names (case-insensitive; neutral names dropped)."""
+    table, neutral = capability_table()
     caps, bad = set(), []
     for n in names:
         k = n.strip().lower()
-        if k in NEUTRAL_TOOLS: continue
-        if k in CAPABILITY_BY_TOOL: caps.add(CAPABILITY_BY_TOOL[k])
+        if k in neutral: continue
+        if k in table: caps.add(table[k])
         else: bad.append(n)
     return caps, bad
 
@@ -309,7 +317,7 @@ def _frontmatter_wrapper(st, tgt, fp, rel, name, desc):
             else:
                 caps, bad = capabilities(names)
                 if bad: p.append("%s: %s %s are not in the capability table" % (rel, key, bad))
-                else: st["caps"], st["names"] = caps, tool_keys(names)
+                else: st["caps"] = caps
         else:
             _permission_field(st, tgt, m.get(key), rel, key)
 
@@ -361,7 +369,7 @@ def _text_wrapper(st, tgt, path, fp, rel, name, desc, outside):
 
 
 def wrapper_states(path, tg):
-    """{tool: {"rel", "problems", "caps", "names"}} for the four wrappers of an agent folder (eva.agent_wrapper_states)."""
+    """{tool: {"rel", "problems", "caps"}} for the four wrappers of an agent folder (eva.agent_wrapper_states)."""
     raw, meta, _ = _frontmatter_of(os.path.join(path, "AGENT.md"))
     meta = meta or {}
     name, desc = _str_field(meta, "name"), _norm_ws(_str_field(meta, "description"))
@@ -370,7 +378,7 @@ def wrapper_states(path, tg):
     for tool in TOOLS:
         tgt = tg[tool]
         rel = tgt["wrapper"]["path"].replace("{name}", name or "<name>")
-        st = out[tool] = {"rel": rel, "problems": [], "caps": None, "names": None}
+        st = out[tool] = {"rel": rel, "problems": [], "caps": None}
         p, fp = st["problems"], os.path.join(path, *rel.split("/"))
         if not name:
             p.append("AGENT.md has no usable name"); continue
@@ -395,18 +403,19 @@ def agent_rows(path, tg):
         out["parity-wrapper-" + tool] = ("fail" if st["problems"] else "pass", _tag((tool,), "%s is present, parseable and "
                                          "consistent with AGENT.md" % st["rel"] if not st["problems"]
                                          else "; ".join(st["problems"])), st["rel"])
-    tools = [str(t) for t in as_list(meta.get("tools"))]
-    want, unmapped = capabilities(tools)
+    declared = [str(c) for c in as_list(meta.get("capabilities"))]
+    unknown = [c for c in declared if c not in vocabulary()]
+    want = set(declared)
     for tool in TOOLS:
         st, pm, cid = states[tool], tg[tool]["permissions"], "parity-permissions-" + tool
         tag = lambda text: _tag((tool,), text)
         if pm["fixed"] == "fail":
-            out[cid] = ("fail", tag("AGENT.md tools cannot be checked against Hermes: no verified per-agent tool-permission "
-                                    "format exists (UNVERIFIED, design 2.4); failing closed, so Hermes is never reported "
-                                    "as consistent"), None)
-        elif unmapped:
-            out[cid] = ("fail", tag("AGENT.md tools %s are not in the capability table; permissions cannot be compared"
-                                    % unmapped), None)
+            out[cid] = ("fail", tag("AGENT.md capabilities cannot be checked against Hermes: no verified per-agent "
+                                    "tool-permission format exists (UNVERIFIED, design 2.4); failing closed, so Hermes is "
+                                    "never reported as consistent"), None)
+        elif unknown:
+            out[cid] = ("fail", tag("AGENT.md capabilities %s are not in the capability vocabulary; permissions cannot be "
+                                    "compared" % unknown), None)
         elif pm["compare"] == "none":
             loose = [c for c in pm["unrestrictable"] if c not in want]
             if st["problems"]:
@@ -415,26 +424,26 @@ def agent_rows(path, tg):
                 out[cid] = ("review", tag("Codex cannot restrict %s per agent; the agent runs with the parent session's "
                                           "sandbox" % ", ".join(loose)), None)
             else:
-                out[cid] = ("pass", tag("AGENT.md tools need %s, so the agent needs no restriction that Codex cannot "
-                                        "apply per agent" % ", ".join(pm["unrestrictable"])), None)
+                out[cid] = ("pass", tag("AGENT.md capabilities need %s, so the agent needs no restriction that Codex "
+                                        "cannot apply per agent" % ", ".join(pm["unrestrictable"])), None)
         elif st["caps"] is None:
             out[cid] = ("na", tag("wrapper permissions not readable (see parity-wrapper-%s)" % tool), None)
-        elif pm["compare"] == "names":
-            have, need = sorted(st["names"]), sorted(tool_keys(tools))
+        elif pm["compare"] == "tool-classes":
+            have, need = sorted(st["caps"]), sorted(want)
             out[cid] = ("pass" if have == need else "fail", tag(
-                "wrapper tools %s match the AGENT.md tools by name" % have if have == need else
-                "wrapper tools %s differ from the AGENT.md tools %s by name (missing %s, extra %s)" % (
-                    have, need, sorted(set(need) - set(have)), sorted(set(have) - set(need)))), None)
+                "wrapper tools grant %s, as the AGENT.md capabilities need%s" % (have, TOOL_CLASSES) if have == need else
+                "wrapper tools grant %s, AGENT.md capabilities need %s (missing %s, extra %s)%s" % (
+                    have, need, sorted(set(need) - set(have)), sorted(set(have) - set(need)), TOOL_CLASSES)), None)
         else:
             have, need = sorted(st["caps"]), sorted(want)
             if have != need:
-                out[cid] = ("fail", tag("wrapper grants %s, AGENT.md tools need %s%s" % (have, need, CLASSES)), None)
+                out[cid] = ("fail", tag("wrapper grants %s, AGENT.md capabilities need %s%s" % (have, need, CLASSES)), None)
             elif not pm["complete"]:
-                out[cid] = ("review", tag("wrapper permissions grant %s, as the AGENT.md tools need, but the OpenCode "
+                out[cid] = ("review", tag("wrapper permissions grant %s, as the AGENT.md capabilities need, but the OpenCode "
                                           "permission key list is not verified complete; an unlisted key keeps its "
                                           "UNVERIFIED default" % have), None)
             else:
-                out[cid] = ("pass", tag("wrapper permissions %s match the AGENT.md tools%s" % (have, CLASSES)), None)
+                out[cid] = ("pass", tag("wrapper permissions %s match the AGENT.md capabilities%s" % (have, CLASSES)), None)
     return out
 
 

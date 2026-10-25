@@ -1,0 +1,22 @@
+{
+ "id": "drill",
+ "turns": [
+  {
+   "user": "Tell me the overview"
+  },
+  {
+   "user": "Now explain the test folder you just mentioned in detail"
+  }
+ ],
+ "expected_tools": [
+  "search",
+  "read"
+ ],
+ "must_include": [
+  "test"
+ ],
+ "expected_outcome": [
+  {"type": "file_line_citations", "min": 3},
+  {"type": "no_writes"}
+ ]
+}

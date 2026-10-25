@@ -1,0 +1,3 @@
+{"id": "basic", "turns": [{"user": "Research what Hermes Agent is"}],
+ "expected_tools": ["web_search", "web_fetch"], "must_include": ["nous research"],
+ "expected_outcome": [{"type": "min_verified_sources", "min": 3}]}

@@ -1,10 +1,15 @@
 {
  "id": "s1",
  "expected_tools": [
-  "read_file"
+  "read"
  ],
  "must_include": [
   "src"
  ],
- "expected_outcome": "An overview with file:line evidence."
+ "expected_outcome": [
+  {
+   "type": "llm",
+   "text": "An overview with file:line evidence."
+  }
+ ]
 }

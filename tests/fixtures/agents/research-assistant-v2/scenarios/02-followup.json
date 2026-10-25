@@ -1,0 +1,3 @@
+{"id": "followup", "turns": [{"user": "Research Hermes Agent"}, {"user": "Compare the earlier one with LangChain"}],
+ "expected_tools": ["web_search", "write"], "must_include": ["langchain", "hermes"],
+ "expected_outcome": [{"type": "markdown_table"}]}

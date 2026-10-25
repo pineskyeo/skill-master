@@ -1,5 +1,5 @@
 {
-  "$comment": "Claude Code target (unit A3, plan.md:673). Every value is the legacy eva.py constant it replaces; tests/test_rule_targets.py pins each one.",
+  "$comment": "Claude Code target (unit A3, plan.md:673). Every value is the legacy eva.py constant it replaces; tests/test_rule_targets.py pins each one. Unit B1 (D7): permissions compare the wrapper tools by capability class (tool-classes, rules/data/capabilities.json), because AGENT.md v2 names capabilities, not tools.",
   "tool": "claude",
   "label": "Claude Code",
   "engine": "claude",
@@ -25,7 +25,7 @@
     "extra_files": []
   },
   "permissions": {
-    "compare": "names",
+    "compare": "tool-classes",
     "derive": {},
     "unrestrictable": [],
     "fixed": null

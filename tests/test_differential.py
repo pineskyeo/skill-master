@@ -3,7 +3,11 @@ _legacy_<name> (plan.md:602-647, brief A2 D1 to D12). For every corpus unit the 
 same {row id: status}, must flags, score, categories and verdict; for every corpus file and every named single-edit
 variant each public function accepts exactly what its legacy body accepts and returns equal data. A difference must be
 listed in tests/differential/intentional.json, and every listed entry must occur. Also here (A6 deletes this file with
-the oracle): the schema, rule-entry and policy tests of A2."""
+the oracle): the schema, rule-entry and policy tests of A2. Unit B1 (brief B1 D10): intentional.json maps each key to a
+one-line reason, a row-map or functions key names exactly its changed row ids or function names after 'changed: ', the
+A3 and A4 agent variants stay AGENT.md v1 (the legacy branches read tools), and the transcripts are graded by the A4
+grader of tests/differential/legacy_transcript.py against the golden v1 agents and by eva.grade_transcript against the
+English v2 fixtures."""
 import ast, contextlib, copy, functools, hashlib, inspect, io, json, os, re, shutil, subprocess, sys, tempfile, unittest
 from unittest import mock
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -11,9 +15,11 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "tests"))
 import eva, skill_eval
 from engine import rule_runner as RR, schema as S
+from engine.primitives import transcript as T
 import test_multi_tool_parity as P
 sys.path.insert(0, os.path.join(ROOT, "tests", "differential"))
 import legacy_structure as L
+import legacy_transcript as LT
 
 INTENTIONAL_PATH = os.path.join(ROOT, "tests", "differential", "intentional.json")
 SCHEMAS = ("evals.schema.json", "trigger-evals.schema.json", "scenario.schema.json", "transcript.schema.json",
@@ -24,9 +30,17 @@ GOLDEN_AND_BAD = {"golden/agents/code-reviewer", "golden/agents/research-assista
                   "golden/skills/korean-proofreader", "golden/skills/pdf-summarizer", "bad/agents/no-context-agent",
                   "bad/agents/vague-agent", "bad/skills/DoEverything", "bad/skills/bad-version-skill",
                   "bad/skills/no-io-skill", "bad/skills/wrong-folder-name"}
-TRANSCRIPT_AGENTS = {"code-reviewer-drill.json": "golden/agents/code-reviewer",
-                     "research-followup-cited.json": "golden/agents/research-assistant",
-                     "research-followup.json": "golden/agents/research-assistant"}
+# transcript (relative to transcripts/) -> (golden v1 agent, English v2 fixture) (brief B1 D10, D11)
+CR_V1, RA_V1 = "golden/agents/code-reviewer", "golden/agents/research-assistant"
+CR_V2, RA_V2 = "tests/fixtures/agents/code-reviewer-v2", "tests/fixtures/agents/research-assistant-v2"
+TRANSCRIPT_AGENTS = {"code-reviewer-drill.json": (CR_V1, CR_V2), "research-followup-cited.json": (RA_V1, RA_V2),
+                     "research-followup.json": (RA_V1, RA_V2), "bad/code-reviewer-answer-lookup.json": (CR_V1, CR_V2),
+                     "bad/research-fabricated-urls.json": (RA_V1, RA_V2)}
+# The rows unit B1 may change on an agent (brief B1 D9): the v2 row, the D8 rows and the permission rows.
+B1_AGENT_ROWS = {"agent-frontmatter-v2", "success-measurable", "tools-declared", "tools-subset", "scenarios-present",
+                 "scenarios-valid", "scenarios-expected", "multi-turn-scenario", "parity-permissions-claude",
+                 "parity-permissions-codex", "parity-permissions-opencode", "parity-permissions-hermes"}
+CHANGED = "; changed: "
 SUFFIX_RE = re.compile(r" \[(?:rule [a-z-]+, )?([a-z-]+\.schema\.json)#(/[^,\]]*), keyword ([^\]]+)\]$")
 DISAGREE = "rule and eva.py disagree"
 EMPTY_BUNDLE = RR.Bundle([], "", True, "rules")
@@ -145,7 +159,8 @@ def same_typed(a, b):
 @contextlib.contextmanager
 def legacy():
     """The legacy behavior: the public names point at the legacy bodies, and check_skill and check_agent are the A3
-    bodies kept in tests/differential/legacy_structure.py (the rows then come from them as at A3)."""
+    bodies kept in tests/differential/legacy_structure.py (the rows then come from them as at A3). grade_transcript is
+    the A4 body and the A4 capability tables that the legacy parity bodies read are back on eva (B1 D10)."""
     with mock.patch.object(eva, "check_skill", L.check_skill), mock.patch.object(eva, "check_agent", L.check_agent), \
             mock.patch.object(eva, "evals_errors", eva._legacy_evals_errors), \
             mock.patch.object(eva, "scenario_errors", eva._legacy_scenario_errors), \
@@ -161,7 +176,12 @@ def legacy():
             mock.patch.object(eva, "agent_wrapper_states", eva._legacy_agent_wrapper_states), \
             mock.patch.object(eva, "english_scan", lambda path, bundle=None: eva._legacy_english_scan(path)), \
             mock.patch.object(eva, "codex_policy", eva._legacy_codex_policy), \
-            mock.patch.object(eva, "english_eval_problems", eva._legacy_english_eval_problems):
+            mock.patch.object(eva, "english_eval_problems", eva._legacy_english_eval_problems), \
+            mock.patch.object(eva, "grade_transcript", LT.grade_transcript), \
+            contextlib.ExitStack() as tables:
+        for name in ("CAPABILITY_BY_TOOL", "NEUTRAL_TOOLS", "OPENCODE_PERMISSION_GRANTS", "TOOL_ALIASES", "tool_keys",
+                     "capabilities"):
+            tables.enter_context(mock.patch.object(eva, name, getattr(LT, name), create=True))
         yield
 
 
@@ -647,11 +667,25 @@ def skill_variant(name="diff-base", md_edit=None, files=None, links=None, raw=No
     return build
 
 
+# The A4 tests/test_multi_tool_parity.py AGENT.md and scenarios (AGENT.md v1, scenario v1): the A3 and A4 agent variants
+# reach the legacy branches, which read tools and string criteria (brief B1 D10).
+AGENT_MD_V1 = ("---\nname: code-scout\ndescription: Reads a repository read-only and explains it. Use when the user asks for "
+               "an overview.\ngoal: Explain the repository structure with file and line evidence.\ntools: [glob, grep, "
+               "read_file]\nsuccess_criteria:\n  - at least 2 file:line citations\n  - no file changes (read-only)\n---\n"
+               "# Code Scout\n## Tools\n- glob: map the structure / grep: find places / read_file: confirm lines\n"
+               "## Memory & Handoff\nRemember the topic of earlier turns and hand open questions to the next agent.\n")
+S1_V1 = {"id": "overview", "turns": [{"user": "Give me an overview of this repo"}], "expected_tools": ["glob"],
+         "must_include": ["tests"], "expected_outcome": "an overview with file:line evidence"}
+S2_V1 = {"id": "drill", "turns": [{"user": "Give me an overview"}, {"user": "Explain the test folder you just mentioned"}],
+         "expected_tools": ["grep", "read_file"], "must_include": ["test"],
+         "expected_outcome": ["explains the test folder from the earlier turn", "no file changes"]}
+
+
 def agent_variant(md_edit=None, caps=None, skip=(), replace=None, files=None, links=None, wrappers=True, folder="code-scout",
-                  scenarios=(P.S1, P.S2)):
+                  scenarios=(S1_V1, S2_V1)):
     def build(top):
         d = os.path.join(top, folder)
-        md = md_edit(P.AGENT_MD) if md_edit else P.AGENT_MD
+        md = md_edit(AGENT_MD_V1) if md_edit else AGENT_MD_V1
         write(os.path.join(d, "AGENT.md"), md)
         for i, s in enumerate(scenarios, 1):
             write(os.path.join(d, "scenarios", "%02d.json" % i), json.dumps(s, indent=1))
@@ -848,11 +882,11 @@ A3_VARIANTS = {
     "agent-write-web": (agent_variant(md_edit=sub("[glob, grep, read_file]", "[read_file, write_file, web_fetch]")),
                         "parity-permissions-claude", "pass"),
     "agent-ko-agent-md": (agent_variant(md_edit=lambda t: t + KO + "\n"), "english-agent-md", "fail"),
-    "agent-ko-scenario": (agent_variant(files={"scenarios/03.json": json.dumps(dict(P.S1, id=KO))}), "english-scenarios",
+    "agent-ko-scenario": (agent_variant(files={"scenarios/03.json": json.dumps(dict(S1_V1, id=KO))}), "english-scenarios",
                           "fail"),
-    "agent-ko-matcher": (agent_variant(files={"scenarios/03.json": json.dumps(dict(P.S1, must_include=[KO]))}),
+    "agent-ko-matcher": (agent_variant(files={"scenarios/03.json": json.dumps(dict(S1_V1, must_include=[KO]))}),
                          "english-output-matchers", "needs-review"),
-    "agent-ko-scenario-name": (agent_variant(files={"scenarios/%s.json" % KO: json.dumps(P.S1)}), "english-scenarios", "fail"),
+    "agent-ko-scenario-name": (agent_variant(files={"scenarios/%s.json" % KO: json.dumps(S1_V1)}), "english-scenarios", "fail"),
     "agent-scenario-link-outside": (agent_variant(links={"scenarios/04.json": outside_file("{}")}), "english-scenarios", "fail"),
     "agent-ko-wrapper": (agent_variant(replace={HERMES_REL: lambda t: t + KO + "\n"}), "english-wrappers", "fail"),
     "agent-ko-wrapper-name": (agent_variant(files={"wrappers/hermes/%s.md" % KO: "x\n"}), "english-wrappers", "fail"),
@@ -1072,14 +1106,14 @@ A4_VARIANTS = {
     "a-criterion-string": (agent_variant(md_edit=sub("success_criteria:\n" + CRITERIA, "success_criteria: read-only\n")),
                            "success-measurable", "pass"),
     "a-no-scenarios": (agent_variant(scenarios=()), "scenarios-valid", "fail"),
-    "a-one-scenario": (agent_variant(scenarios=(P.S2,)), "scenarios-present", "fail"),
+    "a-one-scenario": (agent_variant(scenarios=(S2_V1,)), "scenarios-present", "fail"),
     "a-invalid-json": (agent_variant(files={"scenarios/03.json": "{"}), "scenarios-valid", "fail"),
     "a-scenario-list": (agent_variant(files={"scenarios/03.json": "[]"}), "scenarios-valid", "fail"),
     "a-scenario-undecodable": (agent_variant(files={"scenarios/03.json": b"\xff\xfe"}), "scenarios-valid", "fail"),
-    "a-no-expected": (agent_variant(scenarios=(P.S2, {k: v for k, v in P.S1.items() if k != "expected_outcome"})),
+    "a-no-expected": (agent_variant(scenarios=(S2_V1, {k: v for k, v in S1_V1.items() if k != "expected_outcome"})),
                       "scenarios-expected", "fail"),
-    "a-single-turn": (agent_variant(scenarios=(P.S1, dict(P.S1, id="other"))), "multi-turn-scenario", "fail"),
-    "a-undeclared-tool": (agent_variant(scenarios=(P.S2, dict(P.S1, expected_tools=["glob", "bash"]))), "tools-subset",
+    "a-single-turn": (agent_variant(scenarios=(S1_V1, dict(S1_V1, id="other"))), "multi-turn-scenario", "fail"),
+    "a-undeclared-tool": (agent_variant(scenarios=(S2_V1, dict(S1_V1, expected_tools=["glob", "bash"]))), "tools-subset",
                           "fail"),
     "a-tools-string": (agent_variant(md_edit=sub("tools: [glob, grep, read_file]", "tools: glob")), "tools-declared",
                        "pass"),
@@ -1146,7 +1180,22 @@ def scenario_files():
 
 def transcript_files():
     d = os.path.join(ROOT, "transcripts")
-    return [os.path.join(d, n) for n in sorted(os.listdir(d)) if n.endswith(".json")]
+    return [os.path.join(d, n) for n in sorted(TRANSCRIPT_AGENTS)]
+
+
+def transcript_key(t):
+    return os.path.relpath(t, os.path.join(ROOT, "transcripts")).replace(os.sep, "/")
+
+
+def unit_version(u):
+    """The version a B1 row-map reason names for the unit: its own v1 marks and frontmatter as
+    engine/primitives/transcript.py read_agent sees them (None for a skill unit)."""
+    if eva.detect_kind(u) != "agent":
+        return None
+    agent = T.read_agent(u)
+    if agent.v1:
+        return "AGENT.md v1 unit"
+    return "AGENT.md v2 unit" if agent.meta is not None else "AGENT.md unit without usable frontmatter"
 
 
 def accept_diff(diffs, key, old_errs, new_errs):
@@ -1170,7 +1219,7 @@ def area_rows():
         new_rows, new_fn = a3_row_view(new), a3_functions(u)
         compared.append(key)
         if old != new_rows:
-            diffs["row-map:" + key] = {"legacy": old, "new": new_rows}
+            diffs["row-map:" + key] = {"legacy": old, "new": new_rows, "version": unit_version(u)}
         if old_fn != new_fn:
             diffs["functions:" + key] = {"legacy": old_fn, "new": new_fn}
         split = [c["id"] for c in new.checks if DISAGREE in c["reason"]]
@@ -1181,16 +1230,18 @@ def area_rows():
 
 @functools.lru_cache(maxsize=None)
 def area_transcript_rows():
+    """The A4 grader on the golden v1 agent against eva.grade_transcript on the English v2 fixture (brief B1 D10): row
+    id, status, must and category, verdict and score must be equal; reasons and fixes may differ."""
     diffs = {}
-    pairs = [(rel(t), os.path.join(ROOT, TRANSCRIPT_AGENTS[os.path.basename(t)])) for t in transcript_files()]
+    pairs = [(rel(t), TRANSCRIPT_AGENTS[transcript_key(t)]) for t in transcript_files()]
     for name in TRANSCRIPT_VARIANTS:
-        pairs.append(("variant:transcript:" + name, os.path.join(ROOT, "golden", "agents", "code-reviewer")))
-    for key, agent in pairs:
+        pairs.append(("variant:transcript:" + name, (CR_V1, CR_V2)))
+    for key, (v1, v2) in pairs:
         path = os.path.join(ROOT, key) if not key.startswith("variant:") else \
             transcript_variant_file(key.split(":", 2)[2])
         with legacy():
-            old = row_view(eva.grade_transcript(agent, path))
-        new = row_view(eva.grade_transcript(agent, path))
+            old = row_view(eva.grade_transcript(os.path.join(ROOT, v1), path))
+        new = row_view(eva.grade_transcript(os.path.join(ROOT, v2), path))
         if old != new:
             diffs["transcript-rows:" + key] = {"legacy": old, "new": new}
     return diffs
@@ -1304,16 +1355,66 @@ def unrecorded(diffs):
     return {k: v for k, v in diffs.items() if k not in allowed}
 
 
+def changed_names(key, detail):
+    """The row ids (row-map) or function names (functions) that differ between the legacy and the new side."""
+    old, new = detail["legacy"], detail["new"]
+    if key.startswith("row-map:"):
+        return sorted({k for part in ("rows", "reasons") for k in set(old[part]) | set(new[part])
+                       if old[part].get(k) != new[part].get(k)})
+    return sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
+
+
+def named_in_reason(reason):
+    return sorted(reason.split(CHANGED, 1)[1].split(", ")) if CHANGED in reason else None
+
+
 # ---------- tests ----------
 class TestIntentionalFile(unittest.TestCase):
-    def test_it_is_a_json_list_of_difference_keys(self):
-        data = intentional()
-        self.assertIsInstance(data, list)
-        self.assertTrue(all(isinstance(x, str) for x in data), data)
-        self.assertEqual(len(set(data)), len(data))
+    def test_it_is_a_json_object_of_difference_keys_to_one_line_english_reasons(self):
+        pairs = []
+        with open(INTENTIONAL_PATH, encoding="utf-8") as f:
+            data = json.load(f, object_pairs_hook=lambda p: pairs.append(p) or dict(p))
+        self.assertIsInstance(data, dict)
+        self.assertEqual(len(pairs[-1]), len(data))
+        for key, reason in data.items():
+            self.assertTrue(isinstance(reason, str) and reason.strip() and reason.isascii() and "\n" not in reason, key)
+
+    def test_every_row_map_and_functions_key_names_exactly_its_changed_rows(self):
+        diffs = all_differences()
+        for key, reason in intentional().items():
+            if key.startswith(("row-map:", "functions:")) and key in diffs:
+                with self.subTest(key):
+                    self.assertEqual(named_in_reason(reason), changed_names(key, diffs[key]), reason)
+
+    def test_an_agent_unit_changes_only_the_b1_rows_and_a_skill_unit_only_the_a4_keys(self):
+        diffs = all_differences()
+        a4_keys = {D2_KEY} | {"row-map:variant:a4:" + n for n in KO_VARIANTS}
+        for key, detail in diffs.items():
+            if not key.startswith("row-map:") or key in a4_keys:
+                continue
+            with self.subTest(key):
+                self.assertIn("agent-frontmatter-v2", detail["new"]["rows"])
+                self.assertLessEqual(set(changed_names(key, detail)), B1_AGENT_ROWS)
+
+    def test_every_b1_row_map_reason_names_the_unit_version(self):
+        diffs = all_differences()
+        a4_keys = {D2_KEY} | {"row-map:variant:a4:" + n for n in KO_VARIANTS}
+        b1 = [k for k in intentional() if k.startswith("row-map:") and k not in a4_keys]
+        self.assertGreater(len(b1), 100)
+        versions = set()
+        for key in b1:
+            with self.subTest(key):
+                version = diffs[key]["version"]
+                self.assertIsNotNone(version)
+                versions.add(version)
+                self.assertTrue(intentional()[key].startswith(version + ": "), (version, intentional()[key]))
+        self.assertEqual(versions, {"AGENT.md v1 unit", "AGENT.md v2 unit", "AGENT.md unit without usable frontmatter"})
+        golden = diffs["row-map:golden/agents/code-reviewer"]["version"]
+        self.assertEqual((golden, diffs["row-map:" + CR_V2]["version"]), ("AGENT.md v1 unit", "AGENT.md v2 unit"))
 
     def test_every_listed_difference_occurred(self):
-        self.assertEqual(sorted(set(intentional()) - set(all_differences())), [])
+        messages = {"messages:" + k for k in area_functions()[1]}
+        self.assertEqual(sorted(set(intentional()) - set(all_differences()) - messages), [])
 
     def test_no_difference_outside_the_file(self):
         self.assertEqual(unrecorded(all_differences()), {})
@@ -1408,9 +1509,13 @@ class TestA3Variants(unittest.TestCase):
 
     def test_the_recorded_differences_are_the_naming_dedupe_and_the_dropped_korean_alternatives(self):
         unit = "tests/rules/_selftest/selftest-name-matches-folder/fail/bad-name"
-        self.assertEqual(intentional(), ["row-map:" + unit] + ["row-map:variant:a4:" + n for n in KO_VARIANTS])
+        a4_keys = ["row-map:" + unit] + ["row-map:variant:a4:" + n for n in KO_VARIANTS]
+        self.assertEqual(list(intentional())[:10], a4_keys)
+        self.assertTrue(all("gates.md G16" in intentional()[k] or "A4 D5" in intentional()[k] for k in a4_keys))
+        self.assertTrue(all(k.startswith(("row-map:", "functions:", "accept:scenario_errors:", "messages:scenario_errors:"))
+                            for k in list(intentional())[10:]))
         diffs = all_differences()
-        d = diffs[intentional()[0]]
+        d = diffs[a4_keys[0]]
         old = d["legacy"]["rows"]["parity-skill-opencode"]
         new = d["new"]["rows"]["parity-skill-opencode"]
         self.assertEqual((old[0], new[0]), ("fail", "pass"))
@@ -1433,19 +1538,31 @@ class TestA3Variants(unittest.TestCase):
                             for v in new["parity_violations"]), new["parity_violations"])
 
     def test_the_opencode_complete_branch_matches_with_the_constant_and_target_patched(self):
+        """The legacy body reads the v1 variant's tools; the new row reads AGENT.md v2 capabilities, so it runs on the v2
+        copy of the same agent (tests/test_multi_tool_parity.py AGENT_MD) with the same generated wrappers (B1 D7)."""
         from engine.primitives import parity as PR
         u = a3_variant_unit(COMPLETE_OPENCODE)
+        v2 = os.path.join(tmpdir(), "a3-v2", "code-scout")
+        write(os.path.join(v2, "AGENT.md"), P.AGENT_MD)
+        for i, s in enumerate((P.S1, P.S2), 1):
+            write(os.path.join(v2, "scenarios", "%02d.json" % i), json.dumps(s, indent=1))
+        P.write_wrappers(v2)
         with mock.patch.object(eva, "OPENCODE_PERMISSION_KEYS_COMPLETE", True), \
                 mock.patch.dict(PR.target("opencode")["permissions"], {"complete": True}):
             with legacy():
                 old_rep = eva.check(u, EMPTY_BUNDLE)
                 old, old_fn = a3_row_view(old_rep), a3_functions(u)
-            new, new_fn = a3_row_view(eva.check(u)), a3_functions(u)
+            new, new_fn = a3_row_view(eva.check(v2)), a3_functions(v2)
         self.assertEqual(old["rows"]["parity-permissions-opencode"][0], "pass")
         self.assertIn("match the AGENT.md tools (compared by capability class",
                       old["reasons"]["parity-permissions-opencode"])
-        self.assertEqual(new, old)
-        self.assertEqual(new_fn, old_fn)
+        self.assertEqual(new["rows"]["parity-permissions-opencode"][0], "pass")
+        self.assertEqual(new["reasons"]["parity-permissions-opencode"],
+                         "[opencode] wrapper permissions ['read', 'search'] match the AGENT.md capabilities (compared by "
+                         "capability class, because OpenCode permission keys are not tool names)")
+        keep = lambda view: {k: v for k, v in view["rows"].items() if k not in B1_AGENT_ROWS}
+        self.assertEqual(keep(new), keep(old))
+        self.assertEqual(new_fn["parity_status"]["opencode"]["status"], old_fn["parity_status"]["opencode"]["status"])
 
 
 class TestFunctions(unittest.TestCase):
@@ -1459,7 +1576,10 @@ class TestFunctions(unittest.TestCase):
 
     def test_messages_are_the_old_strings_plus_the_schema_suffix(self):
         _, messages, branches = area_functions()
-        self.assertEqual({k: v for k, v in messages.items() if k not in WORDING_ONLY}, {})
+        self.assertEqual({k: v for k, v in messages.items() if k not in WORDING_ONLY and "messages:" + k not in intentional()},
+                         {})
+        self.assertEqual(sorted(k for k in intentional() if k.startswith("messages:") and k[len("messages:"):] not in messages),
+                         [])
         for k in WORDING_ONLY:
             self.assertIn(k, branches)
         for k, (_, _, new_errs) in branches.items():
@@ -1544,8 +1664,11 @@ class TestLegacyOracle(unittest.TestCase):
         targets = [(eva, n) for n in dir(eva) if n.startswith("_legacy_")] + \
                   [(skill_eval, n) for n in dir(skill_eval) if n.startswith("_legacy_")] + \
                   [(skill_eval, "_check_problems"), (skill_eval, "_csv_rows_problems"), (eva, "_assertion_list")] + \
-                  [(L, n) for n, f in vars(L).items() if inspect.isfunction(f) and f.__module__ == L.__name__]
+                  [(L, n) for n, f in vars(L).items() if inspect.isfunction(f) and f.__module__ == L.__name__] + \
+                  [(LT, n) for n, f in vars(LT).items() if inspect.isfunction(f) and f.__module__ == LT.__name__]
         self.assertGreaterEqual(len([t for t in targets if t[0] is L]), 20)
+        self.assertEqual(sorted(n for m, n in targets if m is LT),
+                         ["_max_chars", "_min_count", "capabilities", "grade_transcript", "outcome_evidence", "tool_keys"])
         with contextlib.ExitStack() as stack:
             for mod, n in targets:
                 stack.enter_context(mock.patch.object(mod, n, trip(n)))
@@ -1553,7 +1676,8 @@ class TestLegacyOracle(unittest.TestCase):
                 quiet(eva.main, ["check-all", os.path.join(ROOT, top)])
                 quiet(eva.main, ["check-all", os.path.join(ROOT, top), "--json"])
             for t in transcript_files():
-                quiet(eva.main, ["check", os.path.join(ROOT, TRANSCRIPT_AGENTS[os.path.basename(t)]), "--transcript", t])
+                for agent in TRANSCRIPT_AGENTS[transcript_key(t)]:
+                    quiet(eva.main, ["check", os.path.join(ROOT, agent), "--transcript", t])
             for skill in (os.path.join(ROOT, "golden", "skills", "csv-cleaner"),
                           os.path.join(ROOT, "tests", "fixtures", "skills", "csv-cleaner-en"),
                           evals_variant_unit("id-missing")):
@@ -1704,8 +1828,8 @@ class TestSchemas(unittest.TestCase):
         wjson(ev_bad, edit_case(0, id=KeyError)(copy.deepcopy(load_json(os.path.join(csv, "evals", "evals.json")))))
         cases = [("evals.schema.json", os.path.join(csv, "evals", "evals.json"), ev_bad, csv),
                  ("trigger-evals.schema.json", os.path.join(csv, "evals", "trigger_evals.json"), trig_bad, None),
-                 ("scenario.schema.json", os.path.join(ROOT, "golden", "agents", "code-reviewer", "scenarios",
-                                                       "01-overview.json"), scen_bad, None),
+                 ("scenario.schema.json", os.path.join(ROOT, *CR_V2.split("/"), "scenarios", "01-overview.json"), scen_bad,
+                  None),
                  ("transcript.schema.json", os.path.join(ROOT, "transcripts", "code-reviewer-drill.json"), tr_bad, None),
                  ("skill-frontmatter.schema.json", fm, fm_bad, None)]
         for schema, good, bad, unit in cases:
@@ -2257,7 +2381,7 @@ class TestStructureOracle(unittest.TestCase):
         segs = oracle_segments()
         self.assertEqual(list(segs), list(ORACLE_PINS))
         for name, pin in ORACLE_PINS.items():
-            seg = re.sub(r"\beva\.(%s)\b" % "|".join(ORACLE_QUALIFIED), r"\1", segs[name])
+            seg = re.sub(r"\b(?:eva|LT)\.(%s)\b" % "|".join(ORACLE_QUALIFIED), r"\1", segs[name])
             self.assertEqual(hashlib.sha256(unescape(seg).encode("utf-8")).hexdigest()[:16], pin, name)
 
     def test_only_the_differential_suite_imports_the_oracle(self):
@@ -2269,6 +2393,77 @@ class TestStructureOracle(unittest.TestCase):
                 if n.endswith(".py") and rel(p) not in allowed:
                     with open(p, encoding="utf-8") as f:
                         self.assertNotIn("legacy_structure", f.read(), rel(p))
+
+
+# sha256 of each A4 eva.py source segment kept in tests/differential/legacy_transcript.py (a for loop after an assignment
+# belongs to it), computed from the A4 export by /tmp/b1-owner/gen_oracle.py (/tmp/b1-owner/oracle-pins.txt).
+TRANSCRIPT_ORACLE_PINS = {
+    "CAPABILITY_BY_TOOL": "034f68df658f71fc5c56ab3991267cdb8e14fb27d1705b32552c1086aae93281",
+    "NEUTRAL_TOOLS": "04d9fa5b79959b1e3dc628d35867542b750e3505d98bb9a4869fe9d468e99f43",
+    "OPENCODE_PERMISSION_GRANTS": "79030e6b3e4c29a0d59b9b47201626fc0fd950f4e92cddae23ab3b8b4f172d9b",
+    "TOOL_ALIASES": "b4df4e5b53d7492cb385c9d0f07a2d6085496570c3fd5d18af8bb416c5bad5b9",
+    "tool_keys": "a1ed73d7c7bbb380297e5f4748e6bb4d99d8cfc8af90087b70850910dfb2eee5",
+    "capabilities": "fa117c9d7b414f8674ddab6ee48646e5c62bd78e557ebf8f6836cd0b06ff1840",
+    "grade_transcript": "3d9dc6577951545fdff32972fd3e051f7c39eb8e99b04fd22d29013d1fb37c6e",
+    "FILELINE_CRIT_RE": "47737dbf260ad11fbfe7102a04a98e5c9c36b00a8eb780e3f9491c0be77fbee5",
+    "NO_WRITE_CRIT_RE": "f613f17748bda253fc445a93ef854e24f284613cd2ce89d01224a3e68f0ea8bf",
+    "outcome_evidence": "66e6337bc1229b41eaee60300eb5616af26188aeda206151b262b6ee0af7db1b",
+    "_min_count": "c47870cd00f5ae9990c5fc659f95fb47003b002419fc4336654a6c8df8167bc6",
+    "_max_chars": "13381a05845bcc5b011bd4ac1214ae3e30a29a0b76cfa9b3b2acae35557b94d3",
+}
+TRANSCRIPT_QUALIFIED = ("Report", "load_transcript", "read_text", "parse_frontmatter_ex", "as_list", "load_scenarios",
+                        "answer_lookup_violations", "write_calls", "lines_seen", "FILELINE_RE", "_norm_path", "URL_RE",
+                        "_norm_url", "TABLE_RE")
+
+
+class TestTranscriptOracle(unittest.TestCase):
+    def segments(self):
+        with open(LT.__file__, encoding="utf-8") as f:
+            src = f.read()
+        out, last = {}, None
+        for node in ast.parse(src).body:
+            if isinstance(node, ast.FunctionDef) or (isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)):
+                last = node.name if isinstance(node, ast.FunctionDef) else node.targets[0].id
+                out[last] = ast.get_source_segment(src, node)
+            elif isinstance(node, ast.For) and last is not None:
+                out[last] += "\n" + ast.get_source_segment(src, node)
+            else:
+                last = None
+        return out, src
+
+    def test_each_segment_is_the_a4_segment_but_for_qualification_and_escapes(self):
+        segs, src = self.segments()
+        self.assertEqual(list(segs), list(TRANSCRIPT_ORACLE_PINS))
+        self.assertTrue(src.isascii())
+        for name, pin in TRANSCRIPT_ORACLE_PINS.items():
+            seg = re.sub(r"\beva\.(%s)\b" % "|".join(TRANSCRIPT_QUALIFIED), r"\1", segs[name])
+            self.assertEqual(hashlib.sha256(unescape(seg).encode("utf-8")).hexdigest(), pin, name)
+
+    def test_only_the_differential_suite_and_the_structure_oracle_import_it(self):
+        allowed = {"tests/test_differential.py", "tests/differential/legacy_structure.py",
+                   "tests/differential/legacy_transcript.py"}
+        importers = set()
+        for dp, dn, fn in os.walk(ROOT):
+            dn[:] = [d for d in dn if not d.startswith(".") and d != "__pycache__"]
+            for n in fn:
+                p = os.path.join(dp, n)
+                if n.endswith(".py"):
+                    with open(p, encoding="utf-8") as f:
+                        tree = ast.parse(f.read())
+                    names = {a.name for x in ast.walk(tree) if isinstance(x, ast.Import) for a in x.names} | \
+                            {x.module for x in ast.walk(tree) if isinstance(x, ast.ImportFrom) and x.module}
+                    if any("legacy_transcript" in name for name in names):
+                        importers.add(rel(p))
+        self.assertEqual(importers - allowed, set())
+        self.assertEqual(importers, {"tests/test_differential.py", "tests/differential/legacy_structure.py"})
+
+    def test_the_legacy_grader_still_recognizes_the_prose_of_the_golden_agents(self):
+        with legacy():
+            r = eva.grade_transcript(os.path.join(ROOT, CR_V1), os.path.join(ROOT, "transcripts", "code-reviewer-drill.json"))
+        self.assertEqual([c["id"] for c in r.checks if c["id"].startswith(("criteria-", "expected-"))
+                          and c["id"] != "expected-tools-called"],
+                         ["criteria-needs-review", "criteria-file-lines", "criteria-no-writes", "expected-file-lines",
+                          "expected-no-writes"])
 
 
 class TestDescriptionData(unittest.TestCase):
@@ -2392,12 +2587,15 @@ class TestA4Variants(unittest.TestCase):
         for name in KO_VARIANTS:
             _, rid, old_status = A4_VARIANTS[name]
             d = diffs["row-map:variant:a4:" + name]
+            agent = "agent-frontmatter-v2" in d["new"]["rows"]
             for part in ("rows", "reasons"):
                 changed = {k for k in set(d["legacy"][part]) | set(d["new"][part])
                            if d["legacy"][part].get(k) != d["new"][part].get(k)}
-                self.assertLessEqual(changed, {rid}, (name, part))
+                # an agent variant also changes the B1 rows, because it stays AGENT.md v1 (brief B1 D9, D10)
+                self.assertLessEqual(changed, {rid} | (B1_AGENT_ROWS if agent else set()), (name, part))
             self.assertEqual((d["legacy"]["rows"][rid][0], d["new"]["rows"][rid][0]), (old_status, flip[old_status]), name)
-            self.assertNotIn("functions:variant:a4:" + name, diffs)
+            if not agent:
+                self.assertNotIn("functions:variant:a4:" + name, diffs)
 
     def test_an_unreadable_skill_md_gives_the_legacy_frontmatter_row(self):
         """Not a full variant: a non-UTF-8 SKILL.md is the A2 field-types split that the A3 head already fails closed

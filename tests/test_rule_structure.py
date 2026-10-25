@@ -17,7 +17,7 @@ SPLIT = {
     "skill-structure.rules.json": ["frontmatter", "frontmatter-fields", "compatibility-length", "inputs-declared",
                                    "outputs-declared", "example-present", "size-limit", "refs-relative", "refs-exist",
                                    "refs-one-level", "refs-path-depth", "reference-toc", "version-format", "evals-count"],
-    "agent-structure.rules.json": ["frontmatter", "goal-present", "success-measurable", "scenarios-present",
+    "agent-structure.rules.json": ["frontmatter", "agent-frontmatter-v2", "goal-present", "success-measurable", "scenarios-present",
                                    "scenarios-valid", "scenarios-expected", "tools-declared", "tools-subset",
                                    "tools-documented", "memory-section", "multi-turn-scenario"],
 }
@@ -370,23 +370,20 @@ class TestData(Tmp):
 
 
 class TestSuccessMeasurable(unittest.TestCase):
-    CR = os.path.join(ROOT, "golden", "agents", "code-reviewer")
+    CR = os.path.join(ROOT, "tests", "fixtures", "agents", "code-reviewer-v2")
+    GOLDEN_CR = os.path.join(ROOT, "golden", "agents", "code-reviewer")
     VAGUE = os.path.join(ROOT, "bad", "agents", "vague-agent")
 
-    def test_the_row_decides_through_eva_outcome_evidence(self):
+    def test_the_row_decides_through_the_typed_criteria(self):
         self.assertEqual(row(eva.check(self.CR), "success-measurable")["status"], "pass")
-        with mock.patch.object(eva, "outcome_evidence", return_value=None):
-            self.assertEqual(row(eva.check(self.CR), "success-measurable")["status"], "fail")
+        self.assertEqual(row(eva.check(self.GOLDEN_CR), "success-measurable")["status"], "fail")
         self.assertEqual(row(eva.check(self.VAGUE), "success-measurable")["status"], "fail")
-        with mock.patch.object(eva, "outcome_evidence", return_value=("x", True, "", "")):
-            self.assertEqual(row(eva.check(self.VAGUE), "success-measurable")["status"], "pass")
+        self.assertFalse(hasattr(eva, "outcome_evidence"))
 
-    def test_every_criterion_reaches_outcome_evidence_with_an_empty_final(self):
-        with mock.patch.object(eva, "outcome_evidence", wraps=eva.outcome_evidence) as spy:
-            eva.check(self.CR)
-        crit = [str(c) for c in eva.as_list(eva.parse_frontmatter(eva.read_text(os.path.join(self.CR, "AGENT.md"))[0])[0]
-                                            .get("success_criteria"))]
-        self.assertEqual([c.args for c in spy.call_args_list], [(c, "") for c in crit])
+    def test_every_criterion_is_counted_and_the_llm_ones_are_named(self):
+        got = row(eva.check(self.CR), "success-measurable")["reason"]
+        self.assertEqual(got, "2/3 success criteria machine-checkable; needs-review (human/model grading) at transcript "
+                              "time: ['Every finding cites file:line evidence.']")
 
 
 class TestReferences(Tmp):

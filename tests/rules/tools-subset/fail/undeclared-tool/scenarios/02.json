@@ -6,11 +6,16 @@
   }
  ],
  "expected_tools": [
-  "read_file",
-  "bash"
+  "read",
+  "shell"
  ],
  "must_include": [
   "src"
  ],
- "expected_outcome": "An overview with file:line evidence."
+ "expected_outcome": [
+  {
+   "type": "llm",
+   "text": "An overview with file:line evidence."
+  }
+ ]
 }

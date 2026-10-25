@@ -6,10 +6,15 @@
   }
  ],
  "expected_tools": [
-  "glob"
+  "search"
  ],
  "must_include": [
   "tests"
  ],
- "expected_outcome": "an overview with file:line evidence"
+ "expected_outcome": [
+  {
+   "type": "llm",
+   "text": "an overview with file:line evidence"
+  }
+ ]
 }

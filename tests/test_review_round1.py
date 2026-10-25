@@ -289,7 +289,7 @@ class TestMatcherFields(E.SkillMixin, unittest.TestCase):
 
 # ---------- P2-2: tools are compared by name ----------
 class TestToolNames(P.AgentBase, unittest.TestCase):
-    ONE = P.AGENT_MD.replace("[glob, grep, read_file]", "[read_file]")
+    ONE = P.AGENT_MD.replace("[search, read]", "[read]")
 
     def claude(self, tools, md=None):
         return self.agent(md=md or self.ONE, replace={"wrappers/claude/code-scout.md": lambda t: __import__("re").sub(
@@ -297,7 +297,7 @@ class TestToolNames(P.AgentBase, unittest.TestCase):
 
     def test_grep_cannot_stand_in_for_read_file(self):
         d, r = self.claude("Grep")
-        self.assertIn("parity-permissions-claude", ids(r)); self.assertIn("by name", row(r, "parity-permissions-claude")["reason"])
+        self.assertIn("parity-permissions-claude", ids(r)); self.assertIn("compared by capability class", row(r, "parity-permissions-claude")["reason"])
         self.assertIn("missing ['read']", row(r, "parity-permissions-claude")["reason"])
 
     def test_established_aliases_and_case_are_accepted(self):
@@ -306,14 +306,15 @@ class TestToolNames(P.AgentBase, unittest.TestCase):
 
     def test_extra_and_missing_tools_both_fail(self):
         d, r = self.claude("Read, Grep"); self.assertIn("parity-permissions-claude", ids(r)); shutil.rmtree(d)
-        d, r = self.claude("Read", md=P.AGENT_MD.replace("[glob, grep, read_file]", "[read_file, grep]"))
+        d, r = self.claude("Read", md=P.AGENT_MD)
         self.assertIn("parity-permissions-claude", ids(r))
 
     def test_aliases_are_an_explicit_table(self):
-        self.assertEqual(eva.tool_keys(["Read", "read_file", "TodoWrite"]), {"read"})
-        self.assertEqual(eva.tool_keys(["Skill"]), {"skill"})
-        self.assertNotEqual(eva.tool_keys(["Grep"]), eva.tool_keys(["read_file"]))
-        self.assertNotEqual(eva.tool_keys(["list_dir"]), eva.tool_keys(["Glob"]))
+        from engine.primitives import parity as PR
+        self.assertEqual(PR.capabilities(["Read", "read_file", "TodoWrite"]), ({"read"}, []))
+        self.assertEqual(PR.capabilities(["Skill"]), ({"skill"}, []))
+        self.assertNotEqual(PR.capabilities(["Grep"]), PR.capabilities(["read_file"]))
+        self.assertEqual(PR.capabilities(["list_dir"]), PR.capabilities(["Glob"]))
 
 # ---------- P2-3: gates after every builder call ----------
 class TestBuilderGatesAfterEveryCall(T.Base):

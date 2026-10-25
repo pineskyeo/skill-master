@@ -2,10 +2,12 @@
 name: vague-criteria
 description: Reads a repository and reports its structure. Use when a rule fixture needs an agent unit.
 goal: Report the structure of a repository with file and line evidence.
-tools: [read_file, grep]
+capabilities: [read, search]
+model_policy: judgment
 success_criteria:
-  - be helpful
-  - stay polite
+  - '{"type": "llm", "text": "be helpful"}'
+  - '{"type": "llm", "text": "stay polite"}'
+targets: [claude, codex, opencode, hermes]
 ---
 # Fixture Agent
 

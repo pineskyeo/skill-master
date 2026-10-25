@@ -14,7 +14,8 @@ DESC = "Checks one rule runner fixture. Use when a rule runner test needs a unit
 IMPLEMENTED = {"schema", "equals", "subset", "set_equals", "contains_text", "regex", "not_regex", "file_exists",
                "file_absent", "count", "max_bytes", "max_lines", "all", "any", "not", "when", "script_denylist",
                "parity_skill", "parity_invocation", "parity_agent_name", "parity_wrapper", "parity_permissions",
-               "heading_present", "description_heuristics", "local_refs", "host_frontmatter", "host_frontmatter_fields",
+               "heading_present", "description_heuristics", "local_refs", "agent_frontmatter", "host_frontmatter",
+               "host_frontmatter_fields",
                "host_field_length", "host_main_file_size", "host_metadata_version", "host_evals_count",
                "host_tools_declared", "host_success_measurable", "host_scenarios"}
 RESERVED = {"generated_up_to_date"}

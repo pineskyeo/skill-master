@@ -1,0 +1,15 @@
+{
+  "$comment": "The one tool-name to capability table (unit B1, plan.md:780-781, agent-master-skills.md section 3.3 lines 184-186). Keys are tool names in lower case, as transcripts and Claude Code wrappers spell them; each value is one capability of the AGENT.md v2 vocabulary (the enum of schemas/agent-frontmatter.schema.json). read reads one file's content; search finds or lists files or content. neutral names are bookkeeping tools that need no capability. A name not listed here is unmapped: transcript grading and the Claude wrapper check fail on it. Read by engine/primitives/parity.py once per process.",
+  "tools": {
+    "read": "read", "read_file": "read", "view": "read", "cat": "read",
+    "grep": "search", "glob": "search", "find": "search", "search": "search", "list_dir": "search", "ls": "search", "list": "search",
+    "write_file": "write", "edit_file": "write", "write": "write", "edit": "write", "multiedit": "write", "create_file": "write",
+    "delete_file": "write", "notebookedit": "write", "apply_patch": "write",
+    "bash": "shell", "shell": "shell", "terminal": "shell", "exec": "shell", "run_command": "shell",
+    "web_fetch": "web_fetch", "webfetch": "web_fetch",
+    "web_search": "web_search", "websearch": "web_search",
+    "task": "delegate",
+    "skill": "skill"
+  },
+  "neutral": ["todowrite", "todo_write"]
+}

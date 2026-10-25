@@ -221,7 +221,7 @@ class TestAgentLinksOutOfTheFolder(P.AgentBase, unittest.TestCase):
         self.assertEqual([i for i in eva.review_items(d) if i.startswith("english-output-matchers")], [])
 
 class TestRuleReviewCoversAgentSources(P.AgentBase, unittest.TestCase):
-    WRITE_MD = P.AGENT_MD.replace("[glob, grep, read_file]", "[glob, grep, read_file, write_file]")
+    WRITE_MD = P.AGENT_MD.replace("[search, read]", "[search, read, write]")
 
     def recorded(self, md=None, scenario=None):
         d, _ = self.agent(md=md)
@@ -242,7 +242,7 @@ class TestRuleReviewCoversAgentSources(P.AgentBase, unittest.TestCase):
         self.assertEqual(len(se.rule_review_problems(self.spec, self.ws)), 1, rel)
 
     def test_an_agent_md_tool_change_within_the_same_class(self):
-        self.assert_voided(self.recorded(), "AGENT.md", "tools: [glob, grep, read_file]", "tools: [read_file]")
+        self.assert_voided(self.recorded(), "AGENT.md", "capabilities: [search, read]", "capabilities: [read, search]")
 
     def test_a_scenario_matcher_beyond_the_shown_findings(self):
         six = [KO + str(i) for i in range(6)]

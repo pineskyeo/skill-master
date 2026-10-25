@@ -66,7 +66,7 @@
       "source": {"url": "https://code.claude.com/docs/en/sub-agents", "section": "Claude Code sub-agent tools (targets/claude.json permissions)", "verified": "2026-10-19"},
       "check": {"op": "parity_permissions", "tool": "claude"},
       "message": "{reason}",
-      "fix": "See notes/multi-tool-parity-plan.md section 2.4. List the same tools in the wrapper as in AGENT.md (aliases: TOOL_ALIASES in engine/primitives/parity.py), using tool names the capability table maps."
+      "fix": "See notes/multi-tool-parity-plan.md section 2.4. List wrapper tools whose capability classes (rules/data/capabilities.json) are exactly the AGENT.md capabilities."
     },
     {
       "id": "parity-permissions-codex",
@@ -77,7 +77,7 @@
       "source": {"url": "https://developers.openai.com/codex/subagents", "section": "Codex custom agents (targets/codex.json permissions)", "verified": "2026-10-19"},
       "check": {"op": "parity_permissions", "tool": "codex"},
       "message": "{reason}",
-      "fix": {"fail": "See notes/multi-tool-parity-plan.md section 2.4. Use mapped tool names or extend CAPABILITY_BY_TOOL in engine/primitives/parity.py.", "review": "See notes/multi-tool-parity-plan.md section 2.4. Run the agent on Codex only from a session whose sandbox fits it, and record that decision with `skill_eval.py approve --gate rule_review`."}
+      "fix": {"fail": "See notes/multi-tool-parity-plan.md section 2.4. Use only vocabulary values (read, search, write, shell, web_fetch, web_search, delegate, skill) in the AGENT.md capabilities.", "review": "See notes/multi-tool-parity-plan.md section 2.4. Run the agent on Codex only from a session whose sandbox fits it, and record that decision with `skill_eval.py approve --gate rule_review`."}
     },
     {
       "id": "parity-permissions-opencode",
@@ -88,7 +88,7 @@
       "source": {"url": "https://opencode.ai/docs/agents/", "section": "OpenCode agent permissions (targets/opencode.json permissions)", "verified": "2026-10-19"},
       "check": {"op": "parity_permissions", "tool": "opencode"},
       "message": "{reason}",
-      "fix": {"fail": "See notes/multi-tool-parity-plan.md section 2.4. Align the wrapper permissions with the AGENT.md tools.", "review": "See notes/multi-tool-parity-plan.md section 2.4. Check that no OpenCode permission key outside the recorded list matters for this agent, and record that decision with `skill_eval.py approve --gate rule_review`."}
+      "fix": {"fail": "See notes/multi-tool-parity-plan.md section 2.4. Align the wrapper permissions with the AGENT.md capabilities.", "review": "See notes/multi-tool-parity-plan.md section 2.4. Check that no OpenCode permission key outside the recorded list matters for this agent, and record that decision with `skill_eval.py approve --gate rule_review`."}
     },
     {
       "id": "parity-permissions-hermes",

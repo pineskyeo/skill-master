@@ -1,0 +1,19 @@
+{
+ "id": "overview",
+ "turns": [
+  {
+   "user": "Give me an overview of this repository"
+  }
+ ],
+ "expected_tools": [
+  "search",
+  "read"
+ ],
+ "must_include": [
+  "README"
+ ],
+ "expected_outcome": [
+  {"type": "file_line_citations", "min": 2},
+  {"type": "no_writes"}
+ ]
+}

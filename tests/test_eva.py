@@ -2,6 +2,7 @@ import contextlib, io, json, os, shutil, subprocess, sys, tempfile, unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 import eva
+from engine.primitives import transcript as TP
 
 def p(*a): return os.path.join(ROOT, *a)
 def wjson(path, obj):
@@ -10,6 +11,11 @@ def rjson(path):
     with open(path, encoding="utf-8") as f: return json.load(f)
 def wtext(path, text):
     with open(path, "w", encoding="utf-8") as f: f.write(text)
+def V2_AGENT(capabilities, criteria):
+    """An AGENT.md v2 text for a temp agent folder named a, one single-quoted JSON object per criterion."""
+    return ("---\nname: a\ndescription: d. Use when x.\ngoal: do the one thing well\ncapabilities: %s\n"
+            "model_policy: judgment\nsuccess_criteria:\n%stargets: [claude, codex, opencode, hermes]\n---\n"
+            % (capabilities, "".join("  - '%s'\n" % json.dumps(c) for c in criteria)))
 def run_of(calls=(), results=(), workspace=None):
     """Normalized run as produced by eva.load_transcript."""
     calls = [{"tool": c, "input": None, "result": None} if isinstance(c, str) else
@@ -89,35 +95,35 @@ class TestCommands(unittest.TestCase):
         reg = json.load(open(os.path.join(self.tmp, "registry.json")))
         self.assertEqual(len(reg), 6); self.assertTrue(os.path.exists(os.path.join(self.tmp, "INDEX.md")))
     def test_transcript_without_citations_fails(self):
-        r = eva.grade_transcript(p("golden/agents/research-assistant"), p("transcripts/research-followup.json"))
+        r = eva.grade_transcript(RA, p("transcripts/research-followup.json"))
         self.assertEqual(r.verdict, "FAIL")
         self.assertTrue({"criteria-sources", "expected-table"} <= {c["id"] for c in r.failed})
     def test_transcript_with_citations_needs_review(self):
-        # every machine check passes; "모든 주장에 출처를 단다" cannot be machine-checked -> REVIEW, not PASS
-        r = eva.grade_transcript(p("golden/agents/research-assistant"), p("transcripts/research-followup-cited.json"))
+        # every machine check passes; the llm criterion "Every claim has a source." -> REVIEW, not PASS
+        r = eva.grade_transcript(RA, p("transcripts/research-followup-cited.json"))
         self.assertEqual(r.failed, []); self.assertEqual(r.verdict, "REVIEW")
         self.assertEqual([c["id"] for c in r.needs_review], ["criteria-needs-review"])
-        self.assertIn("모든 주장에 출처를 단다", r.needs_review[0]["reason"])
+        self.assertIn("Every claim has a source.", r.needs_review[0]["reason"])
     def test_transcript_illegal_tool(self):
         t = os.path.join(self.tmp, "t.json")
         json.dump({"scenario": "basic", "tool_calls": ["web_search", "send_email"], "final": "x"}, open(t, "w"))
-        r = eva.grade_transcript(p("golden/agents/research-assistant"), t)
+        r = eva.grade_transcript(RA, t)
         self.assertIn("only-declared-tools", {c["id"] for c in r.checks if not c["passed"]})
 
 class TestOutcomeEvidence(unittest.TestCase):
     def test_sources_counts_unique_urls(self):
         run = run_of(results=["https://x.org/1 https://y.org/2 https://z.org/3"])
-        kind, ok, _, _ = eva.outcome_evidence("출처 링크 3개 이상 인용", "a https://x.org/1 b https://x.org/1. c https://y.org/2", run)
+        kind, ok, _, _ = TP.criterion_evidence({"type": "min_verified_sources", "min": 3}, "a https://x.org/1 b https://x.org/1. c https://y.org/2", run)
         self.assertEqual(kind, "sources"); self.assertFalse(ok)
-        self.assertTrue(eva.outcome_evidence("at least 2 sources", "https://x.org/1 https://y.org/2", run)[1])
+        self.assertTrue(TP.criterion_evidence({"type": "min_verified_sources", "min": 2}, "https://x.org/1 https://y.org/2", run)[1])
     def test_length(self):
-        self.assertEqual(eva.outcome_evidence("리포트는 10자 이하", "x" * 11)[:2], ("length", False))
-        self.assertTrue(eva.outcome_evidence("리포트는 10자 이하", "x" * 10)[1])
+        self.assertEqual(TP.criterion_evidence({"type": "max_chars", "max": 10}, "x" * 11)[:2], ("length", False))
+        self.assertTrue(TP.criterion_evidence({"type": "max_chars", "max": 10}, "x" * 10)[1])
     def test_table(self):
-        self.assertFalse(eva.outcome_evidence("비교표", "Hermes vs LangChain 비교표 ...")[1])
-        self.assertTrue(eva.outcome_evidence("비교표", "| a | b |\n|---|---|\n| 1 | 2 |")[1])
+        self.assertFalse(TP.criterion_evidence({"type": "markdown_table"}, "Hermes vs LangChain 비교표 ...")[1])
+        self.assertTrue(TP.criterion_evidence({"type": "markdown_table"}, "| a | b |\n|---|---|\n| 1 | 2 |")[1])
     def test_uncheckable_is_none(self):
-        self.assertIsNone(eva.outcome_evidence("모든 주장에 출처를 단다", "x"))
+        self.assertIsNone(TP.criterion_evidence({"type": "llm", "text": "Every claim has a source."}, "x")[1])
 
 class TestTranscriptOutcome(unittest.TestCase):
     def setUp(self):
@@ -125,11 +131,11 @@ class TestTranscriptOutcome(unittest.TestCase):
         self.agent = os.path.join(self.tmp, "a")
         os.makedirs(os.path.join(self.agent, "scenarios"))
         with open(os.path.join(self.agent, "AGENT.md"), "w", encoding="utf-8") as f: f.write(
-            "---\nname: a\ndescription: d. Use when x.\ngoal: do the one thing well\ntools: [t]\nsuccess_criteria:\n  - be nice\n---\n")
-        wjson(os.path.join(self.agent, "scenarios", "s.json"), {"id": "s", "turns": [{"user": "q"}], "expected_tools": ["t"],
-              "must_include": ["ok"], "expected_outcome": "a good answer"})
+            V2_AGENT("[read]", [{"type": "llm", "text": "be nice"}]))
+        wjson(os.path.join(self.agent, "scenarios", "s.json"), {"id": "s", "turns": [{"user": "q"}], "expected_tools": ["read"],
+              "must_include": ["ok"], "expected_outcome": [{"type": "llm", "text": "a good answer"}]})
         self.t = os.path.join(self.tmp, "t.json")
-        wjson(self.t, {"scenario": "s", "tool_calls": ["t"], "final": "ok"})
+        wjson(self.t, {"scenario": "s", "tool_calls": ["read_file"], "final": "ok"})
     def tearDown(self): shutil.rmtree(self.tmp)
     def test_no_checkable_outcome_fails(self):
         r = eva.grade_transcript(self.agent, self.t)
@@ -139,9 +145,9 @@ class TestTranscriptOutcome(unittest.TestCase):
         self.assertFalse([c for c in r.checks if c["status"] == "n/a"])  # not silently N/A
     def test_scenario_success_criteria_checked(self):
         sp = os.path.join(self.agent, "scenarios", "s.json")
-        s = rjson(sp); s["success_criteria"] = ["URL 1개 이상"]; wjson(sp, s)
+        s = rjson(sp); s["success_criteria"] = [{"type": "min_verified_sources", "min": 1}]; wjson(sp, s)
         self.assertEqual(eva.grade_transcript(self.agent, self.t).verdict, "FAIL")
-        wjson(self.t, {"scenario": "s", "tool_calls": [{"tool": "t", "result": "found https://x.org"}], "final": "ok https://x.org"})
+        wjson(self.t, {"scenario": "s", "tool_calls": [{"tool": "read_file", "result": "found https://x.org"}], "final": "ok https://x.org"})
         r = eva.grade_transcript(self.agent, self.t)
         self.assertTrue(self.status_of(r, "criteria-sources"))
         self.assertEqual(r.verdict, "REVIEW")  # "be nice" / "a good answer" still need a human or model grader
@@ -178,7 +184,19 @@ class TestCategoryFloor(unittest.TestCase):
     def test_floor_constant(self):
         self.assertTrue(0 < eva.CATEGORY_FLOOR <= 1)
     def test_zero_pass_category_fails_unit(self):
-        r = minus_parity(minus_language(eva.check(p("bad/agents/no-context-agent"))))
+        # an AGENT.md v2 copy of bad/agents/no-context-agent (bad/ stays v1): no memory section, single-turn scenarios only
+        tmp = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, tmp)
+        d = os.path.join(tmp, "no-context-agent"); os.makedirs(os.path.join(d, "scenarios"))
+        wtext(os.path.join(d, "AGENT.md"), "---\nname: no-context-agent\ndescription: Looks up one word in a dictionary. Use "
+              "when the user asks what a word means.\ngoal: Explain the meaning of one word in one paragraph with a dictionary "
+              "source.\ncapabilities: [web_fetch]\nmodel_policy: judgment\nsuccess_criteria:\n  - '{\"type\": "
+              "\"min_verified_sources\", \"min\": 1}'\ntargets: [claude, codex, opencode, hermes]\n---\n# Dictionary Lookup\n"
+              "## Tools\n- web_fetch: look up the meaning of a word\n")
+        for n, word in (("01-one", "serendipity"), ("02-two", "ephemeral")):
+            wjson(os.path.join(d, "scenarios", n + ".json"), {"id": n[3:], "turns": [{"user": "meaning of " + word}],
+                  "expected_tools": ["web_fetch"], "must_include": [word],
+                  "expected_outcome": [{"type": "min_verified_sources", "min": 1}]})
+        r = minus_parity(minus_language(eva.check(d)))
         self.assertGreaterEqual(r.score, eva.PASS_THRESHOLD)
         self.assertFalse(r.critical_failed)
         self.assertEqual(r.category_failed, ["context"])
@@ -222,7 +240,8 @@ class TestLoop(unittest.TestCase):
         self.assertEqual(res.returncode, 1)
         self.assertIn("round 2", res.stdout); self.assertIn("final: FAIL", res.stdout)
 
-RA, CR = p("golden/agents/research-assistant"), p("golden/agents/code-reviewer")
+# The English AGENT.md v2 copies of the golden agents (unit B1 D11): golden/ stays v1 and fails agent-valid.
+RA, CR = p("tests/fixtures/agents/research-assistant-v2"), p("tests/fixtures/agents/code-reviewer-v2")
 
 class TmpMixin:
     def setUp(self): self.tmp = tempfile.mkdtemp()
@@ -268,20 +287,19 @@ class TestCodeReviewer(TmpMixin, unittest.TestCase):
         return rjson(p("transcripts/code-reviewer-drill.json"))
     def test_static_criteria(self):
         r = eva.check(CR)
-        self.assertEqual(r.verdict, "FAIL")  # Korean AGENT.md and scenarios: only the english-* checks fail
-        self.assertEqual(self.ids(r), {"english-agent-md", "english-scenarios", "parity-wrapper-claude",
-                                       "parity-wrapper-codex", "parity-wrapper-opencode", "parity-wrapper-hermes",
-                                       "parity-permissions-hermes"})
+        self.assertEqual(r.verdict, "FAIL")  # no wrappers/: only the parity rows fail
+        self.assertEqual(self.ids(r), {"parity-wrapper-claude", "parity-wrapper-codex", "parity-wrapper-opencode",
+                                       "parity-wrapper-hermes", "parity-permissions-hermes"})
         r = minus_parity(minus_language(r))
         self.assertEqual(r.verdict, "PASS", r.failed)
         self.assertNotIn("success-measurable", self.ids(r))
-        meta, _ = eva.parse_frontmatter(open(os.path.join(CR, "AGENT.md"), encoding="utf-8").read())
-        ev = {c: eva.outcome_evidence(c, "") for c in meta["success_criteria"]}
-        self.assertEqual({e[0] for e in ev.values() if e}, {"file-lines", "no-writes"})
-        self.assertEqual([c for c, e in ev.items() if e is None], ["모든 지적에 파일:줄 근거를 단다"])  # restored, needs-review
+        meta = TP.read_agent(CR).meta
+        ev = [(c, TP.criterion_evidence(c, "")) for c in meta["success_criteria"]]
+        self.assertEqual({e[0] for c, e in ev if e[1] is not None}, {"file-lines", "no-writes"})
+        self.assertEqual([c["text"] for c, e in ev if e[1] is None], ["Every finding cites file:line evidence."])  # needs-review
         for f, s, e in eva.load_scenarios(CR):
             self.assertFalse(e)
-            self.assertTrue(all(eva.outcome_evidence(c, "") for c in s["expected_outcome"]), f)
+            self.assertTrue(all(TP.criterion_evidence(c, "")[1] is not None for c in s["expected_outcome"]), f)
     def test_drill_transcript(self):
         r = eva.grade_transcript(CR, p("transcripts/code-reviewer-drill.json"))
         self.assertEqual(r.failed, [])
@@ -293,8 +311,8 @@ class TestCodeReviewer(TmpMixin, unittest.TestCase):
         for call in ({"tool": "write_file", "input": {"path": "x"}}, {"tool": "Edit", "input": {"file_path": "x"}},
                      {"tool": "read_file", "input": {"command": "echo hi > notes.txt"}},
                      {"tool": "read_file", "input": {"command": "sed -i 's/a/b/' f.py"}}):
-            self.assertFalse(eva.outcome_evidence("파일 변경 0건", "", run_of([call]))[1], call)
-        self.assertTrue(eva.outcome_evidence("파일 변경 0건", "", run_of([
+            self.assertFalse(TP.criterion_evidence({"type": "no_writes"}, "", run_of([call]))[1], call)
+        self.assertTrue(TP.criterion_evidence({"type": "no_writes"}, "", run_of([
             "read_file", {"tool": "grep", "input": {"command": "grep -rn x . 2>/dev/null"}}]))[1])
     def test_write_tool_in_transcript_fails_code_reviewer(self):
         t = self.drill(); t["tool_calls"].append({"tool": "write_file", "input": {"path": "REVIEW.md"}, "result": "ok"})
@@ -304,48 +322,49 @@ class TestCodeReviewer(TmpMixin, unittest.TestCase):
     def test_file_line_count(self):
         run = run_of([{"tool": "read_file", "input": {"path": "src/app.py"}, "result": "     1\timport os\n     2\tx = 1"},
                       {"tool": "bash", "input": {"command": "grep -n -A1 x lib/util.go"}, "result": "7:x\n8-y\n9:z"}])
-        kind, ok, got, _ = eva.outcome_evidence("파일:줄 근거 3개 이상", "src/app.py:1, src/app.py:1, lib/util.go:7", run)
+        kind, ok, got, _ = TP.criterion_evidence({"type": "file_line_citations", "min": 3}, "src/app.py:1, src/app.py:1, lib/util.go:7", run)
         self.assertEqual(kind, "file-lines"); self.assertFalse(ok, got)  # duplicates counted once
-        self.assertTrue(eva.outcome_evidence("at least 2 file:line citations", "src/app.py:1 lib/util.go:7-9", run)[1])
+        self.assertTrue(TP.criterion_evidence({"type": "file_line_citations", "min": 2}, "src/app.py:1 lib/util.go:7-9", run)[1])
     def test_citations_to_unopened_files_ignored(self):
         run = run_of([{"tool": "read_file", "input": {"path": "src/app.py"}, "result": "1: a\n2: b"}])
-        ok, got = eva.outcome_evidence("파일:줄 근거 2개 이상", "src/app.py:1 src/other.py:2 https://x.org:8080/a", run)[1:3]
+        ok, got = TP.criterion_evidence({"type": "file_line_citations", "min": 2}, "src/app.py:1 src/other.py:2 https://x.org:8080/a", run)[1:3]
         self.assertFalse(ok); self.assertIn("src/other.py:2", got)
     def test_uncountable_citation_criterion_not_checkable(self):
-        self.assertIsNone(eva.outcome_evidence("모든 지적에 파일:줄 근거를 단다", ""))
+        self.assertIsNone(TP.criterion_evidence({"type": "llm", "text": "Every finding cites file:line evidence."}, "")[1])
 
 class TestStaticMeasurable(TmpMixin, unittest.TestCase):
     """Task 2: success-measurable uses the same checkers as transcript grading."""
     def agent(self, crit):
         a = os.path.join(self.tmp, "a"); os.makedirs(os.path.join(a, "scenarios"), exist_ok=True)
-        wtext(os.path.join(a, "AGENT.md"), "---\nname: a\ndescription: d. Use when x.\ngoal: do the one thing well\n"
-              "tools: [t]\nsuccess_criteria:\n" + "".join("  - %s\n" % c for c in crit) + "---\n")
+        wtext(os.path.join(a, "AGENT.md"), V2_AGENT("[read]", crit))
         return eva.check(a)
     def m(self, crit):
         return next(c for c in self.agent(crit).checks if c["id"] == "success-measurable")["passed"]
     def test_keyword_only_criteria_not_measurable(self):
-        self.assertFalse(self.m(["모든 주장에 출처를 단다"]))
-        self.assertFalse(self.m(["must be correct"]))
-        self.assertFalse(self.m(["응답 시간 5초 이내"]))
+        self.assertFalse(self.m([{"type": "llm", "text": "Every claim has a source."}]))
+        self.assertFalse(self.m([{"type": "llm", "text": "must be correct"}]))
+        self.assertFalse(self.m([{"type": "llm", "text": "Responds within 5 seconds."}]))
     def test_checker_criteria_measurable(self):
-        self.assertTrue(self.m(["출처 링크 3개 이상", "500자 이하", "비교표", "파일:줄 근거 1개 이상", "파일 변경 0건"]))
+        self.assertTrue(self.m([{"type": "min_verified_sources", "min": 3}, {"type": "max_chars", "max": 500},
+                                {"type": "markdown_table"}, {"type": "file_line_citations", "min": 1}, {"type": "no_writes"}]))
     def test_mixed_criteria_kept_with_needs_review_note(self):
         # an unmeasurable criterion stays (graded needs-review per transcript) as long as one criterion is checkable
-        c = next(c for c in self.agent(["출처 링크 3개 이상", "be helpful"]).checks if c["id"] == "success-measurable")
+        c = next(c for c in self.agent([{"type": "min_verified_sources", "min": 3}, {"type": "llm", "text": "be helpful"}]).checks
+                 if c["id"] == "success-measurable")
         self.assertTrue(c["passed"]); self.assertIn("needs-review", c["reason"]); self.assertIn("be helpful", c["reason"])
     def test_empty_criteria_fails(self):
         self.assertFalse(self.m([]))
     def test_success_measurable_is_must(self):
-        r = self.agent(["be helpful", "be kind"])
+        r = self.agent([{"type": "llm", "text": "be helpful"}, {"type": "llm", "text": "be kind"}])
         self.assertIn("success-measurable", self.ids(r, "critical_failed")); self.assertEqual(r.verdict, "FAIL")
 
 class TestVerifiedCitations(TmpMixin, unittest.TestCase):
     """Task 3: only URLs that appear in tool results count."""
     def test_unverified_urls_do_not_count(self):
         final = "https://a.org/1 https://b.org/2"
-        self.assertFalse(eva.outcome_evidence("출처 2개 이상", final)[1])
-        self.assertFalse(eva.outcome_evidence("출처 2개 이상", final, run_of([{"tool": "web_fetch", "input": {"url": "https://a.org/1"}}]))[1])
-        self.assertTrue(eva.outcome_evidence("출처 2개 이상", final, run_of(results=["https://a.org/1/ and https://b.org/2."]))[1])
+        self.assertFalse(TP.criterion_evidence({"type": "min_verified_sources", "min": 2}, final)[1])
+        self.assertFalse(TP.criterion_evidence({"type": "min_verified_sources", "min": 2}, final, run_of([{"tool": "web_fetch", "input": {"url": "https://a.org/1"}}]))[1])
+        self.assertTrue(TP.criterion_evidence({"type": "min_verified_sources", "min": 2}, final, run_of(results=["https://a.org/1/ and https://b.org/2."]))[1])
     def test_tool_results_field(self):
         t = rjson(p("transcripts/research-followup-cited.json"))
         results = [c.pop("result") for c in t["tool_calls"]]
@@ -384,8 +403,8 @@ class TestInputValidation(TmpMixin, unittest.TestCase):
             wtext(fp, s) if isinstance(s, str) else wjson(fp, s)
         return a
     def good_scenario(self, **kw):
-        s = {"id": "s", "turns": [{"user": "q"}], "expected_tools": ["grep"], "must_include": ["x"],
-             "expected_outcome": "파일 변경 0건"}
+        s = {"id": "s", "turns": [{"user": "q"}], "expected_tools": ["search"], "must_include": ["x"],
+             "expected_outcome": [{"type": "no_writes"}]}
         s.update(kw); return s
     def test_scenario_not_object(self):
         a = self.agent_with({"1.json": [1, 2], "2.json": "\"text\"", "3.json": self.good_scenario()})
@@ -396,7 +415,7 @@ class TestInputValidation(TmpMixin, unittest.TestCase):
         self.assertIn("got list", reason); self.assertIn("got str", reason)
     def test_scenario_required_fields(self):
         cases = {"no-id": {"id": None}, "turns-str": {"turns": "q"}, "turn-no-user": {"turns": [{"bot": "x"}]},
-                 "tools-str": {"expected_tools": "grep"}, "no-kw": {"must_include": []},
+                 "tools-str": {"expected_tools": "search"}, "no-kw": {"must_include": []},
                  "no-outcome": {"expected_outcome": ""}, "bad-sc": {"success_criteria": 3}}
         for name, kw in cases.items():
             s = self.good_scenario(**kw)
@@ -501,10 +520,9 @@ class TestNoAnswerLookup(TmpMixin, unittest.TestCase):
         self.assertEqual(self.ids(r, "critical_failed"), {"no-answer-lookup"})
     def test_shell_answer_lookup_transcript_fails(self):
         a = os.path.join(self.tmp, "a"); os.makedirs(os.path.join(a, "scenarios"))
-        wtext(os.path.join(a, "AGENT.md"), "---\nname: a\ndescription: d. Use when x.\ngoal: do the one thing well\n"
-              "tools: [bash]\nsuccess_criteria:\n  - 파일 변경 0건\n---\n")
-        wjson(os.path.join(a, "scenarios", "s.json"), {"id": "s", "turns": [{"user": "q"}], "expected_tools": ["bash"],
-              "must_include": ["ok"], "expected_outcome": "파일 변경 0건"})
+        wtext(os.path.join(a, "AGENT.md"), V2_AGENT("[shell]", [{"type": "no_writes"}]))
+        wjson(os.path.join(a, "scenarios", "s.json"), {"id": "s", "turns": [{"user": "q"}], "expected_tools": ["shell"],
+              "must_include": ["ok"], "expected_outcome": [{"type": "no_writes"}]})
         ok = {"scenario": "s", "final": "ok", "tool_calls": [{"tool": "bash", "input": {"command": "grep -rn ok ."}, "result": "ok"}]}
         self.assertEqual(eva.grade_transcript(a, self.transcript(ok)).verdict, "PASS")
         for cmd in ("git log --all -p", "git fsck --unreachable", "git reflog show", "find .. -name '*.md'", "find / -name x"):
@@ -765,37 +783,37 @@ class TestCitedLinesExist(TmpMixin, unittest.TestCase):
         self.assertEqual(self.ids(r, "critical_failed"), {"expected-file-lines"})  # 2 verified < 3 required
     def test_file_name_alone_is_not_evidence(self):
         run = run_of([{"tool": "read_file", "input": {"path": "src/app.py"}, "result": "file opened"}])
-        self.assertFalse(eva.outcome_evidence("파일:줄 근거 1개 이상", "src/app.py:3", run)[1])
+        self.assertFalse(TP.criterion_evidence({"type": "file_line_citations", "min": 1}, "src/app.py:3", run)[1])
         run = run_of([{"tool": "read_file", "input": {"path": "src/app.py"}}], results=["src/app.py"])
-        self.assertFalse(eva.outcome_evidence("파일:줄 근거 1개 이상", "src/app.py:3", run)[1])
+        self.assertFalse(TP.criterion_evidence({"type": "file_line_citations", "min": 1}, "src/app.py:3", run)[1])
     def test_numbered_formats(self):
         # Round 5: 'N text' (space separator) is indistinguishable from raw content ('200 OK') and no longer counts
-        self.assertFalse(eva.outcome_evidence("파일:줄 근거 1개 이상", "src/app.py:3", run_of(
+        self.assertFalse(TP.criterion_evidence({"type": "file_line_citations", "min": 1}, "src/app.py:3", run_of(
             [{"tool": "read_file", "input": {"file_path": "/work/repo/src/app.py"}, "result": "3 x = 1"}], workspace="/work/repo"))[1])
         for res in ("     3\tx = 1", "3→x = 1", "3: x = 1"):
             run = run_of([{"tool": "read_file", "input": {"file_path": "/work/repo/src/app.py"}, "result": res}], workspace="/work/repo")
-            self.assertTrue(eva.outcome_evidence("파일:줄 근거 1개 이상", "src/app.py:3", run)[1], res)
-            self.assertFalse(eva.outcome_evidence("파일:줄 근거 1개 이상", "src/app.py:4", run)[1], res)
-            self.assertFalse(eva.outcome_evidence("파일:줄 근거 1개 이상", "src/other.py:3", run)[1], res)
+            self.assertTrue(TP.criterion_evidence({"type": "file_line_citations", "min": 1}, "src/app.py:3", run)[1], res)
+            self.assertFalse(TP.criterion_evidence({"type": "file_line_citations", "min": 1}, "src/app.py:4", run)[1], res)
+            self.assertFalse(TP.criterion_evidence({"type": "file_line_citations", "min": 1}, "src/other.py:3", run)[1], res)
     def test_grep_lines_and_ranges(self):
         run = run_of([{"tool": "bash", "input": {"command": "grep -n -A1 foo src/a.py"}, "result": "10:foo\n11-bar"}])
-        ev = lambda final: eva.outcome_evidence("파일:줄 근거 1개 이상", final, run)[1]
+        ev = lambda final: TP.criterion_evidence({"type": "file_line_citations", "min": 1}, final, run)[1]
         self.assertTrue(ev("src/a.py:10")); self.assertTrue(ev("src/a.py:10-11"))
         self.assertFalse(ev("src/a.py:10-12")); self.assertFalse(ev("src/b.py:10"))
         # Round 4: recursive grep reads many files, and top-level tool_results belong to no read call -> never count
         run = run_of([{"tool": "bash", "input": {"command": "grep -rn -A1 foo src"}, "result": "src/a.py:10:foo\nsrc/a.py-11-bar"}])
-        self.assertFalse(eva.outcome_evidence("파일:줄 근거 1개 이상", "src/a.py:10", run)[1])
+        self.assertFalse(TP.criterion_evidence({"type": "file_line_citations", "min": 1}, "src/a.py:10", run)[1])
         run = run_of(["grep"], results=["src/a.py:10:foo", "7: bar"])
-        self.assertFalse(eva.outcome_evidence("파일:줄 근거 1개 이상", "src/a.py:10", run)[1])
-        self.assertFalse(eva.outcome_evidence("파일:줄 근거 1개 이상", "src/a.py:7", run)[1])
+        self.assertFalse(TP.criterion_evidence({"type": "file_line_citations", "min": 1}, "src/a.py:10", run)[1])
+        self.assertFalse(TP.criterion_evidence({"type": "file_line_citations", "min": 1}, "src/a.py:7", run)[1])
 
 class TestNeedsReview(TmpMixin, unittest.TestCase):
     """P2: unmeasurable criteria are needs-review (not N/A, not PASS); verdict REVIEW, exit code 3."""
     def test_restored_criteria_present(self):
-        for agent, crit in ((CR, "모든 지적에 파일:줄 근거를 단다"), (RA, "모든 주장에 출처를 단다")):
-            meta, _ = eva.parse_frontmatter(open(os.path.join(agent, "AGENT.md"), encoding="utf-8").read())
-            self.assertIn(crit, meta["success_criteria"])
-            self.assertTrue(any(eva.outcome_evidence(c, "") for c in meta["success_criteria"]))  # count floor kept
+        for agent, crit in ((CR, "Every finding cites file:line evidence."), (RA, "Every claim has a source.")):
+            meta = TP.read_agent(agent).meta
+            self.assertIn({"type": "llm", "text": crit}, meta["success_criteria"])
+            self.assertTrue(any(TP.criterion_evidence(c, "")[1] is not None for c in meta["success_criteria"]))  # count floor kept
     def test_verdict_order(self):
         r = eva.Report("x", "transcript"); r.add("a", "goal", True, "")
         self.assertEqual(r.verdict, "PASS")
@@ -873,7 +891,7 @@ class TestAtxHeadings(unittest.TestCase):
         self.assertEqual(eva.headings("## Inputs ##\n#\n"), [(2, "Inputs"), (1, "")])
 
 def cites_ok(final, calls, n=1):
-    return eva.outcome_evidence("파일:줄 근거 %d개 이상" % n, final, run_of(calls))[1]
+    return TP.criterion_evidence({"type": "file_line_citations", "min": n}, final, run_of(calls))[1]
 
 class TestCitationSingleFile(unittest.TestCase):
     """Round 3 (a): numbered lines count only for a call that read exactly one file."""
@@ -1125,7 +1143,7 @@ class TestRound4Citations(unittest.TestCase):
         self.assertTrue(cites_ok("src/a.py:42", [{"tool": "Read", "input": {"file_path": "src/a.py"}, "result": "42\thello"}]))
     def test_exact_path_match_no_suffix(self):
         read = lambda path, ws=None: run_of([{"tool": "read_file", "input": {"path": path}, "result": "     5\tx"}], workspace=ws)
-        ev = lambda final, run: eva.outcome_evidence("파일:줄 근거 1개 이상", final, run)[1]
+        ev = lambda final, run: TP.criterion_evidence({"type": "file_line_citations", "min": 1}, final, run)[1]
         self.assertFalse(ev("docs/README.md:5", read("README.md")))
         self.assertFalse(ev("README.md:5", read("docs/README.md")))
         self.assertFalse(ev("src/app.py:5", read("/work/repo/src/app.py")))  # no workspace: no suffix guess
@@ -1160,7 +1178,7 @@ class TestRound4Citations(unittest.TestCase):
             self.assertFalse(cites_ok("src/a.py:42", [{"tool": "bash", "input": {"command": cmd}, "result": res}]), cmd)
     def test_cwd_key(self):
         call = lambda cwd: [{"tool": "bash", "input": {"command": "cat -n a.py", "cwd": cwd}, "result": "     5\tx"}]
-        ev = lambda final, calls, ws=None: eva.outcome_evidence("파일:줄 근거 1개 이상", final, run_of(calls, workspace=ws))[1]
+        ev = lambda final, calls, ws=None: TP.criterion_evidence({"type": "file_line_citations", "min": 1}, final, run_of(calls, workspace=ws))[1]
         self.assertTrue(ev("src/a.py:5", call("/repo/src"), "/repo"))
         self.assertTrue(ev("a.py:5", call("/repo"), "/repo"))  # reviewer repro: {"command": "cat -n a.py", "cwd": "/repo"}
         self.assertFalse(ev("a.py:5", call("/repo/src"), "/repo"))
@@ -1336,7 +1354,7 @@ class TestRound5Citations(unittest.TestCase):
         calls = self.read("\n".join("%6d\tx" % n for n in range(1, 50)))
         self.assertTrue(cites_ok("src/a.py:3-42", calls))
         self.assertFalse(cites_ok("src/a.py:42-3", calls))  # reviewer repro
-        ev = eva.outcome_evidence("파일:줄 근거 1개 이상", "src/a.py:42-3", run_of(calls))
+        ev = TP.criterion_evidence({"type": "file_line_citations", "min": 1}, "src/a.py:42-3", run_of(calls))
         self.assertIn("src/a.py:42-3", ev[2])
     def test_huge_range_stops_early(self):
         self.assertFalse(cites_ok("src/a.py:1-999999999", self.read("     1\tx")))

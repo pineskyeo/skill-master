@@ -9,10 +9,15 @@
   }
  ],
  "expected_tools": [
-  "grep"
+  "search"
  ],
  "must_include": [
   "tests"
  ],
- "expected_outcome": "Details of the named folder."
+ "expected_outcome": [
+  {
+   "type": "llm",
+   "text": "Details of the named folder."
+  }
+ ]
 }

@@ -7,7 +7,13 @@ from engine.loaders import (TomlError, _DQ_ESCAPES, _DQ_HEX, _TOML_BARE_KEY_RE, 
                             _strip_comment, _unquote, parse_flat_toml, parse_frontmatter_ex, yaml_typed_keys)
 from engine import rule_runner
 from engine.primitives import description_heuristics, heading_present, local_refs as refs_primitive
-from engine.primitives import parity as parity_primitive, script_denylist
+from engine.primitives import parity as parity_primitive, script_denylist, transcript as transcript_primitive
+from engine.primitives.transcript import (CMD_KEYS, CWD_KEYS, FILELINE_RE, GIT_HISTORY_RE, GREP_LINE_RE, NOT_READ_TOOL_WORDS,
+                                          NUMBERED_LINE_RE, PATH_KEYS, READ_TOOL_WORDS, SHELL_META_RE, SHELL_TOOL_WORDS,
+                                          TABLE_RE, URL_RE, WRITE_CMD_RE, WRITE_WORDS, _GREP_FLAG_LETTERS, _call_inputs,
+                                          _grep_lines, _norm_path, _norm_url, _numbered_lines, _numbered_read_cmd,
+                                          _outside, _read_call, _result_lines, _strings, _tool_words,
+                                          answer_lookup_violations, lines_seen, write_calls)
 from engine.primitives.script_denylist import (ENGLISH_MAX_SHOWN, LINK_CYCLE, LINK_DANGLING, LINK_LOOP, LINK_OUT, WRAPPER_OUT,
                                                EnglishScan, UnitTree, _ESC_PAIR_RE, _ESC_RE, _YAML_BLOCK_INDICATOR_RE,
                                                _YAML_COMPLEX_KEY_RE, _YAML_ITEM_RE, _YAML_KEY_RE, _decode_escapes,
@@ -127,7 +133,7 @@ class Report:
 EXIT_CODES = {"PASS": 0, "FAIL": 1, "REVIEW": 3}
 
 CRITICAL = {"frontmatter", "name-format", "name-matches-folder", "description-present",
-            "goal-present", "tools-declared"}
+            "goal-present", "tools-declared", "agent-frontmatter-v2"}
 
 def detect_kind(path):
     if os.path.isfile(os.path.join(path, "SKILL.md")): return "skill"
@@ -377,27 +383,8 @@ CODEX_UNRESTRICTABLE = ("write", "shell", "web_fetch", "web_search", "delegate",
 # file (agent-master-skills.md 3.4), and the strict flat reader rejects the dotted skills.config until A3.
 CODEX_AGENT_REQUIRED_KEYS = ("name", "description", "developer_instructions")
 CODEX_AGENT_OPTIONAL_KEYS = ("model", "model_reasoning_effort")
-CAPABILITY_BY_TOOL = {}
-for _cap, _names in (("read", "read_file read grep glob list_dir ls find search view cat"),
-                     ("write", "write_file edit_file write edit multiedit create_file delete_file notebookedit apply_patch"),
-                     ("shell", "bash shell terminal exec run_command"),
-                     ("web_fetch", "web_fetch webfetch"), ("web_search", "web_search websearch"),
-                     ("delegate", "task"), ("skill", "skill")):
-    for _n in _names.split():
-        CAPABILITY_BY_TOOL[_n] = _cap
-NEUTRAL_TOOLS = ("todowrite", "todo_write")
-# OpenCode agent permission keys as recorded from the OpenCode agents doc (inputs/agent-master-skills.md section 3.4, read
-# 2026-10-19), each with the capability class it grants. None: no class covers the key, so the wrapper must deny it.
-OPENCODE_PERMISSION_GRANTS = {"read": "read", "edit": "write", "glob": "read", "grep": "read", "list": "read", "bash": "shell",
-                              "task": "delegate", "external_directory": None, "webfetch": "web_fetch",
-                              "websearch": "web_search", "lsp": "read", "skill": "skill"}
-# The source list ends in "...", so OpenCode may have keys not recorded above, each with an UNVERIFIED default.
+# The OpenCode permission key list ends in "..." (targets/opencode.json), so a key not recorded keeps an UNVERIFIED default.
 OPENCODE_PERMISSION_KEYS_COMPLETE = False
-# Tool-name comparison (Claude Code wrapper vs AGENT.md): a tool is only the same tool under another harness's spelling when
-# listed here; every other name compares by itself (lower case), so read_file never matches grep or glob.
-TOOL_ALIASES = {"read": "read", "read_file": "read", "write": "write", "write_file": "write", "edit": "edit",
-                "edit_file": "edit", "bash": "shell", "shell": "shell", "websearch": "web_search", "web_search": "web_search",
-                "webfetch": "web_fetch", "web_fetch": "web_fetch"}
 PARITY_BUILDER_RULE = (
     "Keep the skill loadable by all four tools together (Claude Code, Codex CLI, OpenCode, Hermes Agent): SKILL.md is the "
     "single shared source. The name must match ^[a-z0-9]+(-[a-z0-9]+)*$ and the folder name; every metadata value must be "
@@ -414,21 +401,6 @@ def _tool_names(v):
     if not isinstance(v, list): return None
     out = [x.strip() for x in v if isinstance(x, str) and x.strip()]
     return out if out and len(out) == len(v) else None
-
-def tool_keys(names):
-    """Set of tool identities of a list of tool names (TOOL_ALIASES, lower case; neutral tools dropped)."""
-    keys = {n.strip().lower() for n in names}
-    return {TOOL_ALIASES.get(k, k) for k in keys if k not in NEUTRAL_TOOLS}
-
-def capabilities(names):
-    """(set of capabilities, unmapped names) of a list of tool names, by CAPABILITY_BY_TOOL (case-insensitive)."""
-    caps, bad = set(), []
-    for n in names:
-        k = n.strip().lower()
-        if k in NEUTRAL_TOOLS: continue
-        if k in CAPABILITY_BY_TOOL: caps.add(CAPABILITY_BY_TOOL[k])
-        else: bad.append(n)
-    return caps, bad
 
 PARITY_ROW_TOOLS = {
     "parity-skill-claude": ("claude",), "parity-skill-codex": ("codex",), "parity-skill-opencode": ("opencode",),
@@ -1128,8 +1100,8 @@ def _meta(unit):
     return heading_present.main_file(unit).meta_or_empty
 
 
-def _agent_tools(meta):
-    return [str(t) for t in as_list(meta.get("tools"))]
+def _agent_capabilities(meta):
+    return [str(t) for t in as_list(meta.get("capabilities"))]
 
 
 def _verdict(ok, facts):
@@ -1203,19 +1175,24 @@ def _host_evals_count(node):
 
 def _host_tools_declared(node):
     def run(unit):
-        tools = _agent_tools(_meta(unit))
-        return _verdict(bool(tools), {"tools": "%s" % tools})
+        caps = _agent_capabilities(_meta(unit))
+        return _verdict(bool(caps), {"tools": "%s" % caps})
     return run
 
 
 def _host_success_measurable(node):
-    """Measurable iff outcome_evidence (the transcript grader's checker) recognizes a criterion; B1 replaces it."""
+    """Measurable iff one typed criterion object of AGENT.md v2 has a machine-checkable type (any type but llm)."""
     def run(unit):
-        crit = [str(c) for c in as_list(_meta(unit).get("success_criteria"))]
-        unmeasurable = [c for c in crit if outcome_evidence(c, "") is None]
-        return _verdict(len(crit) > len(unmeasurable), {
-            "checkable": len(crit) - len(unmeasurable), "total": len(crit),
-            "detail": "; needs-review (human/model grading) at transcript time: %s" % unmeasurable if unmeasurable else ""})
+        crit = transcript_primitive.parse_agent(heading_present.main_file(unit).raw).criteria
+        checkable = [c for c in crit if isinstance(c, dict) and isinstance(c.get("type"), str)
+                     and c["type"] in transcript_primitive.KINDS and c["type"] != "llm"]
+        review = [c["text"].encode("ascii", "backslashreplace").decode("ascii") for c in crit
+                  if isinstance(c, dict) and c.get("type") == "llm" and isinstance(c.get("text"), str)]
+        untyped = len(crit) - len(checkable) - len(review)
+        return _verdict(bool(checkable), {
+            "checkable": len(checkable), "total": len(crit),
+            "detail": ("; needs-review (human/model grading) at transcript time: %s" % review if review else "") +
+                      ("; %d not a typed criterion object (see agent-frontmatter-v2)" % untyped if untyped else "")})
     return run
 
 
@@ -1241,7 +1218,7 @@ def _host_scenarios(node):
             noexp = [f for f, s in objs if not s.get("expected_outcome")]
             return _verdict(bool(objs) and not noexp, {"detail": ": missing in %s" % noexp if noexp else ""})
         if measure == "tools_subset":
-            tools = _agent_tools(_meta(unit))
+            tools = _agent_capabilities(_meta(unit))
             undeclared = sorted({t for f, s in objs for t in _strs(s.get("expected_tools")) if t not in tools})
             return _verdict(not undeclared, {"detail": ": undeclared %s" % undeclared if undeclared else "",
                                              "undeclared": "%s" % undeclared})
@@ -1473,380 +1450,71 @@ def _legacy_load_transcript(path):
             "calls": calls, "results": results}, []
 
 def grade_transcript(agent_path, transcript_path):
-    """Grade one run transcript against the agent's declaration and scenario (see load_transcript for format)."""
+    """Grade one run transcript against the AGENT.md v2 declaration and the scenario v2 (see load_transcript for the
+    transcript format). Each typed criterion is checked by engine/primitives/transcript.py criterion_evidence."""
     r = Report(transcript_path, "transcript")
     run, terr = load_transcript(transcript_path)
     r.add("transcript-valid", "structure", run is not None, "transcript shape" + (": %s" % terr if terr else " valid"),
-          "transcript를 {\"scenario\": str, \"tool_calls\": [...], \"final\": str} 형식으로 고치세요 (LOOP.md 참고).", must=True)
+          "Write the transcript as {\"scenario\": str, \"tool_calls\": [...], \"final\": str} (see LOOP.md).", must=True)
     if run is None: return r
-    raw, rerr = read_text(os.path.join(agent_path, "AGENT.md"))
-    meta, _, ferr = parse_frontmatter_ex(raw) if raw is not None else (None, "", rerr)
-    r.add("agent-valid", "structure", meta is not None, "agent AGENT.md frontmatter" + (": %s" % ferr if ferr else " valid"),
-          "채점할 에이전트 폴더의 AGENT.md frontmatter를 먼저 고치세요.", must=True)
-    if meta is None: return r
-    tools = [str(x) for x in as_list(meta.get("tools"))]
+    agent = transcript_primitive.read_agent(agent_path)
+    r.add("agent-valid", "structure", agent.valid,
+          "agent AGENT.md v2 frontmatter valid" if agent.valid else "%s: %s" % (agent.version, agent.detail),
+          transcript_primitive.MIGRATION, must=True)
+    if not agent.valid: return r
+    meta = agent.meta
     scen = load_scenarios(agent_path)
     sid = run["scenario"]
     match = [(f, s, e) for f, s, e in scen if isinstance(s, dict) and s.get("id") == sid]
     s = match[0][1] if match and not match[0][2] else None
     reason = "scenario '%s' exists" % sid if s is not None else (
         "scenario '%s' invalid: %s" % (sid, match[0][2]) if match else "scenario '%s' not found" % sid)
-    r.add("scenario-known", "goal", s is not None, reason, "transcript의 scenario를 유효한 시나리오 id와 맞추세요.", must=True)
+    r.add("scenario-known", "goal", s is not None, reason.encode("ascii", "backslashreplace").decode("ascii"),
+          "Make the transcript scenario the id of a valid scenario v2 file in the agent's scenarios/ folder.", must=True)
     if s is None: return r
-    names = [c["tool"] for c in run["calls"]]
-    illegal = sorted(set(names) - set(tools))
-    r.add("only-declared-tools", "tool-use", not illegal, "illegal tools: %s" % illegal,
-          "선언되지 않은 도구 %s 사용을 멈추세요." % illegal, must=True)
-    miss = [x for x in s["expected_tools"] if x not in names]
+    table, neutral = parity_primitive.capability_table()
+    cap_of = {c["tool"]: table.get(c["tool"].strip().lower()) for c in run["calls"]
+              if c["tool"].strip().lower() not in neutral}
+    caps = {cap for cap in cap_of.values() if cap}
+    unmapped = sorted(n for n, cap in cap_of.items() if cap is None)
+    undeclared = sorted(n for n, cap in cap_of.items() if cap is not None and cap not in meta["capabilities"])
+    illegal = sorted(unmapped + undeclared)
+    r.add("only-declared-tools", "tool-use", not illegal, "illegal tools: %s" % illegal + (
+          " (unmapped in rules/data/capabilities.json: %s; capability not declared: %s)" % (unmapped, undeclared)
+          if illegal else ""),
+          "Stop calling %s: every tool call must map through rules/data/capabilities.json to a capability the AGENT.md "
+          "declares." % illegal, must=True)
+    miss = [x for x in s["expected_tools"] if x not in caps]
     r.add("expected-tools-called", "tool-use", not miss, "missing calls: %s" % miss,
-          "필요한 도구 %s를 호출하세요." % miss, must=True)
+          "Call a tool of each expected capability %s." % miss, must=True)
     viol = answer_lookup_violations(run["calls"], run["workspace"])
     r.add("no-answer-lookup", "tool-use", not viol,
           "%d tool calls inspected%s" % (len(run["calls"]), (": answer lookup %s" % viol) if viol else ", no answer lookup"),
-          "워크스페이스 밖 탐색(.., /, ~, 워크스페이스 밖 절대경로)이나 git 이력 뒤지기(git log --all, reflog, fsck 등)를 멈추고 "
-          "정답을 찾아보지 말고 주어진 워크스페이스 안의 근거로 직접 푸세요.", must=True)
+          "Stop searching outside the workspace (.., /, ~, absolute paths outside it) and mining git history (git log "
+          "--all, reflog, fsck and the like); do not look the answer up, solve the task from the evidence inside the given "
+          "workspace.", must=True)
     final = run["final"]
     lack = [k for k in s["must_include"] if k.lower() not in final.lower()]
     r.add("outcome-keywords", "goal", not lack, "final answer missing: %s" % lack,
-          "최종 답에 %s를 포함하세요." % lack, must=True)
-    # outcome: every machine-checkable criterion must hold on the final answer (must-pass)
-    sources = [("criteria", c) for c in as_list(meta.get("success_criteria"))]
-    sources += [("criteria", c) for c in as_list(s.get("success_criteria"))]
-    sources += [("expected", c) for c in as_list(s.get("expected_outcome"))]
+          "Include %s in the final answer." % lack, must=True)
+    sources = [("criteria", c) for c in meta["success_criteria"]]
+    sources += [("criteria", c) for c in s.get("success_criteria", [])]
+    sources += [("expected", c) for c in s["expected_outcome"]]
     seen, checked = {}, 0
     for origin, crit in sources:
-        crit = str(crit)
-        ev = outcome_evidence(crit, final, run)
-        base = "%s-%s" % (origin, ev[0] if ev else "needs-review")
+        kind, ok, got, fix = transcript_primitive.criterion_evidence(crit, final, run)
+        base = "%s-%s" % (origin, kind)
         seen[base] = seen.get(base, 0) + 1
         cid = base if seen[base] == 1 else "%s-%d" % (base, seen[base])
-        if ev is None:
-            r.review(cid, "goal", "not machine-checkable, grade by human/model: '%s'" % crit,
-                     "사람 또는 모델 채점자가 최종 답이 '%s'를 만족하는지 판정하세요." % crit)
+        if ok is None:
+            r.review(cid, "goal", got, fix)
             continue
         checked += 1
-        _, ok, got, fix = ev
-        r.add(cid, "goal", ok, "'%s' -> %s" % (crit, got), fix, must=True)
+        r.add(cid, "goal", ok, "%s -> %s" % (transcript_primitive.show(crit), got), fix, must=True)
     r.add("outcome-evidence", "goal", checked > 0, "%d checkable outcome criteria" % checked,
-          "expected_outcome/success_criteria에 확인 가능한 조건(예: '출처 3개 이상', '800자 이하', '비교표')을 넣으세요.", must=True)
+          "Add a machine-checkable typed criterion (min_verified_sources, file_line_citations, no_writes, max_chars or "
+          "markdown_table) to the AGENT.md success_criteria or the scenario expected_outcome.", must=True)
     return r
-
-# ---------- answer-lookup integrity (no-answer-lookup) ----------
-PATH_KEYS = {"path", "paths", "file", "file_path", "filepath", "filename", "dir", "directory", "cwd", "root", "target"}
-CMD_KEYS = {"command", "cmd", "script", "args"}
-GIT_HISTORY_RE = re.compile(
-    r"\bgit\b[^;&|\n]*?\b(?:reflog|fsck|cat-file|rev-list\b[^;&|\n]*--all|"
-    r"(?:log|shortlog|whatchanged)\b[^;&|\n]*(?:--all|--reflog|--walk-reflogs|\s-g\b)|"
-    r"[^;&|\n]*--(?:lost-found|unreachable))")
-
-def _strings(v):
-    if isinstance(v, str): yield v
-    elif isinstance(v, list):
-        for x in v: yield from _strings(x)
-    elif isinstance(v, dict):
-        for x in v.values(): yield from _strings(x)
-
-def _call_inputs(inp):
-    """Split a tool input into (path-like strings, command strings)."""
-    if isinstance(inp, str):
-        return [], [inp]
-    paths, cmds = [], []
-    if isinstance(inp, dict):
-        for k, v in inp.items():
-            if k in PATH_KEYS: paths += list(_strings(v))
-            elif k in CMD_KEYS: cmds += list(_strings(v))
-    elif isinstance(inp, list):
-        cmds += list(_strings(inp))
-    return paths, cmds
-
-def _outside(token, workspace=None):
-    """True if a path token points outside the workspace (.., ~, filesystem root, foreign absolute path)."""
-    tok = token.strip().strip("'\"")
-    if tok.startswith("-") and "=" in tok:
-        tok = tok.split("=", 1)[1]
-    if not tok: return False
-    if tok == "~" or tok.startswith("~/"): return True
-    if tok.startswith("/"):
-        if tok.rstrip("/") == "": return True
-        if workspace:
-            ws = posixpath.normpath(workspace)
-            norm = posixpath.normpath(tok)
-            return not (norm == ws or norm.startswith(ws.rstrip("/") + "/"))
-        return False
-    norm = posixpath.normpath(tok)
-    return norm == ".." or norm.startswith("../")
-
-def answer_lookup_violations(calls, workspace=None):
-    """List of '<tool>: <offending input>' for calls that look for answers instead of solving the task:
-    searching outside the workspace or mining git history."""
-    out = []
-    for c in calls:
-        paths, cmds = _call_inputs(c["input"])
-        for p in paths:
-            if _outside(p, workspace):
-                out.append("%s: path %s" % (c["tool"], p))
-        for cmd in cmds:
-            if GIT_HISTORY_RE.search(cmd):
-                out.append("%s: git history mining '%s'" % (c["tool"], cmd))
-            try:
-                toks = shlex.split(cmd)
-            except ValueError:
-                toks = cmd.split()
-            bad = [t for t in toks if _outside(t, workspace)]
-            if bad:
-                out.append("%s: outside workspace %s in '%s'" % (c["tool"], bad, cmd))
-    return out
-
-# ---------- outcome checkers ----------
-URL_RE = re.compile(r"https?://[^\s<>()\[\]|\"'`]+")
-TABLE_RE = re.compile(r"^[ \t]*\|?.*\|.*\n[ \t]*\|?[ \t]*:?-{3,}:?[ \t]*(\|[ \t]*:?-{3,}:?[ \t]*)*\|?[ \t]*$", re.M)
-FILELINE_RE = re.compile(r"(?<![\w/.:-])((?:[\w.-]+/)*[\w-][\w.-]*\.[A-Za-z0-9]+):(\d+)(?:-(\d+))?(?![\d])")
-# Line-numbered tool output that proves a line was read: cat -n / nl / Read-tool style "N<tab|→|:>text"
-# (cat -n '%6d\t', Read tool 'N→'), attributed to the one file that call read (_read_call). Only a result that is
-# line-numbered throughout counts (see _numbered_lines); single-file grep -n output is parsed in _grep_lines.
-NUMBERED_LINE_RE = re.compile(r"^[ \t]*(\d+)(\t|→|:)")
-GREP_LINE_RE = re.compile(r"^(\d+)[:-]")
-FILELINE_CRIT_RE = re.compile(r"파일\s*[:·/]\s*줄|file\s*:\s*line|file[- ]line", re.I)
-NO_WRITE_CRIT_RE = re.compile(r"(?:파일\s*)?(?:변경|수정|쓰기)\s*0\s*건|읽기\s*전용|read[- ]only|"
-                              r"no\s+(?:file\s+)?(?:writes?|edits?|changes|modifications)|zero\s+(?:file\s+)?(?:writes|edits|changes)", re.I)
-WRITE_WORDS = {"write", "edit", "editor", "multiedit", "create", "delete", "remove", "rm", "move", "mv", "rename",
-               "patch", "apply", "replace", "insert", "append", "save", "commit", "push", "mkdir", "touch", "update"}
-WRITE_CMD_RE = re.compile(r"(?:^|[;&|]\s*|\bsudo\s+)(?:rm|mv|cp|touch|mkdir|rmdir|tee|truncate|chmod|chown|ln|dd)\b|"
-                          r"\bsed\s+(?:-\w*\s+)*-i|(?<![0-9&>])>>?\s*(?!&|/dev/null)\S|"
-                          r"\bgit\s+(?:commit|push|add|rm|mv|reset|checkout|restore|apply|stash|merge|rebase|cherry-pick)\b")
-
-def _norm_url(u):
-    return u.rstrip(".,;:").rstrip("/")
-
-def _tool_words(name):
-    return {w.lower() for w in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", name)}
-
-def write_calls(calls):
-    """Tool calls that write/edit files: write-like tool names or write-like shell commands."""
-    out = []
-    for c in calls:
-        if _tool_words(c["tool"]) & WRITE_WORDS:
-            out.append(c["tool"]); continue
-        _, cmds = _call_inputs(c["input"])
-        hit = [cmd for cmd in cmds if WRITE_CMD_RE.search(cmd)]
-        if hit:
-            out.append("%s '%s'" % (c["tool"], hit[0]))
-    return out
-
-def _norm_path(p, cwd=None, workspace=None):
-    """Canonical form of a file path for exact comparison: quotes and './' dropped, normalized, joined to cwd when
-    relative, and made relative to the workspace when it lies inside it. No suffix matching: 'README.md' and
-    'docs/README.md' are different files."""
-    p = p.strip().strip("'\"")
-    if cwd and not p.startswith("/"):
-        p = posixpath.join(cwd.strip().strip("'\""), p)
-    p = posixpath.normpath(p)
-    if workspace and p.startswith("/"):
-        ws = posixpath.normpath(workspace)
-        if p.startswith(ws.rstrip("/") + "/"):
-            p = posixpath.relpath(p, ws)
-    return p[2:] if p.startswith("./") else p
-
-SHELL_META_RE = re.compile(r"[|;&<>`$()\n]")
-# Tool names (split into words by _tool_words) that read one file and return its lines: 'Read', 'read_file',
-# 'view_file', 'open_file', 'cat'. Search/list/stat/count/write tools ('grep', 'search', 'wc', 'stat', 'write') are not.
-READ_TOOL_WORDS = {"read", "view", "open", "cat"}
-NOT_READ_TOOL_WORDS = WRITE_WORDS | {"search", "grep", "rg", "find", "glob", "list", "ls", "stat", "wc", "count",
-                                     "head", "tail", "diff", "fetch", "web", "url", "http"}
-# Tools whose input is a shell command; the command itself must then be a recognized single-file read.
-SHELL_TOOL_WORDS = {"bash", "shell", "sh", "zsh", "terminal", "exec", "execute", "run", "command", "cmd", "console"}
-CWD_KEYS = {"cwd"}
-_GREP_FLAG_LETTERS = set("niwFExhHvsI")  # options that keep 'N:line' output for one file honest
-
-def _numbered_read_cmd(cmd):
-    """(kind, file) for a shell command that prints one file's lines with their real line numbers, else None.
-    kind 'numbered': 'cat -n FILE' (not -b/-s, which skip or squeeze lines), 'nl -ba FILE' (optionally -w N).
-    kind 'grep': 'grep -n [-i -w -F -E -x -v -h -H -s -A N -B N -C N] [-e] PATTERN FILE' on exactly one file
-    (output 'N:line', context 'N-line', with -H 'FILE:N:line'). Pipes, redirects, several files, recursion and any
-    other command (echo, printf, wc -l, head, ...) are not attributable."""
-    if SHELL_META_RE.search(cmd): return None
-    try: toks = shlex.split(cmd)
-    except ValueError: return None
-    if not toks: return None
-    prog, args = os.path.basename(toks[0]), toks[1:]
-    if prog == "grep":
-        letters, pos, i, has_n, pattern = set(), [], 0, False, None
-        while i < len(args):
-            a = args[i]
-            if a in ("-e", "--regexp") and i + 1 < len(args):
-                if pattern is not None: return None
-                pattern = args[i + 1]; i += 2; continue
-            if a in ("-A", "-B", "-C") and i + 1 < len(args) and args[i + 1].isdigit():
-                i += 2; continue
-            if re.match(r"^-[ABC]\d+$", a):
-                i += 1; continue
-            if a in ("--line-number",):
-                has_n = True; i += 1; continue
-            if a.startswith("-") and a != "-" and not a.startswith("--"):
-                letters |= set(a[1:]); i += 1; continue
-            if a.startswith("--"):
-                return None
-            pos.append(a); i += 1
-        if letters - _GREP_FLAG_LETTERS or not (has_n or "n" in letters):
-            return None
-        if pattern is None:
-            if not pos: return None
-            pos = pos[1:]
-        return ("grep", pos[0]) if len(pos) == 1 and pos[0] != "-" else None
-    files = [t for t in args if not t.startswith("-") or t == "-"]
-    flags = [t for t in args if t.startswith("-") and t != "-"]
-    if prog == "cat":
-        letters = "".join(f[1:] for f in flags if not f.startswith("--"))
-        longs = [f for f in flags if f.startswith("--")]
-        ok = ("n" in letters or "--number" in longs) and not set(letters) - {"n"} and not set(longs) - {"--number"}
-    elif prog == "nl":
-        if "a" in files and "-b" in flags:  # 'nl -b a FILE'
-            files.remove("a"); flags = ["-ba" if f == "-b" else f for f in flags]
-        if "-w" in flags and files and files[0].isdigit():  # 'nl -w 3 FILE'
-            files.pop(0); flags.remove("-w")
-        ok = "-ba" in flags and all(f == "-ba" or re.match(r"^-w\d+$", f) for f in flags)
-    else:
-        ok = False
-    return ("numbered", files[0]) if ok and len(files) == 1 and files[0] != "-" else None
-
-def _read_call(call, workspace=None):
-    """(kind, file as printed, canonical file) when a tool call read exactly one file, else None.
-    Read-tool style: a read tool (READ_TOOL_WORDS, no NOT_READ_TOOL_WORDS) with exactly one path-key value and no
-    command. Shell style: a shell tool (SHELL_TOOL_WORDS) whose one command is _numbered_read_cmd. An optional
-    'cwd' key resolves relative paths. Anything else (echo/printf output, wc/stat/search/write tools with a path key,
-    several paths) reads no attributable file."""
-    inp, words = call["input"], _tool_words(call["tool"])
-    cwd = None
-    if isinstance(inp, dict):
-        cw = [v for k, v in inp.items() if k in CWD_KEYS]
-        if cw:
-            if len(cw) != 1 or not _nonempty_str(cw[0]): return None
-            cwd = cw[0]
-        inp = {k: v for k, v in inp.items() if k not in CWD_KEYS}
-    paths, cmds = _call_inputs(inp)
-    paths = [x for x in paths if x.strip()]
-    if words & NOT_READ_TOOL_WORDS:
-        return None
-    if paths and not cmds and words & READ_TOOL_WORDS:
-        if len(paths) != 1: return None
-        return "numbered", paths[0], _norm_path(paths[0], cwd, workspace)
-    if cmds and not paths and words & SHELL_TOOL_WORDS and len(cmds) == 1:
-        rc = _numbered_read_cmd(cmds[0])
-        if rc: return rc[0], rc[1], _norm_path(rc[1], cwd, workspace)
-    return None
-
-def lines_seen(run):
-    """{line number: {canonical file paths}} for lines a tool call showed with their real line numbers.
-    A line counts only from the result of a call that read exactly that one file (_read_call) and only when the whole
-    result has that call's line-numbered shape: 'N<sep>line' for a read tool / 'cat -n' / 'nl -ba' (_numbered_lines),
-    'N:line' or 'N-line' (or 'FILE:N:line' for that same FILE) for single-file 'grep -n' (_grep_lines). Top-level tool_results and path-prefixed lines from any other call ('echo src/a.py:42:x', multi-file
-    grep) are not attributable to a read and do not count."""
-    seen = {}
-    if not run: return seen
-    ws = run.get("workspace")
-    for c in run["calls"]:
-        if not c["result"]: continue
-        rc = _read_call(c, ws)
-        if rc is None: continue
-        kind, printed, target = rc
-        nums = _grep_lines(c["result"], printed) if kind == "grep" else _numbered_lines(c["result"], printed, target, ws)
-        for ln in nums:
-            seen.setdefault(ln, set()).add(target)
-    return seen
-
-def _result_lines(result):
-    """Lines of a tool result without the trailing empty lines a final newline leaves."""
-    lines = [ln.rstrip("\r") for ln in result.split("\n")]
-    while lines and not lines[-1].strip():
-        lines.pop()
-    return lines
-
-def _numbered_lines(result, printed, target, ws=None):
-    """Line numbers of a read result that is line-numbered throughout: every line is 'N<sep>text' with one separator
-    (tab, '→' or ':') for the whole result and consecutive numbers N, N+1, ... Raw file content ('200 OK\\n404 Not
-    Found', a '42 x' line) yields []. A 'wc -l' style 'N path' line is a count, not line N, and yields no number."""
-    parsed = [(NUMBERED_LINE_RE.match(ln), ln) for ln in _result_lines(result)]
-    if not parsed or any(m is None for m, _ in parsed): return []
-    if len({m.group(2) for m, _ in parsed}) != 1: return []
-    nums = [int(m.group(1)) for m, _ in parsed]
-    if any(b != a + 1 for a, b in zip(nums, nums[1:])): return []
-    out = []
-    for n, (m, ln) in zip(nums, parsed):
-        rest = ln[m.end():].strip()
-        if rest and (_norm_path(rest) == _norm_path(printed) or _norm_path(rest, None, ws) == target):
-            continue
-        out.append(n)
-    return out
-
-def _grep_lines(result, printed):
-    """Line numbers of single-file 'grep -n' output: every line is 'N:text' (match) or 'N-text' (context),
-    optionally prefixed 'FILE:' / 'FILE-' for the read FILE (-H), or a '--' group separator, with increasing numbers.
-    Any other line means the result is not that grep's output and yields []."""
-    out = []
-    for line in _result_lines(result):
-        if line == "--": continue
-        for pre in (printed + ":", printed + "-"):
-            if line.startswith(pre) and re.match(r"^\d+%s" % re.escape(pre[-1]), line[len(pre):]):
-                line = line[len(pre):]; break
-        m = GREP_LINE_RE.match(line)
-        if not m or (out and int(m.group(1)) <= out[-1]): return []
-        out.append(int(m.group(1)))
-    return out
-
-def outcome_evidence(crit, final, run=None):
-    """Map one criterion to checkable evidence on the final answer (and the run's tool calls/results).
-    run: normalized transcript from load_transcript (None = no tool calls, no tool results).
-    Returns (kind, ok, observed, fix) or None if the criterion is not machine-checkable."""
-    calls = run["calls"] if run else []
-    results = run["results"] if run else []
-    if NO_WRITE_CRIT_RE.search(crit):
-        w = write_calls(calls)
-        return ("no-writes", not w, "%d write/edit tool calls%s" % (len(w), (": %s" % w) if w else ""),
-                "파일을 바꾸는 도구(write/edit 등) 호출 %s를 없애고 읽기 전용으로 작업하세요." % w)
-    n = _min_count(crit)
-    if n is not None and FILELINE_CRIT_RE.search(crit):
-        seen, ws = lines_seen(run), (run or {}).get("workspace")
-        cites = sorted({(f, int(a), int(b) if b else int(a)) for f, a, b in FILELINE_RE.findall(final)})
-        shown = lambda f, ln: _norm_path(f, None, ws) in seen.get(ln, ())
-        # a range 'a-b' needs a <= b and every line a..b shown (all() stops at the first unseen line)
-        ok_cites = [c for c in cites if c[1] <= c[2] and all(shown(c[0], ln) for ln in range(c[1], c[2] + 1))]
-        bad = [("%s:%d" % c[:2]) + ("-%d" % c[2] if c[2] != c[1] else "") for c in cites if c not in ok_cites]
-        return ("file-lines", len(ok_cites) >= n,
-                "%d file:line citations whose lines appear in captured read results (need >= %d)%s" % (len(ok_cites), n,
-                ("; cited lines never shown by a tool: %s" % bad) if bad else ""),
-                "그 파일 하나만 읽은 도구 호출(Read 도구, cat -n FILE, nl -ba FILE, grep -n PATTERN FILE)의 결과에 줄 번호와 "
-                "함께 나온 줄만 '경로:줄'(예: src/app.py:42)로 인용하세요. 범위 '경로:시작-끝'은 시작 <= 끝이고 그 사이 모든 줄이 "
-                "나왔어야 합니다. 경로는 읽은 경로와 정확히 같아야 합니다. "
-                "%d개 이상 필요 (현재 확인된 것 %d개). 없는 줄·읽지 않은 줄은 세지 않습니다." % (n, len(ok_cites)))
-    if n is not None and re.search(r"출처|인용|링크|source|citation|cite|reference|url|link", crit, re.I):
-        urls = sorted(set(_norm_url(u) for u in URL_RE.findall(final)))
-        fetched = set(_norm_url(u) for res in results for u in URL_RE.findall(res))
-        ok_urls = [u for u in urls if u in fetched]
-        bad = [u for u in urls if u not in fetched]
-        return ("sources", len(ok_urls) >= n,
-                "%d verified unique URLs (need >= %d)%s" % (len(ok_urls), n,
-                ("; not found in tool results: %s" % bad) if bad else ""),
-                "도구 결과(tool result)에 실제로 나온 출처 URL을 %d개 이상 인용하세요 (현재 확인된 것 %d개). "
-                "지어낸 URL은 세지 않습니다." % (n, len(ok_urls)))
-    mx = _max_chars(crit)
-    if mx is not None:
-        return ("length", len(final) <= mx, "%d chars (max %d)" % (len(final), mx),
-                "최종 답을 %d자 이하로 줄이세요 (현재 %d자)." % (mx, len(final)))
-    if re.search(r"비교표|표로|표 형식|\btable\b", crit, re.I):
-        ok = bool(TABLE_RE.search(final))
-        return ("table", ok, "markdown table %s" % ("found" if ok else "not found"),
-                "최종 답에 헤더와 구분선(|---|)이 있는 마크다운 표를 넣으세요.")
-    return None
-
-def _min_count(text):
-    m = (re.search(r"(\d+)\s*(?:개|건|곳)?\s*이상", text) or re.search(r"at\s+least\s+(\d+)", text, re.I)
-         or re.search(r">=\s*(\d+)", text) or re.search(r"(\d+)\s*\+", text))
-    return int(m.group(1)) if m else None
-
-def _max_chars(text):
-    m = (re.search(r"(\d+)\s*자\s*(?:이하|이내)", text)
-         or re.search(r"(?:at\s+most|no\s+more\s+than|<=|under)\s*(\d+)\s*(?:chars?|characters)", text, re.I))
-    return int(m.group(1)) if m else None
 
 # ---------- feedback / index ----------
 def feedback_md(r, rnd=None):

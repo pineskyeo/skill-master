@@ -2,8 +2,10 @@
 name: no-tools
 description: Reads a repository and reports its structure. Use when a rule fixture needs an agent unit.
 goal: Report the structure of a repository with file and line evidence.
+model_policy: judgment
 success_criteria:
-  - at least 2 file:line citations
+  - '{"type": "file_line_citations", "min": 2}'
+targets: [claude, codex, opencode, hermes]
 ---
 # Fixture Agent
 

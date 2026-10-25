@@ -15,7 +15,7 @@ ROW = "parity-permissions-opencode"
 OPENCODE_REL = "wrappers/opencode/code-scout.md"
 KEYS = P.OPENCODE_KEYS
 INCOMPLETE = "the OpenCode permission key list is not verified complete; an unlisted key keeps its UNVERIFIED default"
-EVERY_CLASS_MD = P.AGENT_MD.replace("[glob, grep, read_file]", "[read_file, write_file, bash, web_fetch, web_search, task, skill]")
+EVERY_CLASS_MD = P.AGENT_MD.replace("[search, read]", "[read, search, write, shell, web_fetch, web_search, delegate, skill]")
 BASH_PATTERNS = {"block map": '\n    "*": deny\n    "python3 *": allow', "flow map": ' {"*": deny, "python3 *": allow}'}
 _patches = []
 
@@ -26,7 +26,7 @@ def setUpModule():
 def tearDownModule():
     for pt in _patches: pt.stop()
 
-def opencode_wrapper(caps=("read",), drop=(), values=None, extra=()):
+def opencode_wrapper(caps=("read", "search"), drop=(), values=None, extra=()):
     """An OpenCode wrapper for P.AGENT_MD that sets every recorded key: allow for a class in caps, deny otherwise. drop: keys
     to leave out; values: {key: raw text after 'key:'}; extra: more raw 'key: value' lines under permission."""
     desc = eva.parse_frontmatter(P.AGENT_MD)[0]["description"]
@@ -82,8 +82,8 @@ class TestTheWrapperSetsEveryRecordedKey(OpenCodeBase, unittest.TestCase):
 
     def test_a_bash_pattern_map_is_unsupported_and_never_passes(self):
         for label, raw in BASH_PATTERNS.items():
-            for md in (P.AGENT_MD, P.AGENT_MD.replace("[glob, grep, read_file]", "[glob, grep, read_file, bash]")):
-                with self.subTest(label, md=md.split("tools: ")[1].split("\n")[0]):
+            for md in (P.AGENT_MD, P.AGENT_MD.replace("[search, read]", "[search, read, shell]")):
+                with self.subTest(label, md=md.split("capabilities: ")[1].split("\n")[0]):
                     d, r = self.opencode(md=md, values={"bash": raw})
                     self.assertEqual(P.row(r, WRAPPER)["status"], "fail")
                     self.assertNotEqual(P.row(r, ROW)["status"], "pass")
@@ -98,25 +98,25 @@ class TestDerivedCapabilities(OpenCodeBase, unittest.TestCase):
                 self.assertEqual(P.row(r, WRAPPER)["status"], "pass")
                 c = P.row(r, ROW)
                 self.assertEqual(c["status"], "fail")
-                self.assertIn("wrapper grants ['read', 'web_search'], AGENT.md tools need ['read']", c["reason"])
+                self.assertIn("wrapper grants ['read', 'search', 'web_search'], AGENT.md capabilities need ['read', 'search']", c["reason"])
                 shutil.rmtree(d)
 
     def test_each_granting_key_fails_on_an_agent_without_its_class(self):
         for key, cls in KEYS:
-            if cls in (None, "read"): continue
+            if cls in (None, "read", "search"): continue
             with self.subTest(key):
                 d, r = self.opencode(values={key: " allow"})
                 self.assertEqual(P.row(r, ROW)["status"], "fail", key)
-                self.assertIn("wrapper grants %s" % sorted({"read", cls}), P.row(r, ROW)["reason"])
+                self.assertIn("wrapper grants %s" % sorted({"read", "search", cls}), P.row(r, ROW)["reason"])
                 shutil.rmtree(d)
 
     def test_denying_every_read_key_fails_an_agent_that_needs_read(self):
         d, r = self.opencode(caps=())
         self.assertEqual(P.row(r, WRAPPER)["status"], "pass")
-        self.assertIn("wrapper grants [], AGENT.md tools need ['read']", P.row(r, ROW)["reason"])
+        self.assertIn("wrapper grants [], AGENT.md capabilities need ['read', 'search']", P.row(r, ROW)["reason"])
 
     def test_one_read_key_is_enough_to_grant_read(self):
-        d, r = self.opencode(caps=(), values={"grep": " allow"})
+        d, r = self.opencode(caps=(), values={"lsp": " allow", "list": " allow"})
         self.assertEqual(P.row(r, ROW)["status"], "needs-review")
 
 class TestIncompleteKeyList(OpenCodeBase, unittest.TestCase):
@@ -125,7 +125,7 @@ class TestIncompleteKeyList(OpenCodeBase, unittest.TestCase):
         self.assertEqual(P.row(r, WRAPPER)["status"], "pass")
         c = P.row(r, ROW)
         self.assertEqual(c["status"], "needs-review")
-        self.assertIn("['read']", c["reason"]); self.assertIn(INCOMPLETE, c["reason"])
+        self.assertIn("['read', 'search']", c["reason"]); self.assertIn(INCOMPLETE, c["reason"])
         self.assertEqual(P.tool_status(d)["opencode"], "review")
 
     def test_the_same_wrapper_passes_once_the_list_is_complete(self):
@@ -135,7 +135,7 @@ class TestIncompleteKeyList(OpenCodeBase, unittest.TestCase):
             self.assertEqual(P.tool_status(d)["opencode"], "pass")
 
     def test_an_agent_with_every_class_matches_a_wrapper_that_allows_every_granting_key(self):
-        caps = ("read", "write", "shell", "delegate", "web_fetch", "web_search", "skill")
+        caps = ("read", "search", "write", "shell", "delegate", "web_fetch", "web_search", "skill")
         d, r = self.opencode(md=EVERY_CLASS_MD, caps=caps)
         self.assertEqual(P.row(r, WRAPPER)["status"], "pass")
         self.assertEqual(P.row(r, ROW)["status"], "needs-review")
@@ -149,7 +149,7 @@ class TestIncompleteKeyList(OpenCodeBase, unittest.TestCase):
         with contextlib.redirect_stdout(out): eva.main(["check", d, "--json"])
         data = json.loads(out.getvalue())
         c = next(c for c in data["checks"] if c["id"] == ROW)
-        self.assertEqual(c["status"], "needs-review"); self.assertIn("['read']", c["reason"])
+        self.assertEqual(c["status"], "needs-review"); self.assertIn("['read', 'search']", c["reason"])
         self.assertIn(ROW, data["needs_review"])
 
 if __name__ == "__main__":

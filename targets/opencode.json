@@ -1,5 +1,5 @@
 {
-  "$comment": "OpenCode target (unit A3, plan.md:673). The permission key list was read from the OpenCode agents doc on 2026-10-19 and ends in '...', so it stays complete false: the permission row is REVIEW and never PASS (gates.md G3).",
+  "$comment": "OpenCode target (unit A3, plan.md:673). The permission key list was read from the OpenCode agents doc on 2026-10-19 and ends in '...', so it stays complete false: the permission row is REVIEW and never PASS (gates.md G3). Unit B1 (D6): glob, grep and list grant the search capability; read and lsp grant read.",
   "tool": "opencode",
   "label": "OpenCode",
   "engine": null,
@@ -27,7 +27,7 @@
   },
   "permissions": {
     "compare": "classes",
-    "grants": {"read": "read", "edit": "write", "glob": "read", "grep": "read", "list": "read", "bash": "shell", "task": "delegate", "external_directory": null, "webfetch": "web_fetch", "websearch": "web_search", "lsp": "read", "skill": "skill"},
+    "grants": {"read": "read", "edit": "write", "glob": "search", "grep": "search", "list": "search", "bash": "shell", "task": "delegate", "external_directory": null, "webfetch": "web_fetch", "websearch": "web_search", "lsp": "read", "skill": "skill"},
     "actions": ["allow", "ask", "deny"],
     "granting": ["allow", "ask"],
     "derive": {},

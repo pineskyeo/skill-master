@@ -7,6 +7,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import eva, skill_eval as se
 import test_eva as E
+from engine.primitives import parity as PR
 import test_skill_eval as T
 
 KO = "\ud55c\uad6d\uc5b4 \ud14d\uc2a4\ud2b8"
@@ -19,30 +20,37 @@ def setUpModule():
 def tearDownModule():
     for pt in _patches: pt.stop()
 
-CLAUDE_TOOL_NAMES = {"read": "Read, Grep, Glob", "write": "Write, Edit", "shell": "Bash", "web_fetch": "WebFetch",
+CLAUDE_TOOL_NAMES = {"read": "Read", "search": "Glob, Grep", "write": "Write, Edit", "shell": "Bash", "web_fetch": "WebFetch",
                      "web_search": "WebSearch", "delegate": "Task", "skill": "Skill"}
 
 CLAUDE_NAME_OF = {"read_file": "Read", "write_file": "Write", "edit_file": "Edit", "web_fetch": "WebFetch",
                   "web_search": "WebSearch", "bash": "Bash", "grep": "Grep", "glob": "Glob"}
 
 # The OpenCode permission keys recorded on 2026-10-19 (notes/multi-tool-parity-plan.md section 2.4) and the class each
-# grants per plan C3. None: no class covers the key, so a wrapper must deny it.
-OPENCODE_KEYS = (("read", "read"), ("edit", "write"), ("glob", "read"), ("grep", "read"), ("list", "read"), ("bash", "shell"),
-                 ("task", "delegate"), ("external_directory", None), ("webfetch", "web_fetch"), ("websearch", "web_search"),
-                 ("lsp", "read"), ("skill", "skill"))
+# grants (targets/opencode.json; unit B1 D6: glob, grep and list grant search). None: no class covers the key, so a
+# wrapper must deny it.
+OPENCODE_KEYS = (("read", "read"), ("edit", "write"), ("glob", "search"), ("grep", "search"), ("list", "search"),
+                 ("bash", "shell"), ("task", "delegate"), ("external_directory", None), ("webfetch", "web_fetch"),
+                 ("websearch", "web_search"), ("lsp", "read"), ("skill", "skill"))
 
 def wrapper_texts(agent_dir, caps=None):
     """{relative path: text} of a complete, consistent wrapper set generated from the AGENT.md in agent_dir. caps: the
-    capability set the Claude and OpenCode wrappers grant (default: exactly what AGENT.md tools need). The Codex wrapper
-    sets no sandbox_mode: a custom agent file cannot restrict the parent session (tests/test_codex_permissions.py). The
-    OpenCode wrapper sets every recorded permission key (tests/test_opencode_permissions.py)."""
+    capability set the Claude and OpenCode wrappers grant (default: exactly the AGENT.md v2 capabilities, or for a v1
+    AGENT.md the classes its tools map to, rules/data/capabilities.json). The Codex wrapper sets no sandbox_mode: a
+    custom agent file cannot restrict the parent session (tests/test_codex_permissions.py). The OpenCode wrapper sets
+    every recorded permission key (tests/test_opencode_permissions.py)."""
     with open(os.path.join(agent_dir, "AGENT.md"), encoding="utf-8") as f: meta, _ = eva.parse_frontmatter(f.read())
     name, desc = meta["name"], " ".join(meta["description"].split())
     names = [str(t) for t in eva.as_list(meta.get("tools"))]
+    declared = [str(c) for c in eva.as_list(meta.get("capabilities"))]
     forced = caps is not None
-    if caps is None: caps = eva.capabilities(names)[0]
-    claude_tools = ", ".join(v for c, v in CLAUDE_TOOL_NAMES.items() if c in caps or c == "read") if forced \
-        else ", ".join(CLAUDE_NAME_OF.get(n.lower(), n) for n in names)
+    if caps is None: caps = set(declared) if declared else PR.capabilities(names)[0]
+    if forced:
+        claude_tools = ", ".join(v for c, v in CLAUDE_TOOL_NAMES.items() if c in caps or c == "read")
+    elif declared:
+        claude_tools = ", ".join(CLAUDE_TOOL_NAMES.get(c, c) for c in declared)
+    else:
+        claude_tools = ", ".join(CLAUDE_NAME_OF.get(n.lower(), n) for n in names)
     permission = "".join("  %s: %s\n" % (k, "allow" if c in caps else "deny") for k, c in OPENCODE_KEYS)
     return {
         "wrappers/claude/%s.md" % name: "---\nname: %s\ndescription: %s\ntools: %s\n---\nYou are %s. Load the skill and use the engine.\n"
@@ -64,15 +72,16 @@ def write_wrappers(agent_dir, caps=None, skip=(), replace=None):
         E.wtext(fp, text)
 
 AGENT_MD = ("---\nname: code-scout\ndescription: Reads a repository read-only and explains it. Use when the user asks for an overview.\n"
-            "goal: Explain the repository structure with file and line evidence.\ntools: [glob, grep, read_file]\n"
-            "success_criteria:\n  - at least 2 file:line citations\n  - no file changes (read-only)\n---\n# Code Scout\n"
-            "## Tools\n- glob: map the structure / grep: find places / read_file: confirm lines\n"
+            "goal: Explain the repository structure with file and line evidence.\ncapabilities: [search, read]\n"
+            "model_policy: judgment\nsuccess_criteria:\n  - '{\"type\": \"file_line_citations\", \"min\": 2}'\n"
+            "  - '{\"type\": \"no_writes\"}'\ntargets: [claude, codex, opencode, hermes]\n---\n# Code Scout\n"
+            "## Tools\n- search: map the structure and find places / read: confirm lines\n"
             "## Memory & Handoff\nRemember the topic of earlier turns and hand open questions to the next agent.\n")
-S1 = {"id": "overview", "turns": [{"user": "Give me an overview of this repo"}], "expected_tools": ["glob"],
-      "must_include": ["tests"], "expected_outcome": "an overview with file:line evidence"}
+S1 = {"id": "overview", "turns": [{"user": "Give me an overview of this repo"}], "expected_tools": ["search"],
+      "must_include": ["tests"], "expected_outcome": [{"type": "file_line_citations", "min": 2}]}
 S2 = {"id": "drill", "turns": [{"user": "Give me an overview"}, {"user": "Explain the test folder you just mentioned"}],
-      "expected_tools": ["grep", "read_file"], "must_include": ["test"],
-      "expected_outcome": ["explains the test folder from the earlier turn", "no file changes"]}
+      "expected_tools": ["search", "read"], "must_include": ["test"],
+      "expected_outcome": [{"type": "llm", "text": "Explains the test folder from the earlier turn."}, {"type": "no_writes"}]}
 
 HERMES_ROW = "parity-permissions-hermes"
 
@@ -418,14 +427,14 @@ class TestAgentParity(AgentBase, unittest.TestCase):
         self.assertIn("parity-agent-name", ids(r)); self.assertIn("[claude/codex/opencode/hermes]", row(r, "parity-agent-name")["reason"])
 
 class TestAgentPermissions(AgentBase, unittest.TestCase):
-    WRITE_MD = AGENT_MD.replace("tools: [glob, grep, read_file]", "tools: [read_file, write_file, web_fetch]").replace(
+    WRITE_MD = AGENT_MD.replace("capabilities: [search, read]", "capabilities: [read, write, web_fetch]").replace(
         "name: code-scout", "name: code-scout")
 
     def test_capability_table(self):
-        self.assertEqual(eva.capabilities(["read_file", "Grep", "WebFetch", "websearch", "Bash", "Edit", "Task", "Skill"]),
-                         ({"read", "web_fetch", "web_search", "shell", "write", "delegate", "skill"}, []))
-        self.assertEqual(eva.capabilities(["read_file", "mcp__x__tool", "TodoWrite"]), ({"read"}, ["mcp__x__tool"]))
-        self.assertEqual(eva.capabilities([]), (set(), []))
+        self.assertEqual(PR.capabilities(["read_file", "Grep", "WebFetch", "websearch", "Bash", "Edit", "Task", "Skill"]),
+                         ({"read", "search", "web_fetch", "web_search", "shell", "write", "delegate", "skill"}, []))
+        self.assertEqual(PR.capabilities(["read_file", "mcp__x__tool", "TodoWrite"]), ({"read"}, ["mcp__x__tool"]))
+        self.assertEqual(PR.capabilities([]), (set(), []))
 
     def test_matching_write_web_agent_passes(self):
         d, r = self.agent(md=self.WRITE_MD)
@@ -438,7 +447,7 @@ class TestAgentPermissions(AgentBase, unittest.TestCase):
         for tool in ("claude", "opencode"):
             d, r = self.agent(caps=more, skip=tuple(t for t in eva.TOOLS if t != tool))
             self.assertIn("parity-permissions-" + tool, ids(r), tool)
-            self.assertIn("AGENT.md tools need" if tool != "claude" else "differ from the AGENT.md tools",
+            self.assertIn("AGENT.md capabilities need",
                           row(r, "parity-permissions-" + tool)["reason"]); shutil.rmtree(d)
 
     def test_wrapper_grants_less_than_agent_md_fails(self):
@@ -446,7 +455,7 @@ class TestAgentPermissions(AgentBase, unittest.TestCase):
         self.assertTrue({"parity-permissions-claude", "parity-permissions-opencode"} <= ids(r))
 
     def test_codex_reviews_what_agent_md_lacks_whatever_the_other_wrappers_grant(self):
-        d, r = self.agent(md=self.WRITE_MD.replace("web_fetch", "bash"), caps={"read", "write", "web_fetch"})
+        d, r = self.agent(md=self.WRITE_MD.replace("web_fetch", "shell"), caps={"read", "write", "web_fetch"})
         self.assertNotIn("parity-permissions-codex", ids(r)); self.assertIn("parity-permissions-claude", ids(r))
         self.assertEqual(row(r, "parity-permissions-codex")["reason"],
                          "needs-review: [codex] Codex cannot restrict web_fetch, web_search, delegate, skill per agent; the agent "
@@ -462,7 +471,7 @@ class TestAgentPermissions(AgentBase, unittest.TestCase):
         self.assertIn("parity-permissions-opencode", ids(r))  # ask means the agent may run shell commands
 
     def test_unmapped_agent_tool_fails_every_permission_row_with_the_name(self):
-        d, r = self.agent(md=AGENT_MD.replace("[glob, grep, read_file]", "[read_file, crm_lookup]"))
+        d, r = self.agent(md=AGENT_MD.replace("[search, read]", "[read, crm_lookup]"))
         for t in ("claude", "codex", "opencode"):
             self.assertIn("parity-permissions-" + t, ids(r)); self.assertIn("crm_lookup", row(r, "parity-permissions-" + t)["reason"])
         self.assertEqual(row(r, HERMES_ROW)["status"], "fail")
@@ -472,8 +481,8 @@ class TestAgentPermissions(AgentBase, unittest.TestCase):
         self.assertIn("capability table", row(r, "parity-wrapper-claude")["reason"]); self.assertIn("parity-wrapper-claude", ids(r))
 
     def test_tools_as_yaml_list_are_accepted(self):
-        d, r = self.agent(md=AGENT_MD.replace("[glob, grep, read_file]", "[grep, read_file]"),
-                          replace={"wrappers/claude/code-scout.md": lambda t: t.replace("tools: Grep, Read", "tools:\n  - Read\n  - Grep")})
+        d, r = self.agent(replace={"wrappers/claude/code-scout.md": lambda t: t.replace("tools: Glob, Grep, Read",
+                                                                                         "tools:\n  - Read\n  - Grep\n  - Glob")})
         self.consistent(r)
 
 class TestWrapperEnglish(AgentBase, unittest.TestCase):
