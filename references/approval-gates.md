@@ -1,10 +1,10 @@
 # Approval gates
 
-`approve` (every gate, `rule_review` included), `register`, and the start of every `--live` run of `run`, `grade`, `calibrate` and `loop` go through one human gate in `engine/approvals.py`. `python3 eva.py eval ...` reaches the same code, because it calls `skill_eval.main`. The gate needs a person at a real terminal and an ssh signature from a key listed in `~/.config/skill-master/approvers.allowed_signers`. `approval_ok` counts a record as approved only when its signature verifies against that file.
+`approve` (every gate, `rule_review` and the four `coverage_waiver:<tool>` gates included), `register`, and the start of every `--live` run of `run`, `grade`, `calibrate` and `loop` go through one human gate in `engine/approvals.py`. `python3 eva.py eval ...` reaches the same code, because it calls `skill_eval.main`. The gate needs a person at a real terminal and an ssh signature from a key listed in `~/.config/skill-master/approvers.allowed_signers`. `approval_ok` counts a record as approved only when its signature verifies against that file.
 
 ## What the gate proves
 
-A record that reads `approved` was signed by the private key of a principal in the approvers file. The signature covers the kind (`approve`, `register` or `live`), the gate, the unit, the hash of the gated files and the signing time. A `--live` signature also covers the budget cap. Before signing, the command checked that stdin, stdout and stderr were terminals, that no agent environment variable was set, and that no agent process was among its ancestors. The person then typed back a six-character challenge and the key passphrase.
+A record that reads `approved` was signed by the private key of a principal in the approvers file. The signature covers the kind (`approve`, `register` or `live`), the gate, the unit, the hash of the gated files and the signing time. A `--live` signature also covers the budget cap, and a coverage waiver signature covers the reason the person typed. Before signing, the command checked that stdin, stdout and stderr were terminals, that no agent environment variable was set, and that no agent process was among its ancestors. The person then typed back a six-character challenge and the key passphrase.
 
 ## What the gate does not prove
 
@@ -71,6 +71,7 @@ Every refusal exits with status 2 and prints one line per failing check to stder
 | approver-check | `<what>: approver-check: SSH_AUTH_SOCK is not set, so ssh-agent cannot be asked whether the approver key is loaded; run this from a Terminal where ssh-add -L works` |
 | approver-check | `<what>: approver-check: ssh-add -L could not ask ssh-agent (exit N: ...); cannot confirm the approver key is not loaded` |
 | command check | `error: <workspace>/approvals.json is not a JSON object (it holds ...); nothing was signed` (`approve`) |
+| reason | `approve: reason refused: it is empty; nothing was signed`, likewise `it is longer than 200 characters` and `it holds a character that is not printable ASCII` (a `coverage_waiver:<tool>` gate) |
 | challenge | `<what>: challenge mismatch: nothing was signed` |
 | signing | `<what>: signing failed: ...` |
 | signing | `<what>: the new signature does not verify: ...` |
@@ -119,15 +120,34 @@ sha256 <64 hex>
 at 2026-10-20T09:41:00Z
 ```
 
-A `live` payload has a `budget_usd <amount>` line after `sha256`. The reader rebuilds these bytes from the record's `sha256` and `at` plus what it already knows. The kind comes from where the record is stored, the gate from the `approvals.json` key, and the unit from the eval set being checked. The record never supplies them. A record copied to another gate or unit does not verify. Golden's `iteration-4` and `registration` records share one sha256, and they still cannot stand in for each other.
+A `live` payload has a `budget_usd <amount>` line after `sha256`. A coverage waiver payload has a `reason <text>` line before `at`, rebuilt from the record's `reason`. The reader rebuilds these bytes from the record's `sha256` and `at` plus what it already knows. The kind comes from where the record is stored, the gate from the `approvals.json` key, and the unit from the eval set being checked. The record never supplies them. A record copied to another gate or unit does not verify. Golden's `iteration-4` and `registration` records share one sha256, and they still cannot stand in for each other.
 
 | Hash | Covers |
 |---|---|
 | `approve` | `gate_hash(gate)`, the files of that gate |
+| `approve`, `coverage_waiver:<tool>` | the sha256 of labeled lines for the tool, the skill tree hash and the `eval_set` gate hash |
 | `register` | the sha256 of the canonical JSON of `skill_name`, `iteration`, `benchmark_sha256`, `skill_sha256`, `eval_set_sha256` and `skill_md_sha256` from the registration record |
 | `live` | the sha256 of the canonical JSON of the exact argv, the workspace, the skill folder hash, the `eval_set` and `requirements` gate hashes, the `--builder-prompt` text, the `--golden` file and the `--old-skill` folder hash |
 
 A live signature is verified, and its principal and plan hash are printed to stderr. It is not stored.
+
+## Coverage waivers
+
+Registration needs a graded dynamic run on every tool that `coverage_required` in `policy/gate.rules.json` lists, or a signed waiver for each listed tool that did not run (plan.md:1135, Appendix E Q5). The file lists claude, codex, opencode and hermes. OpenCode and Hermes have no engine, so a skill registers today only with signed `coverage_waiver:opencode` and `coverage_waiver:hermes` records, plus `coverage_waiver:codex` when Codex was not selected. `coverage_required` is part of the rule bundle, so removing a tool from it moves `ruleset_sha256` and every existing approval reads stale. The loader refuses anything but a non-empty list of unique names from the four tools.
+
+`approve --gate coverage_waiver:<tool>` signs one waiver. `engine/approvals.py` holds the four gate names. Every other gate name with a colon fails the payload check, and every other payload keeps its bytes.
+
+**What a waiver binds.** The record's `sha256` is `gate_hash("coverage_waiver:<tool>")`, a sha256 over labeled lines for the tool, the skill tree hash and the eval set hash (`gate_hash("eval_set")`). The payload adds the unit name and `ruleset_sha256`, as for every gate. A waiver stops counting when the skill folder, the eval set or the rule bundle changes. Copied to another tool's key it reads stale, and checked for another unit it reads invalid.
+
+**The typed reason.** After the presence checks, approver-check and the gate's own checks, the gate prints the tool, its dynamic eval status in the last iteration's benchmark, the skill and eval set hashes, and that the waiver clears only this tool for this unit, eval set and ruleset. It then reads the reason from the terminal. The reason must hold 1 to 200 printable ASCII characters once the surrounding spaces are stripped. Anything else refuses before the challenge, and nothing is signed. No flag, environment variable or file supplies the reason. The record stores it as `reason`, and the payload covers it with a `reason <text>` line before the `at` line. A waiver record without a valid reason reads `invalid`, and so does any other record that carries a `reason`.
+
+**Where it counts.** `report` checks every waiver when it runs and writes the verdicts into `benchmark.json` as `coverage_waivers`. `compute_gate` reads only the benchmark, so a waiver signed after a report counts at the next `report`. Each listed tool that neither ran nor has an approved waiver is a gate problem `coverage-missing:<tool>: dynamic eval <status>, waiver <state>`, where the state is `missing`, `unsigned`, `invalid (<why>)` or `stale (<why>)`. A benchmark without a valid `tool_coverage` entry for a tool counts that tool as not run. A waived tool is a note that names the principal and the reason. The `comparison.md` coverage table shows `run`, `waived by <principal>` or `coverage-missing` per tool in its registration column. `plan` prints a `registration coverage:` line with the rule and the waiver state of each listed tool.
+
+`register` recomputes coverage before its other checks, from the benchmark's `tool_coverage`, the current `coverage_required` and the waiver verdicts at that moment, never from `gate.json`. It refuses with one error that names each missing tool as `coverage-missing:<tool>`. A signed `registration` approval does not clear a coverage problem. `loop` stops with `needs-coverage`, exits like `needs-approval` and calls no builder when coverage problems are the only problems left, because no builder can make a missing engine run.
+
+**What a waiver proves.** A principal in the approvers file signed, at a terminal that passed the presence checks, that this tool may stay without a dynamic run for this unit, eval set and rule bundle, and typed the stored reason.
+
+**What a waiver does not prove.** It says nothing about how the skill behaves on that tool. No code checks the reason for truth. The limits in "What the gate does not prove" apply unchanged, so a same-user program can edit the code or call the Python API with its own approver.
 
 ## Statuses
 

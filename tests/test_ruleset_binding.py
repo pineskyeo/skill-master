@@ -308,6 +308,7 @@ class TestSignedPayload(Bound):
         T.install_test_approver(self, write=shown.append)
         se.approve("requirements", self.spec, self.ws); se.approve("eval_set", self.spec, self.ws)
         self.assertIn("ruleset_sha256 " + se.ruleset_sha256(), shown)
+        T.waive_coverage(self.spec, self.ws)
         self.report()
         del shown[:]
         rec = se.register(self.spec, self.ws)
@@ -344,13 +345,13 @@ class TestRecordedHashes(Bound):
         n, bench, gate = self.report()
         m = bench["metadata"]
         self.assertEqual((m["ruleset_sha256"], m["current_ruleset_sha256"]), (se.ruleset_sha256(), se.ruleset_sha256()))
-        self.assertEqual(gate["problems"], [])
+        self.assertEqual(gate["problems"], T.CLAUDE_ONLY_MISSING)
         self.assertEqual(rjson(os.path.join(self.ws, "iteration-%d" % n, "benchmark.json"))["metadata"]["ruleset_sha256"],
                          se.ruleset_sha256())
         change_rule_message(self.root)
         bench, gate = se.report_iteration(self.spec, self.ws, n)
         self.assertNotEqual(bench["metadata"]["current_ruleset_sha256"], bench["metadata"]["ruleset_sha256"])
-        self.assertEqual(gate["problems"], ["stale: rules changed since this iteration ran"])
+        self.assertEqual(gate["problems"], ["stale: rules changed since this iteration ran"] + T.CLAUDE_ONLY_MISSING)
         self.assertTrue(gate["needs_approval"])
         self.assertIn("- problem: stale: rules changed since this iteration ran",
                       T.read(os.path.join(self.ws, "iteration-%d" % n, "comparison.md")))
@@ -359,23 +360,29 @@ class TestRecordedHashes(Bound):
         n, bench, gate = self.report(drop_ruleset=True)
         self.assertIsNone(bench["metadata"]["ruleset_sha256"])
         self.assertEqual(gate["problems"],
-                         ["stale: rules changed since this iteration ran (plan.json records no ruleset_sha256)"])
+                         ["stale: rules changed since this iteration ran (plan.json records no ruleset_sha256)"]
+                         + T.CLAUDE_ONLY_MISSING)
 
     def test_human_pending_only_keeps_its_b1_result(self):
         bench = dict(B1_FIXTURES["human-only"][0])
         bench["metadata"] = dict(bench["metadata"], ruleset_sha256=SHA, current_ruleset_sha256=OTHER)
         g = se.compute_gate(bench)
         self.assertEqual(g["problems"], ["stale: rules changed since this iteration ran",
-                                         "ungraded: 3 human item(s) pending review (fill human_review.json, re-run grade)"])
+                                         "ungraded: 3 human item(s) pending review (fill human_review.json, re-run grade)"]
+                         + T.NO_COVERAGE_MISSING)
         self.assertTrue(g["human_pending_only"])
         only_rules = {"per_engine": {}, "completeness": {}, "metadata": dict(bench["metadata"], skill_sha256="a",
                                                                               current_skill_sha256="a")}
         g = se.compute_gate(only_rules)
         self.assertEqual((g["problems"], g["human_pending_only"]),
-                         (["stale: rules changed since this iteration ran"], False))
+                         (["stale: rules changed since this iteration ran"] + T.NO_COVERAGE_MISSING, False))
 
 
 class TestRegistration(Bound):
+    def report(self, **kw):
+        T.waive_coverage(self.spec, self.ws)
+        return Bound.report(self, **kw)
+
     def test_the_record_binds_the_ruleset_and_matches_the_schema(self):
         self.report()
         rec = se.register(self.spec, self.ws)
@@ -416,6 +423,9 @@ class TestRegistration(Bound):
         change_rule_message(self.root)
         new = se.ruleset_sha256()
         with self.assertRaises(se.EvalError) as cm: se.registration_record(self.spec, self.ws)
+        self.assertIn(T.coverage_missing("hermes", T.NOT_AVAILABLE, "stale (%s)" % RULES), str(cm.exception))
+        with mock.patch.object(se, "COVERAGE_REQUIRED", ("claude",)), self.assertRaises(se.EvalError) as cm:
+            se.registration_record(self.spec, self.ws)
         self.assertIn(old[:12], str(cm.exception)); self.assertIn(new[:12], str(cm.exception))
         with self.assertRaises(se.EvalError): se.register(self.spec, self.ws)
         self.assertFalse(os.path.exists(os.path.join(self.ws, "registration.json")))
@@ -523,17 +533,24 @@ B1_GATES = {
     "unbound": {"human_pending_only": False, "needs_approval": True, "notes": [NOT_CALIBRATED],
                 "problems": ["unbound: plan.json records no skill/eval-set hash; re-run the iteration"]},
 }
-PREDICATE_IDS = ["regression-baseline", "regression-previous", "low-agreement", "not-calibrated", "coverage",
+PREDICATE_IDS = ["regression-baseline", "regression-previous", "low-agreement", "not-calibrated",
                  "static-failures", "run-stopped", "no-plan", "eval-runs-incomplete", "trigger-runs-incomplete",
                  "trigger-errors", "comparisons-incomplete", "unbound", "stale-skill", "stale-eval-set", "stale-rules",
-                 "stale-rules-unrecorded", "execution-errors", "trigger-failed", "llm-ungraded", "human-pending"]
+                 "stale-rules-unrecorded", "execution-errors", "trigger-failed", "llm-ungraded", "human-pending",
+                 "coverage-missing", "coverage-waived", "coverage-not-required"]
+G1_COVERAGE = dict({name: T.NO_COVERAGE_MISSING for name in B1_FIXTURES}, everything=[
+    T.coverage_missing("claude", T.NO_COVERAGE_ENTRY), T.coverage_missing("codex", T.NOT_SELECTED),
+    T.coverage_missing("opencode", T.NOT_AVAILABLE), T.coverage_missing("hermes", T.NO_COVERAGE_ENTRY)])
 
 
 class TestGateRules(unittest.TestCase):
     def test_every_b1_message_renders_byte_for_byte(self):
         for name, (bench, prev) in B1_FIXTURES.items():
             with self.subTest(name):
-                self.assertEqual(se.compute_gate(bench, prev), B1_GATES[name])
+                want = dict(B1_GATES[name], problems=B1_GATES[name]["problems"] + G1_COVERAGE[name], needs_approval=True,
+                            notes=[x for x in B1_GATES[name]["notes"] if not x.startswith("per-tool dynamic coverage")],
+                            coverage_only=name == "clean", coverage={t: "coverage-missing" for t in eva.TOOLS})
+                self.assertEqual(se.compute_gate(bench, prev), want)
 
     def test_the_file_holds_one_template_per_predicate_and_the_two_thresholds(self):
         doc = rjson(os.path.join(ROOT, "policy", "gate.rules.json"))

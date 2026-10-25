@@ -496,7 +496,7 @@ class TestCoverageCriterion(T.Base):
         self.assertEqual((c["codex"]["status"], c["codex"]["pending_runs"]), ("run", 0))
         self.assertEqual(se.tool_coverage(["claude"], {"claude": 0}, {"claude": 0})["claude"]["status"], se.NOT_GRADED)
         self.assertNotIn("pass", c["claude"]["status"].replace("pending", ""))
-        self.assertIn("NOT run on claude (pending", se.coverage_note(c))
+        self.assertIn(T.coverage_missing("claude", se.PENDING), se.compute_gate({"tool_coverage": c})["problems"])
 
     def test_the_benchmark_counts_pass_rate_none_runs_as_pending(self):
         spec, problems = self.spec(); n = se.run_iteration(spec, self.ws, self.engines(), runs=1, log=T.quiet)
@@ -513,7 +513,7 @@ class TestCoverageCriterion(T.Base):
         self.assertEqual(cov["claude"]["status"], se.PENDING); self.assertEqual(cov["claude"]["graded_runs"], 0)
         self.assertEqual(cov["claude"]["pending_runs"], touched); self.assertEqual(cov["codex"]["status"], "run")
         gate = se.compute_gate(bench)
-        self.assertTrue(any("NOT run on claude (pending" in x for x in gate["notes"]), gate["notes"])
+        self.assertIn(T.coverage_missing("claude", se.PENDING), gate["problems"])
         md = se.comparison_md(bench, gate, n)
         self.assertIn("+%d pending" % touched, md)
 

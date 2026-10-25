@@ -145,7 +145,13 @@ class TestRegistrationDecision(unittest.TestCase):
     def decide(self):
         return se.registration_record(self.spec, self.ws)
 
+    def waive_all(self):
+        T.waive_coverage(self.spec, self.ws, se.approvals.COVERAGE_TOOLS)
+
     def test_the_unsigned_golden_registration_approval_refuses(self):
+        with self.assertRaises(se.EvalError) as cm: self.decide()
+        self.assertIn("cannot be registered: " + "; ".join(T.CLAUDE_ONLY_MISSING) + ".", str(cm.exception))
+        self.waive_all()
         with self.assertRaises(se.EvalError) as cm: self.decide()
         self.assertIn("registration needs `approve --gate registration` (unsigned", str(cm.exception))
 
@@ -156,6 +162,7 @@ class TestRegistrationDecision(unittest.TestCase):
         return out
 
     def test_the_golden_iteration_without_a_recorded_ruleset_refuses_and_writes_nothing(self):
+        self.waive_all()
         se.approve("registration", self.spec, self.ws)  # golden's own record is unsigned (H1)
         before = self.snapshot()
         with self.assertRaises(se.EvalError) as cm: self.decide()
@@ -171,6 +178,7 @@ class TestRegistrationDecision(unittest.TestCase):
         golden_bench = se.rjson(bp)
         bench = dict(golden_bench, metadata=dict(golden_bench["metadata"], ruleset_sha256=se.ruleset_sha256()))
         se.wjson(bp, bench)  # golden iteration 4 predates ruleset_sha256 (A5 D5)
+        self.waive_all()
         signed = se.approve("registration", self.spec, self.ws)  # golden's own record is unsigned (H1)
         before = self.snapshot()
         rec = self.decide()

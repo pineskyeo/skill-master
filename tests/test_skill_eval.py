@@ -67,9 +67,26 @@ def shared_keys():
         _KEYS.update(dir=d, key=key, pub=pub, signers=signers)
     return _KEYS
 
+TEST_REASON = "test fixture: this tool has no engine in the test"
+
 def type_challenge(prompt):
+    from engine import approvals
+    if prompt == approvals.REASON_PROMPT: return TEST_REASON + "\n"
     m = re.search(r"type ([A-Z0-9]{6}) to sign", prompt)
     return m.group(1) + "\n" if m else "\n"
+
+def coverage_missing(tool, status, waiver="missing"):
+    return "coverage-missing:%s: dynamic eval %s, waiver %s" % (tool, status, waiver)
+
+NOT_SELECTED, NOT_AVAILABLE = "not-run: engine not selected", "not-run: engine not available"
+NO_COVERAGE_ENTRY = "unknown (no valid tool_coverage entry)"
+CLAUDE_ONLY_MISSING = [coverage_missing("codex", NOT_SELECTED), coverage_missing("opencode", NOT_AVAILABLE),
+                       coverage_missing("hermes", NOT_AVAILABLE)]
+CLAUDE_CODEX_MISSING = CLAUDE_ONLY_MISSING[1:]
+NO_COVERAGE_MISSING = [coverage_missing(t, NO_COVERAGE_ENTRY) for t in eva.TOOLS]
+
+def waive_coverage(spec, ws, tools=tuple(t for t in eva.TOOLS if t != "claude")):
+    for t in tools: se.approve("coverage_waiver:" + t, spec, ws)
 
 def gate_approver(**kw):
     from engine import approvals
@@ -457,6 +474,7 @@ class TestRunAndGrade(Base):
     def test_benchmark_report_gate_clean(self):
         spec, n = self.run_one(runs=3)
         se.grade_iteration(spec, self.ws, n, self.grader(), seed=1, log=quiet)
+        waive_coverage(spec, self.ws, ("opencode", "hermes"))
         _, gate = se.report_iteration(spec, self.ws, n)
         self.assertEqual(gate["problems"], ["ungraded: 12 human item(s) pending review (fill human_review.json, re-run grade)"])
         self.assertTrue(gate["human_pending_only"])
@@ -506,11 +524,11 @@ class TestRunAndGrade(Base):
         comp = {"e": {"expected_runs": 6, "graded_runs": 6, "expected_trigger_runs": 60, "trigger_runs": 60, "trigger_errors": 0}}
         meta = {"skill_sha256": "s", "current_skill_sha256": "s", "eval_set_sha256": "e", "current_eval_set_sha256": "e"}
         self.assertEqual(se.compute_gate({"per_engine": rs(0.9, 0.5), "completeness": comp, "metadata": meta,
-                                          "calibration": {"agreement": 0.9, "n": 10}})["problems"], [])
+                                          "calibration": {"agreement": 0.9, "n": 10}})["problems"], NO_COVERAGE_MISSING)
         g = se.compute_gate({"per_engine": rs(0.7, 0.5), "completeness": comp, "calibration": {"agreement": 0.6, "n": 10},
                              "metadata": meta},
                             prev={"per_engine": rs(0.9, 0.5)})
-        self.assertEqual(len(g["problems"]), 2)
+        self.assertEqual(len(g["problems"]), 2 + len(NO_COVERAGE_MISSING))
         self.assertTrue(any("previous iteration" in p for p in g["problems"]))
         self.assertTrue(any("low grader agreement" in p for p in g["problems"]))
 
@@ -518,7 +536,7 @@ class TestRunAndGrade(Base):
         spec, n = self.run_one(runs=1, evals=evals_doc(human=False))
         se.grade_iteration(spec, self.ws, n, self.grader(), seed=1, log=quiet)
         it = os.path.join(self.ws, "iteration-1")
-        self.assertEqual(se.report_iteration(spec, self.ws, n)[1]["problems"], [])
+        self.assertEqual(se.report_iteration(spec, self.ws, n)[1]["problems"], CLAUDE_CODEX_MISSING)
         # a trigger query that failed, a run that errored, a missing run, and a stopped plan
         tp = os.path.join(it, "claude", "trigger", "with_skill", "results.json")
         tr = rjson(tp); tr["results"][0]["pass"] = False; tr["results"][0]["errors"] = 1
@@ -635,6 +653,7 @@ class TestApprovalsAndRegistration(Base):
         self.fc = FakeClaude(regress)
         n = se.run_iteration(spec, self.ws, [se.ClaudeCodeEngine("claude-opus-5-5", exec_fn=self.fc)], runs=1, log=quiet)
         se.grade_iteration(spec, self.ws, n, self.grader(), log=quiet)
+        waive_coverage(spec, self.ws)
         se.report_iteration(spec, self.ws, n)
         return spec
 
@@ -661,7 +680,7 @@ class TestLoop(Base):
     def test_stops_when_clean(self):
         spec, _ = self.spec()
         r = se.loop(spec, self.ws, self.engines()[:1], self.grader(), lambda d, s: self.fail("builder called"), runs=1, log=quiet)
-        self.assertEqual(r, {"status": "clean", "iteration": 1})
+        self.assertEqual(r, {"status": "needs-coverage", "iteration": 1})
     def test_builder_until_max_then_needs_approval(self):
         spec, _ = self.spec()
         seen = []
@@ -675,8 +694,9 @@ class TestLoop(Base):
         def builder(d, s):
             self.fc.regress = False; return 0
         r = se.loop(spec, self.ws, engs, self.grader(), builder, runs=1, log=quiet)
-        self.assertEqual(r, {"status": "clean", "iteration": 2})
-        self.assertEqual(se.loop(spec, self.ws, engs, self.grader(), lambda d, s: 1, runs=1, log=quiet)["status"], "clean")
+        self.assertEqual(r, {"status": "needs-coverage", "iteration": 2})
+        self.assertEqual(se.loop(spec, self.ws, engs, self.grader(), lambda d, s: 1, runs=1, log=quiet)["status"],
+                         "needs-coverage")
     def test_builder_failure(self):
         spec, _ = self.spec()
         r = se.loop(spec, self.ws, self.engines(regress=True)[:1], self.grader(), lambda d, s: 7, runs=1, log=quiet)
@@ -747,6 +767,7 @@ class TestCLI(Base):
         self.assertEqual(se.iterations(self.ws), [1])
         rc, out, _ = self.cli("grade", d, "--workspace", self.ws)
         self.assertIn("LLM items not graded", out)
+        waive_coverage(se.load_eval_set(d)[0], self.ws)
         rc, out, _ = self.cli("report", d, "--workspace", self.ws)
         self.assertEqual(rc, 3, out); self.assertIn("ungraded: 2 LLM item(s) not graded", out)
         rc, _, err = self.cli("register", d, "--workspace", self.ws)

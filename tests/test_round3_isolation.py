@@ -185,7 +185,7 @@ class TestGateFromGrading(Base):
         _, gate = se.report_iteration(spec, self.ws, n)
         self.assertIn("ungraded: 2 human item(s) pending review (fill human_review.json, re-run grade)", gate["problems"])
         se.grade_iteration(spec, self.ws, n, self.grader(), seed=1, log=quiet)
-        self.assertEqual(se.report_iteration(spec, self.ws, n)[1]["problems"], [])
+        self.assertEqual(se.report_iteration(spec, self.ws, n)[1]["problems"], T.CLAUDE_ONLY_MISSING)
 
     def test_static_only_dry_grade_is_not_clean(self):
         ev = evals_doc(human=False); ev["evals"] = ev["evals"][1:]  # one case, static items only
@@ -197,7 +197,7 @@ class TestGateFromGrading(Base):
         self.assertIn("incomplete [claude]: 0 of 2 blind pairwise comparisons (run `grade --live`)", gate["problems"])
         self.assertTrue(gate["needs_approval"]); self.assertFalse(gate["human_pending_only"])
         se.grade_iteration(spec, self.ws, n, self.grader(), seed=1, log=quiet)
-        self.assertEqual(se.report_iteration(spec, self.ws, n)[1]["problems"], [])
+        self.assertEqual(se.report_iteration(spec, self.ws, n)[1]["problems"], T.CLAUDE_ONLY_MISSING)
 
     def test_unparseable_comparison_does_not_count(self):
         ev = evals_doc(human=False); ev["evals"] = ev["evals"][1:]
@@ -214,12 +214,16 @@ class TestRegisterBinding(Base):
         spec, _ = self.spec(evals=evals_doc(human=False))
         n = se.run_iteration(spec, self.ws, self.engines()[:1], runs=1, log=quiet)
         se.grade_iteration(spec, self.ws, n, self.grader(), seed=1, log=quiet)
+        T.waive_coverage(spec, self.ws)
         self.assertEqual(se.report_iteration(spec, self.ws, n)[1]["problems"], [])
         plan = rjson(os.path.join(self.ws, "iteration-1", "plan.json"))
         self.assertEqual(plan["skill_sha256"], se.skill_tree_hash(spec["skill_dir"]))
         os.makedirs(os.path.join(spec["skill_dir"], "scripts"))
         write(os.path.join(spec["skill_dir"], "scripts", "new.py"), "print(1)")  # not SKILL.md: the whole folder counts
         with self.assertRaises(se.EvalError) as cm: se.register(spec, self.ws)
+        self.assertIn("waiver stale (the gated files changed since signing)", str(cm.exception))
+        with mock.patch.object(se, "COVERAGE_REQUIRED", ("claude",)), self.assertRaises(se.EvalError) as cm:
+            se.register(spec, self.ws)
         self.assertIn("re-run the eval", str(cm.exception))
         self.assertIn("stale: the skill changed after this iteration ran (re-run before trusting this report)",
                       se.report_iteration(spec, self.ws, n)[1]["problems"])
@@ -240,6 +244,9 @@ class TestRegisterBinding(Base):
         wjson(os.path.join(spec["skill_dir"], "evals", "trigger_evals.json"), TRIGGERS[::-1])
         self.assertEqual(se.skill_tree_hash(spec["skill_dir"]), h)  # evals/ is not installed into runs
         with self.assertRaises(se.EvalError) as cm: se.register(spec, self.ws)
+        self.assertIn(T.CLAUDE_ONLY_MISSING[0], str(cm.exception))
+        with mock.patch.object(se, "COVERAGE_REQUIRED", ("claude",)), self.assertRaises(se.EvalError) as cm:
+            se.register(spec, self.ws)
         self.assertIn("different eval set", str(cm.exception))
         self.assertIn("unbound", "\n".join(se.compute_gate({"per_engine": {}, "completeness": {}, "metadata": {}})["problems"]))
 

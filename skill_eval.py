@@ -1708,16 +1708,15 @@ def tool_coverage(engine_names=None, graded=None, collected=None):
         out[tool] = {"status": status, "engine": eng, "graded_runs": n, "pending_runs": max(0, c - n)}
     return out
 
+def runs_coverage(planned, runs):
+    """tool_coverage of an iteration from its run records and its planned engines (None: the engines that ran)."""
+    seen = {r["engine"] for r in runs}
+    return tool_coverage(list(planned) if planned is not None else sorted(seen),
+                         {e: sum(1 for r in runs if r["engine"] == e and r["result"]["pass_rate"] is not None) for e in seen},
+                         {e: sum(1 for r in runs if r["engine"] == e) for e in seen})
+
 def coverage_line(cov):
     return ", ".join("%s=%s" % (t, c["status"]) for t, c in cov.items())
-
-def coverage_note(cov):
-    """Gate note (never a gate problem, see compute_gate) naming the tools the dynamic eval did not cover; None if all ran."""
-    missing = ["%s (%s)" % (t, c["status"].replace("not-run: ", "")) for t, c in cov.items() if c["status"] != "run"]
-    if not missing: return None
-    ran = [t for t, c in cov.items() if c["status"] == "run"]
-    return ("per-tool dynamic coverage: run on %s; NOT run on %s (not-run is never counted as passed; adding the OpenCode "
-            "and Hermes engines is a follow-up)" % (", ".join(ran) or "none", ", ".join(missing)))
 
 # ---------- per-run isolation (README "Eval isolation") ----------
 def ancestors(path):
@@ -2397,11 +2396,22 @@ def gate_hash(gate, spec, ws):
         return sha256_labeled(eval_set_files(spec["skill_dir"]))
     if gate == "rule_review":
         return rule_review_hash(spec["skill_dir"])
+    if gate.startswith(approvals.WAIVER_PREFIX):
+        return waiver_hash(gate[len(approvals.WAIVER_PREFIX):], spec, ws)
     m = re.match(r"(?:iteration-(\d+)|registration)$", gate)
-    if not m: raise EvalError("unknown gate %r (requirements|eval_set|rule_review|iteration-N|registration)" % gate)
+    if not m: raise EvalError("unknown gate %r (requirements|eval_set|rule_review|iteration-N|registration|"
+                              "coverage_waiver:<tool>)" % gate)
     n = int(m.group(1)) if m.group(1) else (iterations(ws) or [None])[-1]
     bp = os.path.join(ws, "iteration-%s" % n, "benchmark.json")
     return sha256_files(bp) if n is not None and os.path.isfile(bp) else None
+
+def waiver_hash(tool, spec, ws):
+    if tool not in approvals.COVERAGE_TOOLS:
+        raise EvalError("unknown coverage waiver %r: the tool must be one of %s"
+                        % (approvals.WAIVER_PREFIX + tool, ", ".join(approvals.COVERAGE_TOOLS)))
+    text = "coverage_waiver v1\ntool %s\nskill_sha256 %s\neval_set_sha256 %s\n" % (
+        tool, skill_tree_hash(spec["skill_dir"]), gate_hash("eval_set", spec, ws))
+    return hashlib.sha256(text.encode("ascii")).hexdigest()
 
 def rule_review_items(skill_dir):
     """Needs-review findings of the English-only and parity rules (eva.review_items): non-English run-output matchers,
@@ -2475,6 +2485,14 @@ def approval_record(gate, spec, ws):
 def approval_verdict(gate, spec, ws):
     return approval_record(gate, spec, ws)[1]
 
+def waiver_verdicts(spec, ws):
+    out = {}
+    for tool in approvals.COVERAGE_TOOLS:
+        rec, v = approval_record(approvals.WAIVER_PREFIX + tool, spec, ws)
+        out[tool] = {"status": v.status, "principal": v.principal, "verdict_reason": v.reason,
+                     "reason": rec["reason"] if v.status == "approved" else None}
+    return out
+
 def approval_ok(gate, spec, ws):
     return approval_verdict(gate, spec, ws).status == "approved"
 
@@ -2516,6 +2534,18 @@ def approve_show(gate, spec, ws, rules):
         shown = ["eval set file %s: %s" % (label, sha256_files(p)[:12] if os.path.isfile(p) else "<missing>")
                  for label, p in eval_set_files(spec["skill_dir"])]
     elif gate == "rule_review": shown = ["rule review finding: " + x[:300] for x in rule_review_items(spec["skill_dir"])]
+    elif gate.startswith(approvals.WAIVER_PREFIX):
+        tool, n = gate[len(approvals.WAIVER_PREFIX):], (iterations(ws) or [None])[-1]
+        bench = rjson(os.path.join(ws, "iteration-%s" % n, "benchmark.json")) if n is not None else None
+        cov = bench.get("tool_coverage") if isinstance(bench, dict) else None
+        entry = cov.get(tool) if isinstance(cov, dict) else None
+        status = entry.get("status") if isinstance(entry, dict) else None
+        shown = ["coverage waiver: tool %s, dynamic eval %s" % (
+                     tool, "in iteration-%s: %s" % (n, status or "not recorded") if bench else "not reported yet"),
+                 "coverage waiver: skill sha256 %s" % skill_tree_hash(spec["skill_dir"]),
+                 "coverage waiver: eval set sha256 %s" % gate_hash("eval_set", spec, ws),
+                 "coverage waiver: clears only coverage-missing:%s for unit %s, this eval set and this ruleset"
+                 % (tool, spec["skill_name"])]
     else:
         m = re.match(r"iteration-(\d+)$", gate)
         n = int(m.group(1)) if m else (iterations(ws) or [None])[-1]
@@ -3312,11 +3342,7 @@ def build_benchmark(spec, ws, n):
                                  "expected_comparisons": len(plan.get("evals_run") or []) * rpc if len(cfgs) == 2 else 0,
                                  "comparisons": (pw.get(eng) or {}).get("total", 0)}
     import eva
-    planned = list(plan["engines"]) if plan.get("engines") is not None else sorted({r["engine"] for r in runs})
-    engines_seen = {r["engine"] for r in runs}
-    coverage = tool_coverage(
-        planned, {e: sum(1 for r in runs if r["engine"] == e and r["result"]["pass_rate"] is not None) for e in engines_seen},
-        {e: sum(1 for r in runs if r["engine"] == e) for e in engines_seen})
+    coverage = runs_coverage(plan.get("engines"), runs)
     exec_errors = [{"engine": r["engine"], "eval_id": r["eval_id"], "configuration": r["configuration"],
                     "run_number": r["run_number"]} for r in runs if r["result"]["errors"]]
     pressure = {}
@@ -3368,9 +3394,26 @@ def _low_agreement(bench, prev):
     if cal and cal.get("agreement", 1.0) < AGREEMENT_MIN:
         return {"agreement": cal["agreement"], "threshold": AGREEMENT_MIN, "n": cal["n"]}
 
-def _coverage(bench, prev):
-    note = coverage_note(bench["tool_coverage"]) if bench.get("tool_coverage") else None
-    if note: return {"note": note}  # a note, not a problem: registration semantics are unchanged
+COVERAGE_STATES = {"run": "run", "missing": "coverage-missing", "not-required": "not required"}
+
+def coverage_states(bench):
+    """[(tool, fields)] per tool of approvals.COVERAGE_TOOLS from bench alone (tool_coverage, coverage_waivers). A tool
+    ran only with status run and a graded run; an absent or malformed entry counts as not run (fail closed)."""
+    cov, waivers = bench.get("tool_coverage"), bench.get("coverage_waivers")
+    out = []
+    for tool in approvals.COVERAGE_TOOLS:
+        c = cov.get(tool) if isinstance(cov, dict) else None
+        status, graded = (c.get("status"), c.get("graded_runs")) if isinstance(c, dict) else (None, None)
+        ran = status == "run" and type(graded) is int and graded > 0
+        if not ran and (status == "run" or not isinstance(status, str)): status = "unknown (no valid tool_coverage entry)"
+        w = waivers.get(tool) if isinstance(waivers, dict) else None
+        w = w if isinstance(w, dict) and w.get("status") in approvals.STATUSES else {"status": "missing"}
+        state = ("run" if ran else "not-required" if tool not in COVERAGE_REQUIRED else
+                 "waived" if w["status"] == "approved" else "missing")
+        out.append((tool, {"state": state, "tool": tool, "status": status, "principal": w.get("principal"),
+                           "reason": w.get("reason"), "waiver": w["status"] if w["status"] in ("missing", "unsigned")
+                           else "%s (%s)" % (w["status"], w.get("verdict_reason"))}))
+    return out
 
 def _hashes_bound(bench):
     m = _meta(bench)
@@ -3398,7 +3441,6 @@ GATE_PREDICATES = (
     ("regression-previous", "problem", "per_engine", ("engine", "with_skill", "previous"), _regression_previous),
     ("low-agreement", "problem", None, ("agreement", "threshold", "n"), _low_agreement),
     ("not-calibrated", "note", None, (), lambda b, p: None if b.get("calibration") else {}),
-    ("coverage", "note", None, ("note",), _coverage),
     ("static-failures", "problem", None, ("count",),
      lambda b, p: {"count": len(b["static_failures"])} if b.get("static_failures") else None),
     ("run-stopped", "problem", None, ("stopped",),
@@ -3431,10 +3473,17 @@ GATE_PREDICATES = (
      lambda b, p: {"count": b["llm_not_graded"]} if b.get("llm_not_graded") else None),
     ("human-pending", "problem", None, ("count",),
      lambda b, p: {"count": b["human_pending"]} if b.get("human_pending") else None),
+    ("coverage-missing", "problem", "coverage", ("tool", "status", "waiver"),
+     lambda b, p, t, c: c if c["state"] == "missing" else None),
+    ("coverage-waived", "note", "coverage", ("tool", "status", "principal", "reason"),
+     lambda b, p, t, c: c if c["state"] == "waived" else None),
+    ("coverage-not-required", "note", "coverage", ("tool", "status"),
+     lambda b, p, t, c: c if c["state"] == "not-required" else None),
 )
 GATE_SCOPES = {"per_engine": lambda b: list((b.get("per_engine") or {}).items()),
                "completeness": lambda b: sorted((b.get("completeness") or {}).items()),
-               "trigger": lambda b: sorted((b.get("trigger") or {}).items())}
+               "trigger": lambda b: sorted((b.get("trigger") or {}).items()),
+               "coverage": coverage_states}
 RULES_STALE_IDS = ("stale-rules", "stale-rules-unrecorded")
 GATE_FIELD_RE = re.compile(r"%(?:%|\(([A-Za-z_]+)\)[#0 +-]*[0-9]*(?:\.[0-9]+)?[diouxXeEfFgGcrsa])")
 
@@ -3471,9 +3520,25 @@ def load_gate_messages():
 
 GATE_MESSAGES = _policy_or_exit(load_gate_messages)
 
+def load_coverage_required():
+    from engine import schema
+    where = "policy/gate.rules.json"
+    try:
+        doc = schema.load(os.path.join(POLICY_DIR, "gate.rules.json"))
+    except schema.JsonError as e:
+        raise PolicyError("%s: %s" % (where, e)) from None
+    v = doc.get("coverage_required") if isinstance(doc, dict) else None
+    if not (isinstance(v, list) and v and all(isinstance(t, str) and t in approvals.COVERAGE_TOOLS for t in v)
+            and len(set(v)) == len(v)):
+        raise PolicyError("%s: coverage_required must be a non-empty list of unique names from %s, got %s"
+                          % (where, ", ".join(approvals.COVERAGE_TOOLS), json.dumps(v)))
+    return tuple(t for t in approvals.COVERAGE_TOOLS if t in v)
+
+COVERAGE_REQUIRED = _policy_or_exit(load_coverage_required)
+
 def compute_gate(bench, prev=None):
     """GATE_PREDICATES in order, each hit rendered with its policy/gate.rules.json template. human_pending_only ignores
-    the stale-rules problems, so it keeps its B1 result for every input."""
+    the stale-rules and coverage-missing problems, so it keeps its B1 result for every input."""
     problems, notes, ids = [], [], []
     for scope, rows in itertools.groupby(GATE_PREDICATES, key=lambda row: row[2]):
         rows = list(rows)
@@ -3483,9 +3548,12 @@ def compute_gate(bench, prev=None):
                 if fields is None: continue
                 (problems if kind == "problem" else notes).append(GATE_MESSAGES[pid] % fields)
                 if kind == "problem": ids.append(pid)
-    b1 = [pid for pid in ids if pid not in RULES_STALE_IDS]
+    b1 = [pid for pid in ids if pid not in RULES_STALE_IDS and pid != "coverage-missing"]
     return {"problems": problems, "needs_approval": bool(problems), "notes": notes,
-            "human_pending_only": bool(b1) and all(pid == "human-pending" for pid in b1)}
+            "human_pending_only": bool(b1) and all(pid == "human-pending" for pid in b1),
+            "coverage_only": bool(ids) and all(pid == "coverage-missing" for pid in ids),
+            "coverage": {t: "waived by %s" % c["principal"] if c["state"] == "waived" else COVERAGE_STATES[c["state"]]
+                         for t, c in coverage_states(bench)}}
 
 def fmt_stat(s, pct=False):
     return ("%.0f%% ± %.0f%%" % (s["mean"] * 100, s["stddev"] * 100)) if pct else ("%.1f ± %.1f" % (s["mean"], s["stddev"]))
@@ -3519,10 +3587,11 @@ def comparison_md(bench, gate, n):
             L.append("| %s | **delta** | %s | %s | %s | |" % (eng, d["pass_rate"], d["time_seconds"], d["tokens"]))
     if bench.get("tool_coverage"):
         L += ["", "## Tool coverage (multi-tool parity)", "",
-              "| tool | static parity (eva.py) | dynamic eval | graded runs |", "|---|---|---|---|"]
+              "| tool | static parity (eva.py) | dynamic eval | graded runs | registration |", "|---|---|---|---|---|"]
         for t, c in bench["tool_coverage"].items():
-            L.append("| %s | %s | %s | %d%s |" % (t, (bench.get("parity") or {}).get(t, "unknown"), c["status"], c["graded_runs"],
-                                              " (+%d pending)" % c["pending_runs"] if c.get("pending_runs") else ""))
+            L.append("| %s | %s | %s | %d%s | %s |" % (t, (bench.get("parity") or {}).get(t, "unknown"), c["status"], c["graded_runs"],
+                                              " (+%d pending)" % c["pending_runs"] if c.get("pending_runs") else "",
+                                              gate["coverage"].get(t, "unknown")))
     if bench["trigger"]:
         L += ["", "## Trigger evals (threshold %.1f)" % TRIGGER_THRESHOLD, "",
               "| engine | configuration | passed | should-trigger ok | should-not ok |", "|---|---|---|---|---|"]
@@ -3577,6 +3646,7 @@ def comparison_md(bench, gate, n):
 
 def report_iteration(spec, ws, n):
     bench = build_benchmark(spec, ws, n)
+    bench["coverage_waivers"] = waiver_verdicts(spec, ws)
     prev = rjson(os.path.join(ws, "iteration-%d" % (n - 1), "benchmark.json")) if n > 1 else None
     gate = compute_gate(bench, prev)
     bench["gate"] = gate
@@ -3586,15 +3656,48 @@ def report_iteration(spec, ws, n):
     wtext(os.path.join(it_dir, "comparison.md"), comparison_md(bench, gate, n))
     return bench, gate
 
-def registration_record(spec, ws):
+def registration_coverage(spec, ws, bench, n):
+    """The register summary line of each required tool: its coverage recomputed from bench's runs and planned engines
+    (never the stored field) and its current waiver. Refuses a stored tool_coverage that is malformed or claims run where
+    the runs do not, then every required tool that neither ran nor has a valid waiver."""
+    runs, planned = bench.get("runs"), _meta(bench).get("engines")
+    if not (isinstance(runs, list) and all(isinstance(r, dict) and isinstance(r.get("engine"), str)
+                                           and isinstance(r.get("result"), dict) and "pass_rate" in r["result"] for r in runs)
+            and (planned is None or isinstance(planned, (dict, list)) and all(isinstance(e, str) for e in planned))):
+        raise EvalError("iteration-%d cannot be registered: its benchmark.json runs or planned engines are malformed; "
+                        "re-run `report`" % n)
+    cov = runs_coverage(planned, runs)
+    if "tool_coverage" in bench:
+        stored = bench["tool_coverage"]
+        if not (isinstance(stored, dict) and all(t in cov and isinstance(c, dict) and isinstance(c.get("status"), str)
+                                                 for t, c in stored.items())):
+            raise EvalError("iteration-%d cannot be registered: the benchmark's tool_coverage is malformed; re-run "
+                            "`report`" % n)
+        forged = ["%s claims run, its runs give %s" % (t, cov[t]["status"]) for t, c in stored.items()
+                  if c["status"] == "run" and cov[t]["status"] != "run"]
+        if forged:
+            raise EvalError("iteration-%d cannot be registered: the benchmark's tool_coverage does not match its runs: %s; "
+                            "re-run `report`" % (n, "; ".join(forged)))
+    states = coverage_states(dict(bench, tool_coverage=cov, coverage_waivers=waiver_verdicts(spec, ws)))
+    missing = [GATE_MESSAGES["coverage-missing"] % c for _, c in states if c["state"] == "missing"]
+    if missing:
+        raise EvalError("iteration-%d cannot be registered: %s. Registration needs a graded dynamic run on every tool of "
+                        "coverage_required (%s) or, for each tool that did not run, a signed `approve --gate "
+                        "coverage_waiver:<tool>` with a reason typed at the terminal; a registration approval does not "
+                        "clear coverage" % (n, "; ".join(missing), ", ".join(COVERAGE_REQUIRED)))
+    waived = {t: " (waived by %s, reason: %s)" % (c["principal"], c["reason"]) for t, c in states if c["state"] == "waived"}
+    return ["register coverage %s=%s%s" % (t, c["status"], waived.get(t, "")) for t, c in states if t in COVERAGE_REQUIRED]
+
+def registration_record(spec, ws, shown=None):
     """The record `register` writes for the last iteration, or EvalError when that iteration may not be registered.
-    Writes nothing."""
+    Writes nothing. shown, when given, receives the per-tool lines of the registration_coverage check."""
     its = iterations(ws)
     if not its: raise EvalError("no iteration to register in %s" % ws)
     n = its[-1]
     gate = rjson(os.path.join(ws, "iteration-%d" % n, "gate.json"))
     bench = rjson(os.path.join(ws, "iteration-%d" % n, "benchmark.json"))
     if gate is None or bench is None: raise EvalError("iteration-%d has no report; run `report` first" % n)
+    lines = registration_coverage(spec, ws, bench, n)
     if bench.get("gate") != gate: raise EvalError("iteration-%d gate.json does not match benchmark.json; re-run `report`" % n)
     m = bench.get("metadata") or {}
     now_skill, now_evals = skill_tree_hash(spec["skill_dir"]), gate_hash("eval_set", spec, ws)
@@ -3613,6 +3716,7 @@ def registration_record(spec, ws):
     if m.get("ruleset_sha256") != now_rules:
         raise EvalError("iteration-%d ran under ruleset %s but the rules now hash to %s; re-run the eval before "
                         "registering" % (n, (m.get("ruleset_sha256") or "<unrecorded>")[:12], now_rules[:12]))
+    if shown is not None: shown.extend(lines)
     return {"skill_name": spec["skill_name"], "skill_path": spec["skill_dir"], "iteration": n,
             "benchmark_sha256": gate_hash("iteration-%d" % n, spec, ws), "skill_sha256": now_skill,
             "eval_set_sha256": now_evals,
@@ -3642,12 +3746,13 @@ def _register_with(load):
     st = {}
     def prepare():
         spec, ws = load()
-        rec = registration_record(spec, ws)
+        shown = []
+        rec = registration_record(spec, ws, shown)
         st.update(rec=rec, ws=ws)
         return approvals.Prepared(spec["skill_name"], registration_hash(rec), rec["ruleset_sha256"],
                                   ["register %s=%s" % (k, rec[k]) for k in REGISTRATION_SIGNED] +
                                   ["register approval: %s" % ("auto (clean gate)" if rec["approval"] == "auto" else
-                                                              "signed registration gate")])
+                                                              "signed registration gate")] + shown)
     grant = APPROVER["it"].sign("register", "registration", prepare)
     rec = dict(st["rec"], signed=grant.record)
     wjson(os.path.join(st["ws"], "registration.json"), rec)
@@ -3741,7 +3846,8 @@ class ClaudeBuilder:
 def loop(spec, ws, engines, grader, builder, max_iterations=MAX_AUTO_ITERATIONS, runs=DEFAULT_RUNS, baseline="none",
          old_skill=None, budget=None, prices=None, golden=None, seed=None, log=print, tokens=None, precheck=None,
          run_root=None):
-    """run -> grade -> (calibrate) -> report; stop when the gate is clean; otherwise call builder(iteration_dir,
+    """run -> grade -> (calibrate) -> report; stop when the gate is clean, or with "needs-coverage" when only
+    coverage-missing problems remain (no builder can fix them); otherwise call builder(iteration_dir,
     skill_dir) and reload the skill. precheck(spec, iterations_left) -> [problems] runs before EVERY iteration (the
     CLI passes the full --live gate set: validation, approvals incl. fixture hashes, preflight, cost vs remaining
     budget); any problem stops the loop. Every builder call is bracketed by engine/writable.py fingerprints of the skill
@@ -3775,6 +3881,7 @@ def loop(spec, ws, engines, grader, builder, max_iterations=MAX_AUTO_ITERATIONS,
         log("iteration-%d gate: %s" % (n, gate["problems"] or "clean"))
         if not gate["problems"]: return {"status": "clean", "iteration": n}
         if gate.get("human_pending_only"): return {"status": "needs-human-review", "iteration": n}
+        if gate.get("coverage_only"): return {"status": "needs-coverage", "iteration": n}
         if budget is not None and budget.remaining() <= 0: return {"status": "budget-exhausted", "iteration": n}
         if i == max_iterations - 1 or builder is None: break
         harness = getattr(builder, "harness_writes", [])
@@ -3930,7 +4037,11 @@ def plan_text(spec, problems, a, engines, ws, est, tokens=None, prices=None):
               "none" if rr is None else "RECORDED (signed by %s)" % rr.principal if rr.status == "approved" else
               "NOT RECORDED (%sblocks --live and the loop)" % ("" if rr.status == "missing" else rr.status + "; ")),
           "multi-tool parity (static, eva.py): " + eva.parity_line(eva.parity_status(spec["skill_dir"])),
-          "tool coverage (dynamic): " + coverage_line(tool_coverage([e.name for e in engines]))]
+          "tool coverage (dynamic): " + coverage_line(tool_coverage([e.name for e in engines])),
+          "registration coverage: registration needs a graded dynamic run on every tool of coverage_required (%s) or a "
+          "signed coverage_waiver:<tool> with a typed reason for each tool that did not run; waivers: %s" % (
+              ", ".join(COVERAGE_REQUIRED), ", ".join("%s=%s" % (t, approval_label(verdict_of(
+                  approvals.WAIVER_PREFIX + t, spec, ws))) for t in COVERAGE_REQUIRED))]
     L += ["approval gates: requirements=%s, eval_set=%s" % (
         approval_label(verdict_of("requirements", spec, ws)), approval_label(verdict_of("eval_set", spec, ws)))]
     pf = preflight(spec, [e.name for e in engines], a.run_root)

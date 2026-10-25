@@ -212,6 +212,7 @@ class GateReg(T.Base, Cli):
         n = se.run_iteration(spec, self.ws, [se.ClaudeCodeEngine("claude-opus-5-5", exec_fn=FakeClaude(regress))], runs=1,
                              log=quiet)
         se.grade_iteration(spec, self.ws, n, self.grader(), log=quiet)
+        T.waive_coverage(spec, self.ws)
         se.report_iteration(spec, self.ws, n)
         return spec
 
@@ -240,8 +241,8 @@ class GateReg(T.Base, Cli):
                 spec = self.iteration(True)
                 n = se.iterations(self.ws)[-1]
                 self.assertTrue(rjson(os.path.join(self.ws, "iteration-%d" % n, "gate.json"))["needs_approval"])
-                wjson(os.path.join(self.ws, "approvals.json"), {"registration": {
-                    "sha256": se.gate_hash("registration", spec, self.ws), "by": "pinesky", "at": AT}})
+                wjson(os.path.join(self.ws, "approvals.json"), dict(rjson(os.path.join(self.ws, "approvals.json")),
+                      registration={"sha256": se.gate_hash("registration", spec, self.ws), "by": "pinesky", "at": AT}))
                 if existing: write(reg, '{"previous": true}\n')
                 elif os.path.exists(reg): os.remove(reg)
                 before = state(reg)
@@ -869,6 +870,7 @@ class SkillGate(T.Base):
         n = se.run_iteration(self.spec, self.ws, [se.ClaudeCodeEngine("claude-opus-5-5", exec_fn=FakeClaude(True))],
                              runs=1, log=quiet)
         se.grade_iteration(self.spec, self.ws, n, self.grader(), log=quiet)
+        T.waive_coverage(self.spec, self.ws)
         se.report_iteration(self.spec, self.ws, n)
         rec = se.approve("registration", self.spec, self.ws)
         reg = se.register(self.spec, self.ws)
@@ -921,6 +923,7 @@ class SkillGate(T.Base):
         n = se.run_iteration(self.spec, self.ws, [se.ClaudeCodeEngine("claude-opus-5-5", exec_fn=FakeClaude())], runs=1,
                              log=quiet)
         se.grade_iteration(self.spec, self.ws, n, self.grader(), log=quiet)
+        T.waive_coverage(self.spec, self.ws)
         se.report_iteration(self.spec, self.ws, n)
         golden = os.path.join(self.tmp, "golden.json")
         wjson(golden, {"examples": [{"prompt": "p", "output": "o", "item": "i", "label": True}]})

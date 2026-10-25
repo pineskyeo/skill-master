@@ -26,6 +26,12 @@ RULES_CHANGED = "rules changed since approval"
 UNSIGNED = "no signature (a record from before signed approvals)"
 UNSIGNED_RULES = UNSIGNED + "; " + RULES_CHANGED
 
+COVERAGE_TOOLS = ("claude", "codex", "opencode", "hermes")
+WAIVER_PREFIX = "coverage_waiver:"
+WAIVER_GATES = tuple(WAIVER_PREFIX + t for t in COVERAGE_TOOLS)
+REASON_MAX = 200
+REASON_PROMPT = "reason for this coverage waiver (printable ASCII, 1 to %d characters): " % REASON_MAX
+
 AGENT_NAMES = ("claude", "codex", "opencode", "hermes", "cursor")
 HOST_MARKERS = {
     "exact": ("CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT", "CLAUDE_AS_ACTIVE", "CLAUDE_AS_CALLER", "CLAUDE_AS_AUTO_SWITCH",
@@ -71,10 +77,21 @@ def label(kind, gate):
     return "%s --live" % gate if kind == "live" else kind
 
 
-def payload(kind, gate, unit, sha256, ruleset_sha256, at, budget_usd=None):
+def reason_problem(reason):
+    if not isinstance(reason, str) or not reason.strip(): return "it is empty"
+    if len(reason) > REASON_MAX: return "it is longer than %d characters" % REASON_MAX
+    if any(not " " <= c <= "~" for c in reason): return "it holds a character that is not printable ASCII"
+    if reason != reason.strip(): return "it has leading or trailing spaces"
+    return None
+
+
+def payload(kind, gate, unit, sha256, ruleset_sha256, at, budget_usd=None, reason=None):
     """The canonical bytes a signature covers. Every value is checked, so no two field sets give the same bytes."""
     if kind not in KINDS: raise ValueError("kind %r is not one of %s" % (kind, ", ".join(KINDS)))
-    for name, value, rx in (("gate", gate, NAME_RE), ("unit", unit, NAME_RE), ("sha256", sha256, SHA_RE),
+    waiver = kind == "approve" and gate in WAIVER_GATES
+    if not waiver and not (isinstance(gate, str) and NAME_RE.fullmatch(gate)):
+        raise ValueError("gate %r is not valid" % (gate,))
+    for name, value, rx in (("unit", unit, NAME_RE), ("sha256", sha256, SHA_RE),
                             ("ruleset_sha256", ruleset_sha256, SHA_RE), ("at", at, AT_RE)):
         if not isinstance(value, str) or not rx.fullmatch(value): raise ValueError("%s %r is not valid" % (name, value))
     lines = ["skill-master-approval v%d" % FORMAT, "kind " + kind, "gate " + gate, "unit " + unit, "sha256 " + sha256,
@@ -86,6 +103,12 @@ def payload(kind, gate, unit, sha256, ruleset_sha256, at, budget_usd=None):
         lines.append("budget_usd %r" % float(budget_usd))
     elif budget_usd is not None:
         raise ValueError("only a live payload has a budget")
+    if waiver:
+        problem = reason_problem(reason)
+        if problem: raise ValueError("reason %r is not valid: %s" % (reason, problem))
+        lines.append("reason " + reason)
+    elif reason is not None:
+        raise ValueError("only a coverage waiver payload has a reason")
     lines.append("at " + at)
     return ("\n".join(lines) + "\n").encode("ascii")
 
@@ -296,14 +319,21 @@ class Approver(object):
         problems = self.key_problems()
         if problems: raise Refused(what, ["%s: approver-check: %s" % (what, p) for p in problems])
         prep = prepare()
+        shown, reason = list(prep.show), None
+        if kind == "approve" and gate in WAIVER_GATES:
+            for line in shown: self.write(printable(line))
+            shown, reason = [], (self.read_line(REASON_PROMPT) or "").strip()
+            problem = reason_problem(reason)
+            if problem: raise Refused(what, ["%s: reason refused: %s; nothing was signed" % (what, problem)])
         at = now_iso()
         try:
-            data = payload(kind, gate, prep.unit, prep.sha256, prep.ruleset_sha256, at, budget_usd)
+            data = payload(kind, gate, prep.unit, prep.sha256, prep.ruleset_sha256, at, budget_usd, reason)
         except ValueError as ex:
             raise Refused(what, ["%s: cannot sign: %s" % (what, ex)])
         summary = "%s: gate %s, unit %s, sha256 %s" % (what, gate, prep.unit, prep.sha256)
         if budget_usd is not None: summary += ", budget $%.2f" % budget_usd
-        for line in list(prep.show) + [summary]: self.write(printable(line))
+        if reason is not None: summary += ", reason " + reason
+        for line in shown + [summary]: self.write(printable(line))
         challenge = "".join(secrets.choice(CHALLENGE_ALPHABET) for _ in range(CHALLENGE_LENGTH))
         typed = self.read_line("type %s to sign (anything else cancels): " % challenge)
         if (typed or "").strip() != challenge:
@@ -315,6 +345,7 @@ class Approver(object):
             raise Refused(what, ["%s: signing failed: %s" % (what, ex)])
         record = {"format": FORMAT, "method": "ssh-sig", "sha256": prep.sha256, "ruleset_sha256": prep.ruleset_sha256,
                   "principal": principal, "at": at, "signature": signature}
+        if reason is not None: record["reason"] = reason
         v = self.verdict(record, kind, gate, prep.unit, prep.sha256, prep.ruleset_sha256, budget_usd)
         if v.status != "approved": raise Refused(what, ["%s: the new signature does not verify: %s" % (what, v.reason)])
         return Grant(kind, gate, prep.unit, prep.sha256, record)
@@ -342,7 +373,8 @@ class Approver(object):
         if isinstance(record, dict) and "signature" not in record and "method" not in record:
             bound = record.get("ruleset_sha256") is not None and record.get("ruleset_sha256") == ruleset_sha256
             return Verdict("unsigned", None, UNSIGNED if bound else UNSIGNED_RULES)
-        problem = record_problem(record)
+        waiver = kind == "approve" and gate in WAIVER_GATES
+        problem = record_problem(record, waiver)
         if problem: return Verdict("invalid", None, problem)
         if self.refuse_in_tests and in_test_process(): return Verdict("invalid", None, IN_TESTS)
         if not os.path.isfile(self.signers):
@@ -353,7 +385,8 @@ class Approver(object):
         if record.get("ruleset_sha256") is None or record["ruleset_sha256"] != ruleset_sha256:
             return Verdict("stale", record["principal"], RULES_CHANGED)
         try:
-            data = payload(kind, gate, unit, sha256, record["ruleset_sha256"], record["at"], budget_usd)
+            data = payload(kind, gate, unit, sha256, record["ruleset_sha256"], record["at"], budget_usd,
+                           record["reason"] if waiver else None)
             problem = self.verify(data, record["signature"], record["principal"])
         except (OSError, ValueError, subprocess.SubprocessError) as ex:
             problem = str(ex)
@@ -372,7 +405,7 @@ class Approver(object):
         return None if rc == 0 else "signature does not verify: %s" % first_line(err or out)
 
 
-def record_problem(record):
+def record_problem(record, waiver=False):
     if not isinstance(record, dict): return "the record is not an object"
     if record.get("format") != FORMAT: return "format is %r, not %d" % (record.get("format"), FORMAT)
     if record.get("method") != "ssh-sig": return "method is %r, not ssh-sig" % (record.get("method"),)
@@ -381,7 +414,9 @@ def record_problem(record):
     for name, rx in fields:
         value = record.get(name)
         if not isinstance(value, str) or not rx.fullmatch(value): return "field %s is missing or malformed" % name
-    return None
+    if not waiver: return "field reason is only valid on a coverage waiver record" if "reason" in record else None
+    problem = reason_problem(record.get("reason"))
+    return "field reason is missing or malformed (%s)" % problem if problem else None
 
 
 def stdin_line(prompt):

@@ -759,23 +759,24 @@ class TestToolCoverage(T.Base):
         self.assertIn("| opencode | pass | not-run: engine not available | 0 |", md)
         self.assertIn("| claude | pass | run |", md)
 
-    def test_gate_note_names_the_missing_tools_but_adds_no_problem(self):
+    def test_gate_lists_the_missing_tools_as_problems_and_adds_no_coverage_note(self):
         spec, n, bench, gate = self.run_report()
-        notes = [x for x in gate["notes"] if x.startswith("per-tool dynamic coverage")]
-        self.assertEqual(len(notes), 1)
-        self.assertIn("run on claude, codex; NOT run on opencode (engine not available), hermes (engine not available)", notes[0])
-        self.assertFalse(any("coverage" in p or "opencode" in p or "hermes" in p for p in gate["problems"]))
+        self.assertFalse(any(x.startswith("per-tool dynamic coverage") for x in gate["notes"]), gate["notes"])
+        self.assertEqual([p for p in gate["problems"] if p.startswith("coverage-missing:")], T.CLAUDE_CODEX_MISSING)
 
-    def test_gate_problems_and_approval_need_do_not_depend_on_coverage(self):
+    def test_gate_problems_depend_on_coverage_and_a_bench_without_it_fails_closed(self):
         spec, n, bench, gate = self.run_report()
         a, b = dict(bench), dict(bench)
         a["tool_coverage"] = se.tool_coverage(["claude", "codex"], {"claude": 1, "codex": 1})
         b.pop("tool_coverage"); b["gate"] = None
         ga, gb = se.compute_gate(a), se.compute_gate(b)
-        self.assertEqual(ga["problems"], gb["problems"]); self.assertEqual(ga["needs_approval"], gb["needs_approval"])
-        self.assertEqual(ga["human_pending_only"], gb["human_pending_only"])
-        self.assertEqual(len(ga["notes"]), len(gb["notes"]) + 1)
+        other = [p for p in ga["problems"] if not p.startswith("coverage-missing:")]
+        self.assertEqual(ga["problems"], other + T.CLAUDE_CODEX_MISSING)
+        self.assertEqual(gb["problems"], other + T.NO_COVERAGE_MISSING)
+        self.assertTrue(ga["needs_approval"] and gb["needs_approval"])
+        self.assertEqual(ga["human_pending_only"], gb["human_pending_only"]); self.assertEqual(ga["notes"], gb["notes"])
         full = dict(a); full["tool_coverage"] = {t: {"status": "run", "engine": t, "graded_runs": 1} for t in eva.TOOLS}
+        self.assertEqual(se.compute_gate(full)["problems"], other)
         self.assertEqual(se.compute_gate(full)["notes"], gb["notes"])
 
     def test_benchmark_of_an_old_plan_without_coverage_still_builds(self):
@@ -787,11 +788,11 @@ class TestToolCoverage(T.Base):
         self.assertEqual(bench["tool_coverage"]["claude"]["status"], "run")
         self.assertEqual(bench["tool_coverage"]["hermes"]["status"], "not-run: engine not available")
 
-    def test_registration_does_not_know_about_coverage(self):
+    def test_registration_reads_coverage_only_in_the_coverage_check_and_the_waiver_gate(self):
         import inspect
-        fns = (se.register, se._register_with, se.registration_record, se.registration_hash, se.registration_verdict,
-               se.approve, se._approve_with, se.approve_show, se.approvals_data, se.approval_record, se.approval_verdict,
-               se.approval_ok, se.gate_hash)
+        fns = (se.register, se._register_with, se.registration_hash, se.registration_verdict,
+               se.approve, se._approve_with, se.approvals_data, se.approval_record, se.approval_verdict,
+               se.approval_ok)
         assert_record_readers_listed(self, fns)
         for fn in fns:
             src = inspect.getsource(fn)
