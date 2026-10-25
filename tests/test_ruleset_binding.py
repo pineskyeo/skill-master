@@ -185,7 +185,7 @@ class TestStaleAfterRuleChange(Bound):
     def test_the_live_gate_refuses_a_rules_stale_approval(self):
         for g in ("requirements", "eval_set"): se.approve(g, self.spec, self.ws)
         change_rule_message(self.root)
-        rc, _, err = self.cli("run", self.d, "--workspace", self.ws, "--live", "--budget-usd", "100", "--engines",
+        rc, _, err = self.cli("run", self.d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "100", "--engines",
                               "claude", "--runs", "1")
         self.assertEqual(rc, 2, err)
         self.assertIn("gate requirements not approved (stale)", err)
@@ -217,7 +217,8 @@ class TestPricingIsNotTheBundle(Bound):
         T.install_test_approver(self, signers=signers)
         before = self.approved()
         append(os.path.join(self.root, "policy", "models.json"), "\n")
-        write(os.path.join(self.root, "policy", "auth-profiles.json"), "{}\n")
+        ap = os.path.join(self.root, "policy", "auth-profiles.json"); doc = rjson(ap)
+        doc["profiles"]["company"]["label"] += " (edited)"; wjson(ap, doc)
         append(signers, "# a comment line\n")
         self.assert_still_approved(before)
 
@@ -314,7 +315,7 @@ class TestSignedPayload(Bound):
         del shown[:]
         T.install_test_approver(self, write=shown.append, read_line=lambda p: "\n")
         with mock.patch.object(se, "live_exec", T._forbidden):
-            rc, _, err = self.cli("run", self.d, "--workspace", self.ws, "--live", "--budget-usd", "100", "--engines",
+            rc, _, err = self.cli("run", self.d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "100", "--engines",
                                   "claude", "--runs", "1")
         self.assertEqual(rc, 2, err); self.assertIn("challenge mismatch", err)
         self.assertIn("ruleset_sha256 " + se.ruleset_sha256(), shown)
@@ -329,7 +330,7 @@ class TestRecordedHashes(Bound):
         self.assertEqual(plan["ruleset_sha256"], se.ruleset_sha256())
         self.assertEqual(plan["policy_sha256"], {"pricing": file_sha(os.path.join(pol, "pricing.json")),
                                                  "models": file_sha(os.path.join(pol, "models.json")),
-                                                 "auth_profiles": None,
+                                                 "auth_profiles": file_sha(os.path.join(pol, "auth-profiles.json")),
                                                  "allowed_signers": file_sha(T.shared_keys()["signers"])})
         write(os.path.join(pol, "auth-profiles.json"), "{}\n")
         n = se.run_iteration(self.spec, self.ws, [se.ClaudeCodeEngine("claude-opus-5-5", exec_fn=FakeClaude())], runs=1,

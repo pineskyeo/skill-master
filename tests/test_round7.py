@@ -149,7 +149,7 @@ class TestLiveCommandQuoting(Base):
         d = self.approved_skill(evals=evals_doc(human=False))
         rr = os.path.join(self.tmp, "runs $HOME `id` it's")
         os.makedirs(rr)
-        argv = ("run", d, "--workspace", self.ws, "--live", "--dry-run", "--budget-usd", "4.5", "--engines", "claude",
+        argv = ("run", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--dry-run", "--budget-usd", "4.5", "--engines", "claude",
                 "--runs", "1", "--run-root", rr)
         rc, out, err = self.cli(*argv)
         live = next(l for l in out.splitlines() if l.startswith("live command: "))[len("live command: "):]

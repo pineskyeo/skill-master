@@ -1,0 +1,28 @@
+{
+  "$comment": "Named auth profiles of skill_eval.py, picked only by --auth-profile (a live start requires the flag; the engine never detects a profile). skill_eval.py validates this file in code when a command needs a profile, never at import. personal-mac must keep exactly the values below. company bills per token: it lists the API-key variable names each engine may read and the gateway base URLs it may use; values are never read, printed or logged, except that a listed gateway variable's value is compared with its listed URLs. Codex has no per-call cap, so it is refused in API-key mode by code, not by this file. Outside the rule bundle: a change here does not move ruleset_sha256 (references/auth-and-cost.md).",
+  "policy": "auth-profiles",
+  "version": "1.0.0",
+  "source": "plan.md:901-904 (H3); Appendix E Q7 (no provider or gateway until pinesky names one); gates.md G23 (this company default)",
+  "profiles": {
+    "personal-mac": {
+      "label": "Personal Mac: subscription auth only (claude.ai and ChatGPT logins), account shim and subscription checks on",
+      "billing": "subscription",
+      "account_shim": true,
+      "subscription_checks": true,
+      "engines": {
+        "claude": {"api_key_env": [], "gateways": {}},
+        "codex": {"api_key_env": [], "gateways": {}}
+      }
+    },
+    "company": {
+      "label": "Company: API-key billing under a hard --budget-usd cap; only the listed key variables and gateways",
+      "billing": "api_key",
+      "account_shim": false,
+      "subscription_checks": false,
+      "engines": {
+        "claude": {"api_key_env": ["ANTHROPIC_API_KEY"], "gateways": {}},
+        "codex": {"api_key_env": [], "gateways": {}}
+      }
+    }
+  }
+}

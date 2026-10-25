@@ -96,7 +96,7 @@ class TestClaudeSettingsSources(Base):
         wjson(self.managed, {"apiKeyHelper": SECRET})
         calls = []
         with mock.patch.object(se, "live_exec", lambda *a, **k: calls.append(a) or (0, "", "")):
-            rc, out, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "50", "--engines", "claude",
+            rc, out, err = self.cli("run", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "50", "--engines", "claude",
                                     "--runs", "1", "--run-root", self.runs)
         self.assertEqual(rc, 2); self.assertIn("preflight", err); self.assertIn("managed-settings.json", err)
         self.assertNotIn(SECRET, out + err); self.assertEqual(calls, [])
@@ -272,7 +272,7 @@ class TestCodexSoftBudget(Base):
         with mock.patch.object(se, "live_exec", lambda *a, **k: calls.append(a) or (0, "", "")):
             for argv in (("run",), ("loop", "--builder-prompt", bp)):
                 for engines in ("codex", "claude,codex"):
-                    rc, out, err = self.cli(*(argv + (d, "--workspace", self.ws, "--live", "--budget-usd", "50",
+                    rc, out, err = self.cli(*(argv + (d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "50",
                                                       "--engines", engines, "--price", "codex=2,10", "--runs", "1",
                                                       "--run-root", self.runs, "--strict-budget")))
                     self.assertEqual(rc, 2, (argv, engines, out, err))
@@ -284,14 +284,14 @@ class TestCodexSoftBudget(Base):
         fc, fx = FakeClaude(), FakeCodex()
         live = lambda cmd, cwd, timeout, env=None: (fc if cmd[0] == "claude" else fx)(cmd, cwd, timeout, env)
         with mock.patch.object(se, "live_exec", live):
-            rc, out, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "50", "--engines", "claude",
+            rc, out, err = self.cli("run", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "50", "--engines", "claude",
                                     "--runs", "1", "--run-root", self.runs, "--strict-budget")
             self.assertEqual(rc, 0, err); self.assertNotIn("SOFT LIMIT", err)
-            rc, out, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "50", "--engines", "codex",
+            rc, out, err = self.cli("run", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "50", "--engines", "codex",
                                     "--price", "codex=2,10", "--runs", "1", "--run-root", self.runs)
         self.assertEqual(rc, 2, err); self.assertIn("--strict-budget (default)", err)  # round 6: refused by default
         with mock.patch.object(se, "live_exec", live):
-            rc, out, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "50", "--engines", "codex",
+            rc, out, err = self.cli("run", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "50", "--engines", "codex",
                                     "--price", "codex=2,10", "--runs", "1", "--run-root", self.runs, "--no-strict-budget")
         self.assertEqual(rc, 0, err); self.assertIn("WARNING: budget SOFT LIMIT: codex", err)
         self.assertIn("readable by the agent under test", err)

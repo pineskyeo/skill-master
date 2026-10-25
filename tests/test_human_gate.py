@@ -260,7 +260,7 @@ class GateLv(GateFixture):
     def check(self, *extra):
         self.unsigned()
         before = state(self.approvals)
-        rc, out, err = self.run_cli("run", self.d, "--workspace", self.ws, "--live", "--budget-usd", "0.01", *extra)
+        rc, out, err = self.run_cli("run", self.d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "0.01", *extra)
         self.assert_nothing_started()
         self.assertEqual(rc, 2, err)
         self.assertEqual(err.splitlines()[0], NOT_TTY % "run --live", err)
@@ -283,7 +283,7 @@ class GateLvOther(GateFixture):
     def check(self, cmd, *extra):
         self.unsigned()
         before = state(self.approvals)
-        rc, out, err = self.run_cli(cmd, self.d, "--workspace", self.ws, "--live", "--budget-usd", "0.01", *extra)
+        rc, out, err = self.run_cli(cmd, self.d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "0.01", *extra)
         self.assert_nothing_started()
         self.assertEqual(rc, 2, err)
         self.assertEqual(err.splitlines()[0], NOT_TTY % (cmd + " --live"), err)
@@ -862,7 +862,7 @@ class SkillGate(T.Base):
         wjson(os.path.join(self.d, "evals", "trigger_evals.json"), T.TRIGGERS[::-1])
         rc, out, _ = self.cli("plan", self.d, "--workspace", self.ws, "--engines", "claude")
         self.assertIn("eval_set=NOT APPROVED (stale)", out)
-        rc, _, err = self.cli("run", self.d, "--workspace", self.ws, "--live", "--budget-usd", "100", "--engines", "claude")
+        rc, _, err = self.cli("run", self.d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "100", "--engines", "claude")
         self.assertEqual(rc, 2); self.assertIn("gate requirements not approved (unsigned)", err)
 
     def test_registration_is_signed_and_verifies(self):
@@ -936,7 +936,7 @@ class SkillGate(T.Base):
                 self.assertEqual(rc, 2, err); self.assertIn(want, err); self.assertFalse(os.path.exists(reg))
                 for cmd, *extra in live:
                     before = state(self.approvals)
-                    rc, _, err = self.cli(cmd, self.d, "--workspace", self.ws, "--live", "--budget-usd", "100", *extra)
+                    rc, _, err = self.cli(cmd, self.d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "100", *extra)
                     self.assertEqual(rc, 2, (cmd, err)); self.assertIn(want, err, cmd)
                     self.assertEqual(state(self.approvals), before)
                 self.assertEqual(self.status_calls, []); self.assertEqual(started, []); self.assertFalse(se._LIVE["on"])
@@ -951,7 +951,7 @@ class SkillGate(T.Base):
         fake = FakeClaude()
         with mock.patch.object(se, "live_exec", lambda cmd, cwd, timeout, env=None: seen.append(se._LIVE["on"]) or
                                fake(cmd, cwd, timeout)):
-            rc, out, err = self.cli("run", self.d, "--workspace", self.ws, "--live", "--budget-usd", "100", "--engines",
+            rc, out, err = self.cli("run", self.d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "100", "--engines",
                                     "claude", "--runs", "1")
         self.assertEqual(rc, 0, err); self.assertTrue(seen and all(seen))
 
@@ -962,7 +962,7 @@ class SkillGate(T.Base):
             with open(skill_md, "a", encoding="utf-8") as f: f.write("\nedited while the challenge was shown\n")
             return T.type_challenge(prompt)
         with self.with_approver(read_line=edit_then_type), mock.patch.object(se, "live_exec", sentinel):
-            rc, out, err = self.cli("run", self.d, "--workspace", self.ws, "--live", "--budget-usd", "100", "--engines",
+            rc, out, err = self.cli("run", self.d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "100", "--engines",
                                     "claude", "--runs", "1")
         self.assertEqual(rc, 2, err); self.assertIn("changed after signing", err); self.assertFalse(se._LIVE["on"])
 
@@ -999,7 +999,7 @@ class SkillGate(T.Base):
         wjson(golden, {"examples": [{"prompt": "p", "output": "o", "item": "i", "label": True}]})
         self.edited_after_signing(
             lambda: wjson(golden, {"examples": [{"prompt": "p2", "output": "o", "item": "i", "label": True}]}),
-            "calibrate", self.d, "--workspace", self.ws, "--live", "--budget-usd", "100", "--iteration", str(n),
+            "calibrate", self.d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "100", "--iteration", str(n),
             "--golden", golden)
 
     def test_old_skill_folder_edited_after_signing_refuses(self):
@@ -1009,7 +1009,7 @@ class SkillGate(T.Base):
         shutil.copytree(self.d, old)
         def edit():
             with open(os.path.join(old, "SKILL.md"), "a", encoding="utf-8") as f: f.write("\nedited after signing\n")
-        self.edited_after_signing(edit, "run", self.d, "--workspace", self.ws, "--live", "--budget-usd", "100",
+        self.edited_after_signing(edit, "run", self.d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "100",
                                   "--engines", "claude", "--runs", "1", "--baseline", "old", "--old-skill", old)
 
     def rolled_back_after_signing(self, gate, path, change):
@@ -1023,7 +1023,7 @@ class SkillGate(T.Base):
         self.assertNotEqual(T.read(self.approvals), older[1])
         def roll_back():
             write(path, older[0]); write(self.approvals, older[1])
-        self.edited_after_signing(roll_back, "run", self.d, "--workspace", self.ws, "--live", "--budget-usd", "100",
+        self.edited_after_signing(roll_back, "run", self.d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "100",
                                   "--engines", "claude", "--runs", "1")
         self.assertEqual((T.read(path), T.read(self.approvals)), older)
         self.assertTrue(se.approval_ok(gate, self.spec, self.ws), "control: the older pair still reads approved")
@@ -1045,7 +1045,7 @@ class SkillGate(T.Base):
         before = state(self.approvals)
         with self.with_approver(read_line=lambda p: asked.append(p) or "\n", write=shown.append), \
                 mock.patch.object(se, "live_exec", sentinel):
-            rc, out, err = self.cli("run", self.d, "--workspace", self.ws, "--live", "--budget-usd", "100", "--engines",
+            rc, out, err = self.cli("run", self.d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "100", "--engines",
                                     "claude", "--runs", "1")
         self.assertEqual(rc, 2, err)
         self.assertIn("gate eval_set not approved", err)
@@ -1080,7 +1080,7 @@ class SkillGate(T.Base):
             rc, _, err = self.cli("approve", self.d, "--workspace", ws, "--gate", g)
             self.assertEqual(rc, 0, err)
         with self.with_approver(write=shown.append, read_line=lambda p: "\n"), mock.patch.object(se, "live_exec", sentinel):
-            rc, _, err = self.cli("run", self.d, "--workspace", ws, "--live", "--budget-usd", "100", "--engines", "claude",
+            rc, _, err = self.cli("run", self.d, "--workspace", ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "100", "--engines", "claude",
                                   "--runs", "1")
         self.assertEqual(rc, 2, err); self.assertIn("challenge mismatch", err)
         for line in shown: self.assertTrue(line.isprintable(), repr(line))

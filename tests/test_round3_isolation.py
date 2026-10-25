@@ -76,7 +76,7 @@ class TestLoopGates(Base):
                 return 0, json.dumps({"type": "result", "total_cost_usd": 0.5, "usage": {}}), ""
             return fake(cmd, cwd, timeout, env)
         with mock.patch.object(se, "live_exec", fake_live):
-            rc, out, err = self.cli("loop", d, "--workspace", self.ws, "--live", "--budget-usd", "200", "--engines", "claude",
+            rc, out, err = self.cli("loop", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "200", "--engines", "claude",
                                     "--runs", "1", "--builder-prompt", bp, "--run-root", self.runs, *extra)
         return rc, json.loads(out.strip().splitlines()[-1]) if out.strip() else None, err
 

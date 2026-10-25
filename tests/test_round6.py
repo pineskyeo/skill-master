@@ -61,7 +61,7 @@ class TestStrictBudgetDefault(Base):
             for argv in (("run",), ("loop", "--builder-prompt", bp)):
                 for engines in (None, "codex", "claude,codex"):  # None: the default --engines includes codex
                     extra = ("--engines", engines) if engines else ()
-                    rc, out, err = self.cli(*(argv + (d, "--workspace", self.ws, "--live", "--budget-usd", "50",
+                    rc, out, err = self.cli(*(argv + (d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "50",
                                                       "--price", "codex=2,10", "--runs", "1", "--run-root", self.runs)
                                               + extra))
                     self.assertEqual(rc, 2, (argv, engines, err))
@@ -75,10 +75,10 @@ class TestStrictBudgetDefault(Base):
         fc, fx = FakeClaude(), FakeCodex()
         live = lambda cmd, cwd, timeout, env=None: (fc if cmd[0] == "claude" else fx)(cmd, cwd, timeout, env)
         with mock.patch.object(se, "live_exec", live):
-            rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "50", "--engines", "claude",
+            rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "50", "--engines", "claude",
                                   "--runs", "1", "--run-root", self.runs)
             self.assertEqual(rc, 0, err); self.assertNotIn("SOFT LIMIT", err)
-            rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "50", "--engines", "codex",
+            rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "50", "--engines", "codex",
                                   "--price", "codex=2,10", "--runs", "1", "--run-root", self.runs, "--no-strict-budget")
         self.assertEqual(rc, 0, err)
         self.assertIn("WARNING: budget SOFT LIMIT: codex", err); self.assertIn("readable by the agent under test", err)
@@ -224,7 +224,7 @@ class TestKeychainOnly(Base):
 class TestLiveDryRun(Base):
     """6) `--live --dry-run`: every gate of the exact command, no model call, no auth status CLI, no files."""
     def args(self, d, *extra):
-        return ("run", d, "--workspace", self.ws, "--live", "--dry-run", "--budget-usd", "4.5", "--engines", "claude",
+        return ("run", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--dry-run", "--budget-usd", "4.5", "--engines", "claude",
                 "--runs", "1", "--run-root", self.runs) + extra
 
     def snapshot(self):
@@ -246,7 +246,7 @@ class TestLiveDryRun(Base):
 
     def test_dry_run_lists_every_failing_gate(self):
         d = make_skill(self.tmp, evals=evals_doc(human=False))  # not approved
-        rc, out, _ = self.cli("run", d, "--workspace", self.ws, "--live", "--dry-run", "--budget-usd", "1",
+        rc, out, _ = self.cli("run", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--dry-run", "--budget-usd", "1",
                               "--engines", "claude,codex", "--runs", "1", "--run-root", self.runs)
         self.assertEqual(rc, 3)
         for frag in ("--strict-budget (default): codex", "gate requirements not approved", "gate eval_set not approved",

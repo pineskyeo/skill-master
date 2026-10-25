@@ -45,16 +45,16 @@ class TestApiKeysRefusedAndScrubbed(Base):
         calls = []
         with mock.patch.object(se, "live_exec", lambda *a, **k: calls.append(a) or (0, "", "")), \
                 mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": SECRET}):
-            rc, out, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "50", "--engines", "claude",
+            rc, out, err = self.cli("run", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "50", "--engines", "claude",
                                     "--runs", "1", "--run-root", self.runs)
-            rc2, _, err2 = self.cli("grade", d, "--workspace", self.ws, "--live", "--budget-usd", "5")
+            rc2, _, err2 = self.cli("grade", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "5")
         self.assertEqual(rc, 2); self.assertIn("ANTHROPIC_API_KEY is set", err); self.assertNotIn(SECRET, out + err)
         self.assertEqual(rc2, 2)  # grade: no iteration yet; the gate order does not matter, nothing ran
         self.assertEqual(calls, []); self.assertEqual(se.iterations(self.ws), [])
         os.makedirs(os.path.join(self.ws, "iteration-1"))
         wjson(os.path.join(self.ws, "iteration-1", "plan.json"), {"engines": {"claude": "claude-opus-5-5"}})
         with mock.patch.dict(os.environ, {"OPENAI_API_KEY": SECRET}):
-            rc, _, err = self.cli("grade", d, "--workspace", self.ws, "--live", "--budget-usd", "5")
+            rc, _, err = self.cli("grade", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "5")
         self.assertEqual(rc, 2); self.assertIn("subscription auth: OPENAI_API_KEY is set", err); self.assertNotIn(SECRET, err)
         self.assertFalse(se._LIVE["on"])
 
@@ -112,7 +112,7 @@ class TestClaudeAuthStatus(Base):
         calls = []
         with mock.patch.dict(se.AUTH_STATUS, {"fn": lambda cmd, timeout=30: (0, json.dumps({"authMethod": "api_key"}), "")}), \
                 mock.patch.object(se, "live_exec", lambda *a, **k: calls.append(a) or (0, "", "")):
-            rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "50", "--engines", "claude",
+            rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "50", "--engines", "claude",
                                   "--runs", "1", "--run-root", self.runs)
         self.assertEqual(rc, 2); self.assertIn("subscription auth: claude: auth status reports API-key auth", err)
         self.assertEqual(calls, [])

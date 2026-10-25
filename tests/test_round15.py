@@ -159,7 +159,7 @@ class TestSkillOverrides(CacheBase):
                 mock.patch.object(se, "check_live_gates", return_value=None), \
                 mock.patch.object(se, "make_grader", return_value=mock.Mock()):
             spec, _ = self.spec()
-            self.cli("loop", spec["skill_dir"], "--workspace", self.ws, "--live", "--budget-usd", "5", "--engines",
+            self.cli("loop", spec["skill_dir"], "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "5", "--engines",
                      "claude", "--runs", "1", "--builder-prompt", d, "--run-root", self.runs)
         self.assertEqual(made, [spec["skill_name"]])
 

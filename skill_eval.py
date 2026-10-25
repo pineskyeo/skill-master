@@ -17,8 +17,8 @@ Usage: python3 skill_eval.py <validate|estimate|plan|run|grade|calibrate|report|
        python3 skill_eval.py builder-check <skill> --workspace <ws> [--compare SAVED]
        (also reachable as: python3 eva.py eval <subcommand> ...)
 """
-import argparse, csv, datetime, errno, hashlib, itertools, json, math, mmap, os, platform, random, re, shlex, shutil, subprocess, sys, tempfile, time
-from engine import approvals, writable
+import argparse, contextlib, csv, datetime, errno, hashlib, itertools, json, math, mmap, os, platform, random, re, shlex, shutil, subprocess, sys, tempfile, time
+from engine import approvals, spend, writable
 
 POLICY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "policy")
 RULESET_ROOT = os.path.dirname(os.path.abspath(__file__))  # rules/, schemas/, targets/, policy/ of ruleset_sha256()
@@ -211,6 +211,7 @@ CLAUDE_CAP_HEADROOM = _POLICY["CLAUDE_CAP_HEADROOM"]
 WORST_CASE_FACTOR = _POLICY["WORST_CASE_FACTOR"]
 SOFT_LIMIT_NOTE = ("SOFT LIMIT: %s has no per-call budget cap; the worst-case bound is an estimate, so one call can "
                    "exceed the remaining budget (--live refuses it by default; --no-strict-budget allows it, risky)")
+NO_REOPEN = " (--no-strict-budget does not reopen it)"
 NO_STRICT_WARNING = ("--no-strict-budget: %s runs with a SOFT budget limit (one call can exceed --budget-usd) and its "
                      "auth.json copy is readable by the agent under test (its tokens may be saved in transcripts or "
                      "output files)")
@@ -561,21 +562,29 @@ def full_prompt(case):
     return (p["context"].strip() + "\n\n" + case["prompt"]) if p and p.get("context", "").strip() else case["prompt"]
 
 # ---------- engines ----------
-_LIVE = {"on": False}
+_LIVE = {"on": False, "gated": False, "ledger": None}
 
 def enable_live(grant):
-    """The only way main() turns live mode on: a --live start signed and verified at the human gate."""
+    """The only way main() turns live mode on: a --live start signed and verified at the human gate. From then on every
+    live_exec needs an open intent of the command's spend ledger (_LIVE["ledger"], engine/spend.py)."""
     if not (isinstance(grant, approvals.Grant) and grant.kind == "live"):
         raise EvalError("live mode needs a --live start signed at the human gate")
-    _LIVE["on"] = True
+    _LIVE.update(on=True, gated=True)
 
 def live_exec(cmd, cwd, timeout, env=None):
-    """The only place a real CLI is started. Refuses unless main() enabled live mode (--live + --budget-usd + gates)."""
+    """The only place a real CLI is started. Refuses unless main() enabled live mode (--live + --budget-usd + gates)
+    and, after a signed start, unless the spend ledger holds an open intent for this call."""
     if not _LIVE["on"]:
         raise LiveDisabled("refusing to execute %r: live mode needs --live and --budget-usd" % (cmd[0],))
-    env = scrub_env(os.environ if env is None else env)  # subscription auth only: no API key reaches a child
+    if api_key_mode() and cmd and os.path.basename(cmd[0]) in spend.API_KEY_REFUSED:
+        raise LiveDisabled("refusing to execute %r: %s" % (cmd[0], spend.api_key_refusal(
+            "exec", os.path.basename(cmd[0]), AUTH["profile"].name, True)))
+    if _LIVE.get("gated") and not (_LIVE.get("ledger") is not None and _LIVE["ledger"].consume()):
+        raise LiveDisabled("refusing to execute %r: no open spend intent for this call (engine/spend.py)" % (cmd[0],))
+    env = scrub_env(os.environ if env is None else env)  # no API key reaches a child, except below
     env.pop("CLAUDECODE", None)  # as skill-creator run_eval.py: allow nesting claude -p inside a Claude Code session
     env = with_account_marker(env, cmd)
+    env.update(listed_child_env(cmd))
     p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, env=env,
                        stdin=subprocess.DEVNULL)  # codex exec waits for stdin when it is an open pipe/terminal
     return p.returncode, p.stdout, p.stderr
@@ -599,6 +608,153 @@ NON_SUBSCRIPTION_ENV = API_KEY_ENV + PROVIDER_ENV
 # Not refused, but removed from every child: Claude runs authenticate only with the existing Keychain login of the
 # unchanged config dir, the same login `claude auth status` verified. An exported setup-token would replace it.
 IGNORED_AUTH_ENV = ("CLAUDE_CODE_OAUTH_TOKEN",)
+
+# ---------- auth profiles (policy/auth-profiles.json; references/auth-and-cost.md) ----------
+# Picked only by --auth-profile, never detected. AUTH["profile"] is the profile of this command; None (direct calls,
+# tests) and personal-mac keep every subscription rule. Checks key on the profile's data: billing api_key turns on the
+# listed keys and gateways, the hard cap and the API-key records; account_shim false drops the shim marker.
+AUTH_PROFILES_FILE = "auth-profiles.json"
+AUTH_PROFILE_NAMES = ("personal-mac", "company")
+AUTH_ENGINES = ("claude", "codex")
+AUTH_TOP_KEYS = ("$comment", "policy", "version", "source", "profiles")
+AUTH_PROFILE_KEYS = ("label", "billing", "account_shim", "subscription_checks", "engines")
+PERSONAL_MAC = {"label": "Personal Mac: subscription auth only (claude.ai and ChatGPT logins), account shim and "
+                         "subscription checks on",
+                "billing": "subscription", "account_shim": True, "subscription_checks": True,
+                "engines": {e: {"api_key_env": [], "gateways": {}} for e in AUTH_ENGINES}}
+GATEWAY_URL_RE = re.compile(r"https://[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*(?::[0-9]{1,5})?(?:/[A-Za-z0-9._~%!$&'()*+,;=:@/-]*)?")
+AUTH = {"profile": None}
+PROFILE_REQUIRED = "a live run requires --auth-profile (personal-mac or company); the engine never detects the profile"
+CAP_REQUIRED = "a hard cap is required in API-key mode: pass a finite --budget-usd > 0 (auth profile %s)"
+NEEDS_LEDGER = "API-key mode needs the spend ledger (engine/spend.py); refusing the call"
+PERSONAL_DEFAULT_LINE = ("auth profile: personal-mac (default: no --auth-profile given; a live start requires "
+                         "--auth-profile)")
+
+class AuthProfile(object):
+    def __init__(self, name, doc):
+        self.name, self.label, self.billing = name, doc["label"], doc["billing"]
+        self.account_shim, self.subscription_checks = doc["account_shim"], doc["subscription_checks"]
+        self.engines = {e: {"api_key_env": tuple(x["api_key_env"]),
+                            "gateways": {k: tuple(v) for k, v in x["gateways"].items()}} for e, x in doc["engines"].items()}
+
+def _auth_profile_problem(p):
+    if not isinstance(p, dict) or sorted(p) != sorted(AUTH_PROFILE_KEYS):
+        return "must hold exactly %s" % ", ".join(AUTH_PROFILE_KEYS)
+    if not (isinstance(p["label"], str) and p["label"].strip()): return "label must be a non-empty string"
+    if p["billing"] not in ("subscription", "api_key"): return 'billing must be "subscription" or "api_key"'
+    for k in ("account_shim", "subscription_checks"):
+        if not isinstance(p[k], bool): return "%s must be true or false" % k
+    if not isinstance(p["engines"], dict) or sorted(p["engines"]) != sorted(AUTH_ENGINES):
+        return "engines must hold exactly %s" % ", ".join(AUTH_ENGINES)
+    listed = False
+    for e in AUTH_ENGINES:
+        x = p["engines"][e]
+        if not isinstance(x, dict) or sorted(x) != ["api_key_env", "gateways"]:
+            return "engines.%s must hold exactly api_key_env, gateways" % e
+        keys, gw = x["api_key_env"], x["gateways"]
+        if not (isinstance(keys, list) and all(isinstance(k, str) and k in API_KEY_ENV for k in keys)
+                and len(set(keys)) == len(keys)):
+            return "engines.%s.api_key_env must be a list of distinct names from %s" % (e, ", ".join(API_KEY_ENV))
+        if not isinstance(gw, dict): return "engines.%s.gateways must be an object" % e
+        for var, urls in gw.items():
+            if var not in PROVIDER_ENV or not var.endswith("_BASE_URL"):
+                return "engines.%s.gateways: %s is not a *_BASE_URL variable of PROVIDER_ENV" % (e, json.dumps(var))
+            if not (isinstance(urls, list) and urls and all(isinstance(u, str) and GATEWAY_URL_RE.fullmatch(u) for u in urls)
+                    and len(set(urls)) == len(urls)):
+                return ("engines.%s.gateways.%s must be a non-empty list of distinct https:// URLs without user info, query "
+                        "or fragment" % (e, var))
+        listed = listed or bool(keys) or bool(gw)
+    if p["billing"] == "api_key" and (p["account_shim"] or p["subscription_checks"]):
+        return "billing api_key needs account_shim and subscription_checks false"
+    if p["billing"] == "subscription" and (listed or not p["subscription_checks"]):
+        return "billing subscription needs subscription_checks true and no key or gateway listed"
+    return None
+
+def load_auth_profiles():
+    """{name: AuthProfile} from policy/auth-profiles.json under RULESET_ROOT (the file policy_sha256 hashes). Read only
+    by the commands that take --auth-profile, never at import; EvalError on a missing file, non-strict JSON or any value
+    outside the rules (exactly the two profiles, personal-mac exactly as shipped, known key and gateway names)."""
+    from engine import schema
+    where = "policy/" + AUTH_PROFILES_FILE
+    try:
+        doc = schema.load(os.path.join(RULESET_ROOT, "policy", AUTH_PROFILES_FILE))
+    except schema.JsonError as e:
+        raise EvalError("%s: %s" % (where, e))
+    if not isinstance(doc, dict) or sorted(doc) != sorted(AUTH_TOP_KEYS):
+        raise EvalError("%s: the top level must hold exactly %s" % (where, ", ".join(AUTH_TOP_KEYS)))
+    if doc["policy"] != "auth-profiles": raise EvalError('%s: policy must be "auth-profiles"' % where)
+    for k in ("$comment", "version", "source"):
+        if not (isinstance(doc[k], str) and doc[k].strip()): raise EvalError("%s: %s must be a non-empty string" % (where, k))
+    profiles = doc["profiles"]
+    if not isinstance(profiles, dict) or sorted(profiles) != sorted(AUTH_PROFILE_NAMES):
+        raise EvalError("%s: profiles must be exactly %s" % (where, ", ".join(AUTH_PROFILE_NAMES)))
+    for name in AUTH_PROFILE_NAMES:
+        bad = _auth_profile_problem(profiles[name])
+        if bad: raise EvalError("%s: profiles.%s: %s" % (where, name, bad))
+    if profiles["personal-mac"] != PERSONAL_MAC:
+        raise EvalError("%s: profiles.personal-mac must keep its shipped values (subscription billing, account shim and "
+                        "subscription checks on, no key or gateway)" % where)
+    return {name: AuthProfile(name, profiles[name]) for name in AUTH_PROFILE_NAMES}
+
+def select_auth_profile(name):
+    if name is not None and name not in AUTH_PROFILE_NAMES:
+        raise EvalError("unknown --auth-profile %r: the profiles are %s" % (name, ", ".join(AUTH_PROFILE_NAMES)))
+    AUTH["profile"] = load_auth_profiles()[name or "personal-mac"]
+    return AUTH["profile"]
+
+def api_key_mode():
+    p = AUTH["profile"]
+    return p is not None and p.billing == "api_key"
+
+def current_billing():
+    return BILLING if AUTH["profile"] is None else AUTH["profile"].billing
+
+def account_shim_on():
+    return AUTH["profile"] is None or AUTH["profile"].account_shim
+
+def subscription_checks_on():
+    return AUTH["profile"] is None or AUTH["profile"].subscription_checks
+
+def _no_slash(u):
+    return u[:-1] if u.endswith("/") else u
+
+def company_env_problems(p, environ):
+    """API-key mode: a set key variable must be listed for some engine; a set base-URL variable must be listed and hold
+    one of its listed URLs (the only place a value is read); any other provider routing is refused. Names only."""
+    keys = {k for x in p.engines.values() for k in x["api_key_env"]}
+    urls = {}
+    for x in p.engines.values():
+        for var, listed in x["gateways"].items(): urls.setdefault(var, set()).update(_no_slash(u) for u in listed)
+    out = []
+    for k in NON_SUBSCRIPTION_ENV:
+        if k not in environ: continue
+        if k in API_KEY_ENV:
+            if k not in keys:
+                out.append("%s is set (value not shown): auth profile %s does not list it; unset it" % (k, p.name))
+        elif k.endswith("_BASE_URL"):
+            if _no_slash(str(environ[k])) not in urls.get(k, ()):
+                out.append("%s is set to a gateway that auth profile %s does not list (value not shown); unset it or list "
+                           "it in policy/auth-profiles.json" % (k, p.name))
+        else:
+            out.append("%s is set (value not shown): provider routing that auth profile %s does not list; unset it"
+                       % (k, p.name))
+    return out
+
+# Set with the listed key on every child of that engine, so the agent's Bash tool, hooks and scripts do not inherit the
+# key (the account shim's rule for its token). Claude children are refused in API-key mode today (plan.md:902).
+LISTED_KEY_SCRUB_ENV = {"claude": {"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1"}}
+
+def listed_child_env(cmd):
+    """API-key mode: the listed key and gateway variables of the engine cmd[0] names, from os.environ, plus that
+    engine's LISTED_KEY_SCRUB_ENV, which overrides an inherited value; else nothing."""
+    if not (api_key_mode() and cmd): return {}
+    engine = os.path.basename(cmd[0])
+    x = AUTH["profile"].engines.get(engine)
+    if not x: return {}
+    env = {k: os.environ[k] for k in tuple(x["api_key_env"]) + tuple(x["gateways"]) if k in os.environ}
+    env.update(LISTED_KEY_SCRUB_ENV.get(engine, {}))
+    return env
+
 # Account switching (2026-10-16, README "Subscription auth", account auto-switch). skill_eval itself still never passes a
 # token (IGNORED_AUTH_ENV above is scrubbed first). Every `claude` child gets an explicit caller marker; the ~/bin/claude
 # account shim (claude-accts v5) then may, only on a usage-limit error from acct0, retry once on ~/.claude-acctN with
@@ -615,6 +771,7 @@ def with_account_marker(env, cmd):
     """env plus the caller marker (and opt-in) when cmd launches claude; other CLIs get env unchanged."""
     env = dict(env)
     for k in list(ACCOUNT_MARKER_ENV) + [ACCOUNT_SWITCH_OPT_IN]: env.pop(k, None)
+    if not account_shim_on(): return env
     if cmd and os.path.basename(cmd[0]) == "claude":
         env.update(ACCOUNT_MARKER_ENV)
         env[ACCOUNT_SWITCH_OPT_IN] = "1" if account_switch_enabled() and claude_bash_disabled(cmd) else "0"
@@ -646,7 +803,7 @@ def switch_account_config_dirs(home=None, environ=None):
     inputs as the shim: home = $CLAUDE_AS_HOME or ~, accounts = $CLAUDE_ACCOUNTS or every ~/.claude-acctN. Each gets
     the same preflight/launch checks as the default config dir (settings auth, remote cache, user/synced skills)."""
     environ = os.environ if environ is None else environ
-    if not account_switch_enabled(environ): return []
+    if not account_shim_on() or not account_switch_enabled(environ): return []
     home = home or environ.get("CLAUDE_AS_HOME") or os.path.expanduser("~")
     listed = environ.get("CLAUDE_ACCOUNTS")
     if listed:
@@ -679,6 +836,7 @@ def scrub_env(env):
 
 def api_key_env_problems(environ=None):
     environ = os.environ if environ is None else environ
+    if api_key_mode(): return company_env_problems(AUTH["profile"], environ)
     return ["%s is set (value not shown): %s is not allowed, eval runs use subscription auth only; unset it"
             % (k, "API-key auth" if k in API_KEY_ENV else "non-subscription provider routing")
             for k in NON_SUBSCRIPTION_ENV if k in environ]
@@ -1224,15 +1382,16 @@ class Engine:
         return []
     def after_run(self, root):
         return []
-    def run(self, prompt, workdir, with_skill, budget_usd=None, env=None, skill_name=None):
+    def run(self, prompt, workdir, with_skill, budget_usd=None, env=None, skill_name=None, ticket=None):
         """A call that raises after it may have started (timeout, crash, ...) is not re-raised: it comes back as an
         error result with no usage and launch_failed set, so the caller charges the cap/bound, records it and stops.
         Output that cannot be parsed after the call (e.g. nonnumeric usage) is handled the same way, with any
         CLI-reported cost kept so max(reported, cap) is charged. LiveDisabled is raised before anything starts and
-        passes through."""
+        passes through. ticket: the admitted spend ledger call, whose intent row is written right before the start."""
         cmd = self.command(prompt, with_skill, budget_usd, skill_name=skill_name)
         t0, start = time.monotonic(), now_iso()
         failed = None
+        if ticket is not None: ticket.launch()
         try:
             rc, out, err = self.exec_fn(cmd, workdir, self.timeout, env=env)
         except LiveDisabled:
@@ -1301,6 +1460,10 @@ class ClaudeCodeEngine(Engine):
         env["SKILL_EVAL_WORKDIR"] = os.path.realpath(os.path.join(root, "work"))
         return env
     def auth_record(self):
+        if api_key_mode():
+            p = AUTH["profile"]
+            return {"billing": p.billing, "method": "API key from %s (auth profile %s; value not recorded)"
+                    % (", ".join(p.engines["claude"]["api_key_env"]) or "no listed variable", p.name)}
         return {"billing": BILLING, "method": "claude.ai login of the current user session (Keychain)"}
     def sandbox_problems(self, root, work, skill_name, with_skill):
         """Before launch: the project skill set (Engine), no auth/provider setting in any source the run can load
@@ -1331,7 +1494,13 @@ class ClaudeCodeEngine(Engine):
         names = {str(s.get("name") if isinstance(s, dict) else s) for s in init["skills"]}
         out = []
         src = init.get("apiKeySource")
-        if src != "none":
+        if api_key_mode():  # the real CLI value under an API key is UNVERIFIED until operator lane 8
+            want = AUTH["profile"].engines["claude"]["api_key_env"]
+            if src not in want:
+                out.append("system/init apiKeySource is %s, expected one of %s (auth profile %s, API-key mode): cannot "
+                           "verify the run used a listed key" % (repr(_shown(src)) if isinstance(src, str) else "missing",
+                                                                 ", ".join(want) or "<none listed>", AUTH["profile"].name))
+        elif src != "none":
             out.append("system/init apiKeySource is %s, expected \"none\" (subscription login): %s" % (
                 repr(_shown(src)) if isinstance(src, str) else "missing",
                 "the run may have used an API key" if isinstance(src, str) else "cannot verify subscription auth"))
@@ -1412,7 +1581,7 @@ class CodexEngine(Engine):
         self._auth_digest[root] = hashlib.sha256(data).hexdigest()
         return scrub_env(dict(os.environ, HOME=home, CODEX_HOME=ch))
     def auth_record(self):
-        return {"billing": BILLING, "method": "ChatGPT login (auth_mode chatgpt), read-only copy of auth.json (readable "
+        return {"billing": current_billing(), "method": "ChatGPT login (auth_mode chatgpt), read-only copy of auth.json (readable "
                 "by the agent under test), removed after the run"}
     def sandbox_problems(self, root, work, skill_name, with_skill):
         out = Engine.sandbox_problems(self, root, work, skill_name, with_skill)
@@ -1743,7 +1912,7 @@ def remove_sandbox(engine, run_root, root):
         if left: out.append(left)
     return out
 
-def isolated_run(eng, prompt, spec, case, skill_path, run_dir, run_root, cap, user_names, keep_workdir):
+def isolated_run(eng, prompt, spec, case, skill_path, run_dir, run_root, cap, user_names, keep_workdir, ticket=None):
     """Runs one CLI call in a fresh Sandbox and returns (result, fatal problems). Raises EvalError before the call
     (fail closed, nothing spent) when the sandbox could expose another skill. Afterwards, a leak shown by the run's
     own init report, or Codex changing its read-only auth copy, is returned as fatal: the caller charges the run, records it
@@ -1752,7 +1921,8 @@ def isolated_run(eng, prompt, spec, case, skill_path, run_dir, run_root, cap, us
     try:
         probs = sb.problems()
         if probs: raise EvalError("isolation (%s): %s" % (eng.name, " | ".join(probs)))
-        res = eng.run(prompt, sb.work, with_skill=bool(skill_path), budget_usd=cap, env=sb.env, skill_name=sb.name)
+        res = eng.run(prompt, sb.work, with_skill=bool(skill_path), budget_usd=cap, env=sb.env, skill_name=sb.name,
+                      ticket=ticket)
         try:  # the call has happened: a failure from here on is charged and stops, never escapes uncharged
             iso = eng.isolation_problems(res, bool(skill_path), spec["skill_name"], user_names)
             res["isolation"] = dict(sb.record(), problems=iso)
@@ -1810,47 +1980,59 @@ class LLMGrader:
         if self.effort: cmd += ["--effort", self.effort]
         cmd += claude_isolation_args()
         return cmd + (["--max-budget-usd", "%.2f" % cap] if cap is not None else [])
-    def _charge_unknown(self, fallback):
+    def _charge_unknown(self, fallback, ticket=None, outcome="launch_failed", reported=None):
         self.usage["calls"] += 1; self.usage["api_equivalent_usd"] += fallback
         if self.budget is not None: self.budget.charge(fallback)
+        spend_settle(ticket, self.budget, outcome, reported, 0, 0, price_info("grader", self.model, self.prices),
+                     fallback, api_equivalent(0, 0, reported, None, fallback)[1])
     def _call(self, prompt, schema):
-        cap = None
+        cap, stop = None, None
         if self.budget is not None and self.budget.finite():
             cap = self.budget.claude_cap()
             if cap < 0.01:
-                raise EvalError("budget exhausted ($%.2f of $%.2f) before grader call" % (self.budget.spent, self.budget.limit))
+                stop = "budget exhausted ($%.2f of $%.2f) before grader call" % (self.budget.spent, self.budget.limit)
         kind = "pairwise" if "winner" in schema.get("properties", {}) else "grader"
         bound = call_bound("grader", self.model, kind, self.prices, DEFAULT_TOKENS) or 0.0
         fallback = cap if cap is not None else bound  # what an unmetered call is charged
+        scope = getattr(self, "spend_scope", None) or {}
+        ticket, stop = spend_admit(self.budget, scope.get("kind") or kind, "claude", self.model, scope.get("iteration"),
+                                   cap, fallback, True, stop)
+        if stop: raise EvalError(stop)
         # A fresh empty cwd (no project settings, CLAUDE.md or skills of the folder grading was started from).
         cwd = tempfile.mkdtemp(prefix="skill-eval-grader-")
         try:
+            if ticket is not None: ticket.launch()
             try:
                 rc, out, err = launch_claude(self.exec_fn, self.command(prompt, schema, cap), cwd, self.timeout)
             except (EvalError, LiveDisabled):
+                if ticket is not None: ticket.not_launched(self.budget.spent)
                 raise  # refused before launch: nothing spent
             except Exception as ex:
-                self._charge_unknown(fallback)
+                self._charge_unknown(fallback, ticket)
                 raise EvalError("grader call failed after launch (%s); charged $%.2f and stopped" % (type(ex).__name__, fallback))
         finally:
             left = remove_tree(os.path.dirname(cwd), cwd)
             if left: print("WARNING: " + left, file=sys.stderr)
         try: data = json.loads(out)
         except (ValueError, TypeError):
-            self._charge_unknown(max(fallback, reported_cost(out) or 0.0))  # usage unknown: charge the cap
+            # usage unknown: charge the cap
+            self._charge_unknown(max(fallback, reported_cost(out) or 0.0), ticket, "unparsed", reported_cost(out))
             raise EvalError("grader returned non-JSON (exit %s): %s" % (rc, (err or out or "")[-300:]))
         if not isinstance(data, dict): data = {}
         try:
             tin, tout = claude_usage(data)
         except Exception as ex:  # paid call, unreadable usage: charge max(reported, cap) and stop
             charged = api_equivalent(0, 0, data.get("total_cost_usd"), None, fallback)[0]
-            self._charge_unknown(charged)
+            self._charge_unknown(charged, ticket, "unparsed", data.get("total_cost_usd"))
             raise EvalError("grader usage could not be parsed after the call (%s); charged $%.2f and stopped"
                             % (type(ex).__name__, charged))
-        cost = api_equivalent(tin, tout, data.get("total_cost_usd"), price_for("grader", self.model, self.prices), fallback)[0]
+        pinfo = price_info("grader", self.model, self.prices)
+        cost, source = api_equivalent(tin, tout, data.get("total_cost_usd"), pinfo[0], fallback)
         self.usage["calls"] += 1
         self.usage["input_tokens"] += tin; self.usage["output_tokens"] += tout; self.usage["api_equivalent_usd"] += cost
         if self.budget is not None: self.budget.charge(cost)
+        spend_settle(ticket, self.budget, "error" if rc != 0 or data.get("is_error") else "ok", data.get("total_cost_usd"),
+                     tin, tout, pinfo, cost, source)
         so = data.get("structured_output")
         if not isinstance(so, dict): raise EvalError("grader output has no structured_output")
         return so
@@ -1967,6 +2149,11 @@ class CodexGrader(LLMGrader):
         return self.label()
     def price(self):
         return grader_price("codex", self.model, self.prices)
+    def price_info(self):
+        info = price_info("grader", self.model, self.prices)
+        if info[0] is not None: return info
+        return (self.prices["codex"], "--price", None) if "codex" in self.prices else \
+            (CODEX_GRADER_ASSUMED_PRICE, "assumed", None)
     def bound(self, kind):
         return grader_call_usd(kind, "codex", self.model, self.tokens, self.prices)
     def command(self, prompt, schema, cap=None):
@@ -1978,10 +2165,14 @@ class CodexGrader(LLMGrader):
         return cmd + [codex_grader_prompt(prompt, schema)]
     def _call(self, prompt, schema):
         kind = "pairwise" if "winner" in schema.get("properties", {}) else "grader"
-        bound = self.bound(kind)
+        bound, stop = self.bound(kind), None
         if self.budget is not None and self.budget.finite() and bound > self.budget.remaining():
-            raise EvalError("codex grader worst-case %s call $%.2f > remaining budget $%.2f (no per-call cap); stopped "
-                            "before the call" % (kind, bound, self.budget.remaining()))
+            stop = ("codex grader worst-case %s call $%.2f > remaining budget $%.2f (no per-call cap); stopped before the "
+                    "call" % (kind, bound, self.budget.remaining()))
+        scope = getattr(self, "spend_scope", None) or {}
+        ticket, stop = spend_admit(self.budget, scope.get("kind") or kind, "codex", self.model, scope.get("iteration"),
+                                   None, bound, False, stop)
+        if stop: raise EvalError(stop)
         cmd = self.command(prompt, schema)
         probs = codex_grader_command_problems(cmd)
         if probs: raise EvalError("codex grader launch refused: " + "; ".join(probs))
@@ -1995,9 +2186,11 @@ class CodexGrader(LLMGrader):
             # sandbox HOME / CODEX_HOME or /etc/codex/skills (refused before launch: nothing spent)
             skills = eng.sandbox_problems(root, work, None, False)
             if skills: raise EvalError("codex grader launch refused: " + "; ".join(skills))
+            if ticket is not None: ticket.launch()
             try:
                 rc, out, err = self.exec_fn(cmd, work, self.timeout, env=env)
             except LiveDisabled:
+                if ticket is not None: ticket.not_launched(self.budget.spent)
                 raise
             except Exception as ex:
                 failed = "call failed after launch (%s)" % type(ex).__name__
@@ -2024,6 +2217,11 @@ class CodexGrader(LLMGrader):
         self.usage["calls"] += 1
         self.usage["input_tokens"] += tin; self.usage["output_tokens"] += tout; self.usage["api_equivalent_usd"] += cost
         if self.budget is not None: self.budget.charge(cost)
+        outcome = ("launch_failed" if failed and failed.startswith("call failed") else
+                   "unparsed" if failed and failed.startswith("output could not be parsed") else
+                   "error" if failed or left or res is None or res["error"] or rc != 0 else "ok")
+        spend_settle(ticket, self.budget, outcome, None, tin, tout, self.price_info(), cost,
+                     "tokens_x_price" if (call_cost((tin, tout), self.price()) or 0.0) >= bound else "bound_charged")
         if left: raise EvalError("codex grader sandbox: %s; charged $%.2f and stopped" % ("; ".join(left), cost))
         if res is not None and failed is None:
             used = sorted({c.get("tool") for c in res["tool_calls"]} - set(CODEX_GRADER_ALLOWED_ITEMS))
@@ -2088,6 +2286,24 @@ def price_for(engine, model, prices):
     if model and model in PRICES: return PRICES[model]
     return None
 
+_PRICE_ROWS = {}
+
+def price_info(engine, model, prices):
+    """(price, source, read_on) behind price_for: an override is "--price" with no date; a PRICES row carries the source
+    and read_on date of policy/pricing.json (read once, only for spend records)."""
+    p = price_for(engine, model, prices)
+    if p is None: return None, None, None
+    if engine in prices or (model and model in prices): return p, "--price", None
+    if "rows" not in _PRICE_ROWS:
+        try:
+            with open(os.path.join(POLICY_DIR, "pricing.json"), encoding="utf-8") as f:
+                _PRICE_ROWS["rows"] = json.load(f)["values"]["PRICES"]["value"]
+        except (OSError, ValueError, KeyError, TypeError):
+            _PRICE_ROWS["rows"] = {}
+    row = _PRICE_ROWS["rows"].get(model) if isinstance(_PRICE_ROWS["rows"], dict) else None
+    row = row if isinstance(row, dict) else {}
+    return p, row.get("source"), row.get("read_on")
+
 def call_cost(tokens, price):
     return None if price is None else (tokens[0] * price[0] + tokens[1] * price[1]) / 1e6
 
@@ -2148,12 +2364,16 @@ def format_estimate(est):
     for r in est["rows"]:
         lines.append("%-7s %-9s %-24s %6d %12d %10d %10s" % (r["engine"], r["kind"], r["model"][:24], r["calls"],
                      r["tokens_in"], r["tokens_out"], "?" if r["usd"] is None else "%.2f" % r["usd"]))
-    lines.append("total calls %d, API-equivalent total $%.2f (subscription: not billed per token)%s" % (est["calls"], est["total_usd"],
+    api = AUTH["profile"].name if api_key_mode() else None
+    billed = "(subscription: not billed per token)" if api is None else \
+        "(API-key mode, auth profile %s: billed per token against the hard cap --budget-usd)" % api
+    lines.append("total calls %d, API-equivalent total $%.2f %s%s" % (est["calls"], est["total_usd"], billed,
                  "" if not est["unpriced_models"] else "  + UNPRICED: %s (pass --price)" % ", ".join(est["unpriced_models"])))
     lines.append("assumed tokens per call (in,out): " + ", ".join("%s=%d,%d" % (k, v[0], v[1]) for k, v in est["tokens"].items()))
     soft = sorted({r["engine"] for r in est["rows"] if r["calls"] and r["engine"] in ENGINES
                    and budget_enforcement(ENGINES[r["engine"]]) == "soft_limit"})
-    for e in soft: lines.append("budget: " + SOFT_LIMIT_NOTE % e)
+    for e in soft:
+        lines.append("budget: " + (SOFT_LIMIT_NOTE % e if api is None else spend.no_cap_reason("exec", e, api) + NO_REOPEN))
     return "\n".join(lines)
 
 # ---------- workspace, approvals ----------
@@ -2224,16 +2444,18 @@ def eval_set_files(skill_dir):
 APPROVER = {"it": approvals.cli_approver()}  # the human gate (engine/approvals.py); in-process tests replace it
 POLICY_HASHED = (("pricing", "pricing.json"), ("models", "models.json"), ("auth_profiles", "auth-profiles.json"))
 
+def file_sha256(path):
+    try:
+        with open(path, "rb") as f: return hashlib.sha256(f.read()).hexdigest()
+    except FileNotFoundError:
+        return None
+
 def policy_sha256():
     """sha256 of each file outside the rule bundle that shapes a run (plan.md:842): pricing, models, auth profiles and
-    the approver signers file, null while absent. plan.json records it; no approval binds it."""
-    def digest(path):
-        try:
-            with open(path, "rb") as f: return hashlib.sha256(f.read()).hexdigest()
-        except FileNotFoundError:
-            return None
-    out = {k: digest(os.path.join(RULESET_ROOT, "policy", f)) for k, f in POLICY_HASHED}
-    out["allowed_signers"] = digest(APPROVER["it"].signers)
+    the approver signers file, null while absent. plan.json records it; no approval binds it (live_plan_hash covers the
+    auth profiles)."""
+    out = {k: file_sha256(os.path.join(RULESET_ROOT, "policy", f)) for k, f in POLICY_HASHED}
+    out["allowed_signers"] = file_sha256(APPROVER["it"].signers)
     return out
 
 def approvals_data(ws):
@@ -2359,7 +2581,7 @@ def preflight(spec, engines, run_root=None, home=None):
             hits = skills_under(CODEX_ADMIN_SKILLS, 4)
             if hits:
                 out.append("codex: %s has %s (admin skills load in every run)" % (CODEX_ADMIN_SKILLS, sorted(n for n, _ in hits)))
-            out += codex_auth_problems()
+            if subscription_checks_on(): out += codex_auth_problems()
     return out
 
 # ---------- running ----------
@@ -2377,8 +2599,9 @@ def skill_path_for(config, spec, old_skill):
 
 class Budget:
     """limit and spent are API-equivalent USD (usage x API prices): with subscription auth nothing is billed per
-    token, so this is a usage limiter, not a record of money spent."""
-    def __init__(self, usd): self.limit, self.spent = usd, 0.0
+    token, so this is a usage limiter, not a record of money spent. ledger: the command's engine/spend.py ledger (the
+    CLI live path always attaches one); every paid call is admitted and recorded through it."""
+    def __init__(self, usd): self.limit, self.spent, self.ledger = usd, 0.0, None
     def remaining(self): return self.limit - self.spent
     def finite(self): return self.limit != float("inf")
     def charge(self, usd): self.spent += usd or 0.0
@@ -2406,6 +2629,44 @@ def guard_call(engine, kind, budget, prices, tokens):
         return None, 0.0, ("%s worst-case %s call $%.2f > remaining $%.2f (%s budget is a soft limit: no per-call cap)"
                       % (engine.name, kind, bound, budget.remaining(), engine.name))
     return None, bound, None
+
+def spend_admit(budget, kind, engine, model, iteration, call_cap, bound, has_call_cap, refusal):
+    """(ticket or None, the refusal to act on or None) for one paid call. refusal: the A5 check's own (None = passed).
+    With the budget's ledger, the ledger records the decision (and in API-key mode adds its own hard-cap rules);
+    without one, subscription keeps the A5 decision and API-key mode refuses every call."""
+    led = getattr(budget, "ledger", None)
+    if led is None:
+        return None, (NEEDS_LEDGER if api_key_mode() else refusal)
+    t = led.admit(kind, engine, model, iteration, budget.spent, call_cap, bound, has_call_cap, refusal)
+    return (None, t.reason) if t.reason else (t, None)
+
+def spend_settle(ticket, budget, outcome, reported, tin, tout, pinfo, charged, source):
+    """The result row of an admitted call, written where its cost was just charged to the budget."""
+    if ticket is None: return
+    price = pinfo[0]
+    computed = call_cost((tin, tout), price) if price is not None and (tin or tout) else None
+    budget.charge(ticket.result(outcome, reported, tin, tout, computed, price, pinfo[1], pinfo[2], charged, source,
+                                budget.spent))
+
+def spend_halt(budget):
+    """The stop a call's result set in API-key mode (an overshoot, spend above the hard cap, an unreported cost), or
+    None. The next admission refuses on it; each command also checks it after its last paid call."""
+    led = getattr(budget, "ledger", None)
+    return None if led is None else led.halt
+
+@contextlib.contextmanager
+def spend_scope(grader, **scope):
+    """The iteration (and kind, for calibrate) that the grader's spend rows record while the caller grades."""
+    old = getattr(grader, "spend_scope", None)
+    grader.spend_scope = scope
+    try:
+        yield
+    finally:
+        grader.spend_scope = old
+
+def iteration_of(it_dir):
+    m = re.match(r"iteration-(\d+)$", os.path.basename(os.path.normpath(it_dir)))
+    return int(m.group(1)) if m else None
 
 def api_equivalent(tin, tout, reported, price, fallback=0.0):
     """(USD, source) for one call. Usage tokens x API price come first; a CLI-reported cost only counts when it is
@@ -2439,7 +2700,7 @@ def append_cost(it_dir, command, usage):
     fp = os.path.join(it_dir, "cost.json")
     read = writable.entry(fp)
     data = rjson(fp, {}) or {}
-    data.setdefault("billing", BILLING)
+    data.setdefault("billing", current_billing())
     data.setdefault("entries", []).append({"command": command, "at": now_iso(), "calls": usage.get("calls", 0),
         "input_tokens": usage.get("input_tokens", 0), "output_tokens": usage.get("output_tokens", 0),
         "api_equivalent_usd": round(usage.get("api_equivalent_usd", 0.0), 6)})
@@ -2449,9 +2710,44 @@ def append_cost(it_dir, command, usage):
 def usage_delta(after, before):
     return {k: after.get(k, 0) - before.get(k, 0) for k in after}
 
-def cost_summary(it_dir):
+def cost_summary(it_dir, ws=None):
     """API-equivalent cost of an iteration: every run's timing.json (exec + trigger, per engine) plus cost.json
-    entries (grading, calibration, builder). actual_spend_usd stays null: the harness cannot see plan billing."""
+    entries (grading, calibration, builder). actual_spend_usd stays null for subscription calls: the harness cannot see
+    plan billing. When the workspace ledger (ws, default the parent of it_dir) holds API-key result rows of this
+    iteration, actual_spend_usd is the sum of their CLI-reported costs (spend_summary)."""
+    out = _a5_cost_summary(it_dir)
+    n = iteration_of(it_dir)
+    rows = spend.read_rows(os.path.join(ws or os.path.dirname(os.path.normpath(it_dir)), spend.FILE))[0] \
+        if n is not None else []
+    out.update(spend_summary([r for r in rows if r["iteration"] == n], rows))
+    return out
+
+def spend_summary(mine, rows):
+    """The actual-spend fields of one iteration's ledger rows (mine); {} when none is an API-key result or intent row (an
+    API-key intent alone, e.g. of a crashed call, still makes the iteration API-key billed)."""
+    if not any(r["type"] in ("result", "intent") and r["billing"] == "api_key" for r in mine): return {}
+    api = [r for r in mine if r["type"] == "result" and r["billing"] == "api_key"]
+    paid = [r for r in api if r["outcome"] != "not_launched"]
+    done = {r["call_id"] for r in rows if r["type"] == "result"} | {r["recovers"] for r in rows if r["type"] == "recovered"}
+    open_ =[r for r in mine if r["type"] == "intent" and r["billing"] == "api_key" and r["decision"] == "allowed"
+             and r["call_id"] not in done]
+    caps, seen = [], set()
+    for r in mine:
+        k = (r["run_id"], r["command"], r["cap_usd"])
+        if r["billing"] == "api_key" and k not in seen:
+            seen.add(k); caps.append({"run_id": k[0], "command": k[1], "cap_usd": k[2]})
+    mixed = any(r["type"] == "result" and r["billing"] != "api_key" for r in mine)
+    unreported = sum(1 for r in paid if r["reported_cost_usd"] is None)
+    note = ("CLI-reported total_cost_usd of the API-key calls of this iteration (spend.jsonl)"
+            + ("; the subscription calls of this iteration are not billed per token and are not counted" if mixed else "")
+            + ("; %d call(s) reported no cost and are not counted" % unreported if unreported else ""))
+    return {"billing": "mixed" if mixed else "api_key",
+            "actual_spend_usd": spend.usd(sum(r["reported_cost_usd"] or 0.0 for r in paid)),
+            "actual_spend_basis": "cli_reported", "actual_spend_note": note, "unreported_calls": unreported,
+            "unreconciled_calls": len(open_), "unreconciled_bound_usd": spend.usd(sum(r["bound_usd"] or 0.0 for r in open_)),
+            "caps": caps, "auth_profile": ", ".join(sorted({r["profile"] for r in mine if r["billing"] == "api_key"}))}
+
+def _a5_cost_summary(it_dir):
     by_engine, unknown = {}, 0
     for dp, dn, fn in os.walk(it_dir):
         dn[:] = [d for d in dn if d not in ("workdir", "outputs")]  # run outputs may contain any file
@@ -2487,7 +2783,7 @@ def write_run(run_dir, res, engine, config, prompt, triggered, api_eq=None):
         "input_tokens": res["input_tokens"], "output_tokens": res["output_tokens"],
         "cached_input_tokens": res["cached_input_tokens"], "cost_usd": res.get("cost_usd"),  # CLI-reported
         "api_equivalent_usd": None if api_eq is None else round(api_eq[0], 6),
-        "api_equivalent_source": None if api_eq is None else api_eq[1], "billing": BILLING})
+        "api_equivalent_source": None if api_eq is None else api_eq[1], "billing": current_billing()})
 
 class _Fatal(Exception): pass
 
@@ -2513,6 +2809,7 @@ def run_iteration(spec, ws, engines, runs=DEFAULT_RUNS, baseline="none", old_ski
           "skill_sha256": skill_tree_hash(spec["skill_dir"]), "eval_set_sha256": gate_hash("eval_set", spec, ws),
           "old_skill_sha256": skill_tree_hash(old_skill) if baseline == "old" else None,
           "ruleset_sha256": ruleset_sha256(), "policy_sha256": policy_sha256(),
+          "auth_profile": None if AUTH["profile"] is None else AUTH["profile"].name,
           "isolation": {"run_root": run_root, "per_run_sandbox": True},
           "budget_enforcement": {e.name: budget_enforcement(e) for e in engines}})
     budget, prices, tokens = budget or Budget(float("inf")), prices or {}, tokens or DEFAULT_TOKENS
@@ -2523,13 +2820,24 @@ def run_iteration(spec, ws, engines, runs=DEFAULT_RUNS, baseline="none", old_ski
 
     def one(eng, kind, prompt, case, cfg, rd, keep):
         cap, fallback, stop = guard_call(eng, kind, budget, prices, tokens)
-        if stop: return None, stop
-        res, fatal = isolated_run(eng, prompt, spec, case, skill_path_for(cfg, spec, old_skill), ensure_inside(it_dir, rd),
-                                  run_root, cap, user_names, keep)
+        ticket, stop = spend_admit(budget, kind, eng.name, eng.model, n, cap, fallback, eng.has_call_cap, stop)
+        if stop:
+            if api_key_mode(): raise _Fatal(stop)  # API-key mode: the first refused call ends the iteration
+            return None, stop
+        try:
+            res, fatal = isolated_run(eng, prompt, spec, case, skill_path_for(cfg, spec, old_skill),
+                                      ensure_inside(it_dir, rd), run_root, cap, user_names, keep, ticket)
+        except Exception:
+            if ticket is not None: ticket.not_launched(budget.spent)
+            raise
         api_eq = run_cost(res, eng, prices, fallback)
         if res.get("launch_failed") and fallback > api_eq[0]:  # failed call: max(reported/usage, cap) is charged
             api_eq = (fallback, "cap_charged")
         budget.charge(api_eq[0])  # the budget limits API-equivalent cost
+        failed = res.get("launch_failed") or ""
+        spend_settle(ticket, budget, "unparsed" if "could not be parsed" in failed else "launch_failed" if failed else
+                     "error" if res.get("error") else "ok", res.get("cost_usd"), res["input_tokens"],
+                     res["output_tokens"], price_info(eng.name, eng.model, prices), api_eq[0], api_eq[1])
         try:
             write_run(rd, res, eng, cfg, prompt, eng.triggered(res, spec["skill_name"]), api_eq)
         except Exception as ex:
@@ -2573,10 +2881,11 @@ def run_iteration(spec, ws, engines, runs=DEFAULT_RUNS, baseline="none", old_ski
                     wjson(os.path.join(it_dir, eng.name, "trigger", cfg, "results.json"), {
                         "skill_name": spec["skill_name"], "description": spec["description"], "results": results,
                         "summary": {"total": len(results), "passed": passed, "failed": len(results) - passed}})
-    except (_Fatal, EvalError) as ex:  # isolation could not be guaranteed: stop everything (fail closed)
+    except (_Fatal, EvalError, spend.SpendError) as ex:  # isolation or the record could not be guaranteed: stop (fail closed)
         stopped = str(ex)
+    stopped = stopped or spend_halt(budget)
     meta = rjson(os.path.join(it_dir, "plan.json"))
-    meta.update(finished_at=now_iso(), billing=BILLING, stopped=stopped,
+    meta.update(finished_at=now_iso(), billing=current_billing(), stopped=stopped,
                 api_equivalent_usd=round(budget.spent - spent0, 4))  # exec + trigger runs of this call
     wjson(os.path.join(it_dir, "plan.json"), meta)
     if stopped: log("STOPPED: " + stopped)
@@ -2726,7 +3035,10 @@ def grade_iteration(spec, ws, n, grader=None, seed=None, log=print, scope=None):
     check_scope(spec, scope)
     before = dict(grader.usage) if grader is not None else None
     try:
-        _grade(spec, ws, it_dir, grader, seed, log, scope)
+        if grader is None: _grade(spec, ws, it_dir, grader, seed, log, scope)
+        else:
+            with spend_scope(grader, iteration=n):
+                _grade(spec, ws, it_dir, grader, seed, log, scope)
     finally:
         if grader is not None and grader.usage["calls"] != before["calls"]:
             append_cost(it_dir, "grade", usage_delta(grader.usage, before))
@@ -2876,7 +3188,8 @@ def calibrate_metered(golden_path, grader, it_dir):
     """calibrate() plus its API-equivalent grader cost in it_dir/cost.json (recorded even when it stops early)."""
     before = dict(grader.usage)
     try:
-        return calibrate(golden_path, grader)
+        with spend_scope(grader, iteration=iteration_of(it_dir), kind="calibrate"):
+            return calibrate(golden_path, grader)
     finally:
         if grader.usage["calls"] != before["calls"]: append_cost(it_dir, "calibrate", usage_delta(grader.usage, before))
 
@@ -3025,7 +3338,7 @@ def build_benchmark(spec, ws, n):
              "static_failures": static_fail, "pressure": pressure, "completeness": completeness,
              "execution_errors": exec_errors,
              # API-equivalent cost (usage x API prices / CLI-reported) kept apart from actual spend (subscription)
-             "cost": cost_summary(it_dir),
+             "cost": cost_summary(it_dir, ws),
              # counted from grading.json (not the human_review.json queue): an item is graded only once grade wrote it
              "human_pending": sum(1 for r in runs for e in r["expectations"]
                                   if e.get("layer") == "human" and not isinstance(e.get("passed"), bool)),
@@ -3179,12 +3492,19 @@ def fmt_stat(s, pct=False):
 
 def comparison_md(bench, gate, n):
     m = bench["metadata"]
+    spent = bench.get("cost") or {}
+    metered = spent.get("actual_spend_usd") is not None
+    total, stopped = (spent.get("api_equivalent_usd") or {}).get("total", 0.0), ", STOPPED: %s" % m["stopped"] if m.get("stopped") else ""
     L = ["# %s — iteration %d" % (m["skill_name"], n), "",
          "- configurations: %s, runs per configuration: %s, engines: %s" % (", ".join(m.get("configurations") or []),
              m.get("runs_per_configuration"), ", ".join("%s(%s)" % (k, v or "default") for k, v in (m.get("engines") or {}).items())),
+         ("- API-equivalent cost: $%.2f (usage x API prices; the budget limit)%s; actual spend: $%s (CLI-reported, "
+          "API-key mode, auth profile %s); hard cap: %s" % (total, stopped, spend.money(spent["actual_spend_usd"]),
+                                                            spent.get("auth_profile"), ", ".join(
+              "$%s (--budget-usd of %s)" % (spend.money(x["cap_usd"]), x["command"]) for x in spent.get("caps") or [])))
+         if metered else
          "- API-equivalent cost: $%.2f (usage x API prices; the budget limit); actual spend: not metered (%s auth)%s"
-         % (((bench.get("cost") or {}).get("api_equivalent_usd") or {}).get("total", 0.0), m.get("billing") or BILLING,
-            ", STOPPED: %s" % m["stopped"] if m.get("stopped") else ""), "",
+         % (total, m.get("billing") or BILLING, stopped), "",
          "## Gate", "", "**%s**" % ("NEEDS HUMAN APPROVAL" if gate["needs_approval"] else "auto-approved (no problems)")]
     L += ["- problem: " + p for p in gate["problems"]] + ["- note: " + x for x in gate["notes"]]
     L += ["", "## Pass rate / time / tokens", "", "| engine | configuration | pass_rate | time_s | tokens | graded runs |",
@@ -3241,7 +3561,14 @@ def comparison_md(bench, gate, n):
         for eng, kinds in sorted(ae["by_engine"].items()):
             L += ["| %s %s | %.4f |" % (eng, k, v) for k, v in sorted(kinds.items())]
         L += ["| %s | %.4f |" % (k, v) for k, v in sorted(ae["other"].items())]
-        L += ["| **total** | **%.4f** |" % ae["total"], "| actual spend | not metered |"]
+        if metered:
+            L += ["| **total** | **%.4f** |" % ae["total"], "| actual spend | $%s |" % spend.money(c["actual_spend_usd"])]
+            L += ["| hard cap | $%s (%s) |" % (spend.money(x["cap_usd"]), x["command"]) for x in c.get("caps") or []]
+            if c.get("unreconciled_calls"):
+                L.append("| unreconciled calls | %d (worst case $%s counted at a later start) |"
+                         % (c["unreconciled_calls"], spend.money(c["unreconciled_bound_usd"])))
+        else:
+            L += ["| **total** | **%.4f** |" % ae["total"], "| actual spend | not metered |"]
         if c.get("runs_without_usage"):
             L.append("- %d run(s) reported no usage and no price: counted as $0 here" % c["runs_without_usage"])
     if bench["notes"]:
@@ -3344,18 +3671,25 @@ class ClaudeBuilder:
                "--permission-mode", "acceptEdits", "--tools", self.TOOLS, "--disable-slash-commands"]
         cmd += claude_isolation_args(self.skill_name, edit_root=os.path.realpath(skill_dir) if skill_dir else "")
         return cmd + (["--max-budget-usd", "%.2f" % cap] if cap is not None else [])
-    def _record(self, it_dir, tin, tout, cost):
+    def _record(self, it_dir, tin, tout, cost, ticket=None, outcome="ok", reported=None, source="unknown"):
         if self.budget is not None: self.budget.charge(cost)
+        spend_settle(ticket, self.budget, outcome, reported, tin, tout, price_info("builder", self.model, self.prices),
+                     cost, source)
         self.usage["calls"] += 1; self.usage["input_tokens"] += tin
         self.usage["output_tokens"] += tout; self.usage["api_equivalent_usd"] += cost
         self.harness_writes.append(append_cost(it_dir, "builder", {"calls": 1, "input_tokens": tin, "output_tokens": tout,
                                                                    "api_equivalent_usd": cost}))
     def __call__(self, it_dir, skill_dir):
-        cap = None
+        cap, stop = None, None
         if self.budget is not None and self.budget.finite():
             cap = self.budget.claude_cap()
             if cap < 0.01:
-                raise EvalError("budget exhausted ($%.2f of $%.2f) before builder call" % (self.budget.spent, self.budget.limit))
+                stop = "budget exhausted ($%.2f of $%.2f) before builder call" % (self.budget.spent, self.budget.limit)
+        bound = call_bound("builder", self.model, "builder", self.prices, DEFAULT_TOKENS) or 0.0
+        fallback = cap if cap is not None else bound  # no usage: the cap
+        ticket, stop = spend_admit(self.budget, "builder", "claude", self.model, iteration_of(it_dir), cap, fallback, True,
+                                   stop)
+        if stop: raise EvalError(stop)
         report = ""
         rp = os.path.join(it_dir, "comparison.md")
         if os.path.isfile(rp):
@@ -3364,42 +3698,44 @@ class ClaudeBuilder:
         prompt = ("%s\n\nYou are improving the agent skill in the current directory (SKILL.md and its files). %s %s\n\n"
                   "Eval report of the last iteration:\n%s\n" % (self.instructions.strip(), eva.ENGLISH_BUILDER_RULE,
                                                                  eva.PARITY_BUILDER_RULE, report))
-        bound = call_bound("builder", self.model, "builder", self.prices, DEFAULT_TOKENS) or 0.0
-        fallback = cap if cap is not None else bound  # no usage: the cap
+        unknown = lambda rep: api_equivalent(0, 0, rep, None, fallback)[1]
+        if ticket is not None: ticket.launch()
         try:
             rc, out, err = launch_claude(self.exec_fn, self.command(prompt, cap, skill_dir), skill_dir, self.timeout,
                                          skill_name=self.skill_name, edit_allowlist=True)
         except (EvalError, LiveDisabled):
+            if ticket is not None: ticket.not_launched(self.budget.spent)
             raise  # refused before launch: nothing spent
         except Exception as ex:
-            self.calls += 1; self._record(it_dir, 0, 0, fallback)
+            self.calls += 1; self._record(it_dir, 0, 0, fallback, ticket, "launch_failed", None, unknown(None))
             raise EvalError("builder call failed after launch (%s); charged $%.2f and stopped" % (type(ex).__name__, fallback))
         self.calls += 1
         try: data = json.loads(out or "")
         except (ValueError, TypeError): data = None
         if not isinstance(data, dict):  # paid call, unreadable output: charge max(reported, cap) and stop
             charged = max(fallback, reported_cost(out) or 0.0)
-            self._record(it_dir, 0, 0, charged)
+            self._record(it_dir, 0, 0, charged, ticket, "unparsed", reported_cost(out), unknown(reported_cost(out)))
             raise EvalError("builder output is not a JSON object (exit %s); charged $%.2f and stopped" % (rc, charged))
         if data.get("type") != "result":  # a JSON object but not the CLI result (e.g. {}): same charge and stop
             charged = max(fallback, reported_cost(out) or 0.0)
-            self._record(it_dir, 0, 0, charged)
+            self._record(it_dir, 0, 0, charged, ticket, "unparsed", reported_cost(out), unknown(reported_cost(out)))
             raise EvalError("builder output is not a result object (type %r, exit %s); charged $%.2f and stopped"
                             % (data.get("type"), rc, charged))
         if data.get("is_error"):  # the CLI reported a failed call (even with exit 0): same charge and stop
             charged = max(fallback, reported_cost(out) or 0.0)
-            self._record(it_dir, 0, 0, charged)
+            self._record(it_dir, 0, 0, charged, ticket, "error", reported_cost(out), unknown(reported_cost(out)))
             raise EvalError("builder result is an error (subtype %r, exit %s); charged $%.2f and stopped"
                             % (data.get("subtype"), rc, charged))
         try:
             tin, tout = claude_usage(data)
         except Exception as ex:  # paid call, unreadable usage: charge max(reported, cap) and stop
-            charged = api_equivalent(0, 0, data.get("total_cost_usd"), None, fallback)[0]
-            self._record(it_dir, 0, 0, charged)
+            charged, source = api_equivalent(0, 0, data.get("total_cost_usd"), None, fallback)
+            self._record(it_dir, 0, 0, charged, ticket, "unparsed", data.get("total_cost_usd"), source)
             raise EvalError("builder usage could not be parsed after the call (%s); charged $%.2f and stopped"
                             % (type(ex).__name__, charged))
-        cost = api_equivalent(tin, tout, data.get("total_cost_usd"), price_for("builder", self.model, self.prices), fallback)[0]
-        self._record(it_dir, tin, tout, cost)
+        cost, source = api_equivalent(tin, tout, data.get("total_cost_usd"), price_for("builder", self.model, self.prices),
+                                      fallback)
+        self._record(it_dir, tin, tout, cost, ticket, "ok" if rc == 0 else "error", data.get("total_cost_usd"), source)
         return rc
 
 def loop(spec, ws, engines, grader, builder, max_iterations=MAX_AUTO_ITERATIONS, runs=DEFAULT_RUNS, baseline="none",
@@ -3433,6 +3769,8 @@ def loop(spec, ws, engines, grader, builder, max_iterations=MAX_AUTO_ITERATIONS,
         grade_iteration(spec, ws, n, grader, seed, log=log)
         if golden: wjson(os.path.join(ws, "iteration-%d" % n, "calibration.json"),
                          calibrate_metered(golden, grader, os.path.join(ws, "iteration-%d" % n)))
+        halt = spend_halt(budget)
+        if halt: return {"status": "run-stopped", "iteration": n, "error": halt}
         _, gate = report_iteration(spec, ws, n)
         log("iteration-%d gate: %s" % (n, gate["problems"] or "clean"))
         if not gate["problems"]: return {"status": "clean", "iteration": n}
@@ -3442,13 +3780,16 @@ def loop(spec, ws, engines, grader, builder, max_iterations=MAX_AUTO_ITERATIONS,
         harness = getattr(builder, "harness_writes", [])
         st = {"spec": spec, "ws": ws, "n": n, "log": log, "harness": harness, "seen": len(harness),
               "before": writable.fingerprint(spec["skill_dir"], ws), "rules": ruleset_sha256(), "rc": None, "error": None}
-        crash = None
+        crash, led = None, getattr(budget, "ledger", None)
+        if led is not None: led.bracket = harness  # the ledger's own appends during the call are harness writes
         try:
             st["rc"] = builder(os.path.join(ws, "iteration-%d" % n), spec["skill_dir"])
         except EvalError as ex:
             st["error"] = str(ex)
         except Exception as ex:
             crash, st["error"] = ex, "builder raised %s: %s" % (type(ex).__name__, ex)
+        finally:
+            if led is not None: led.bracket = None
         st["extra"] = {} if st["error"] is None else {"error": st["error"]}
         if st["rc"] is not None: st["extra"]["returncode"] = st["rc"]
         for gid, gate in POST_BUILDER_GATES:
@@ -3593,21 +3934,36 @@ def plan_text(spec, problems, a, engines, ws, est, tokens=None, prices=None):
     L += ["approval gates: requirements=%s, eval_set=%s" % (
         approval_label(verdict_of("requirements", spec, ws)), approval_label(verdict_of("eval_set", spec, ws)))]
     pf = preflight(spec, [e.name for e in engines], a.run_root)
+    dangling = spend.preview(ws)
     L += ["ruleset " + ruleset_sha256(), LIVE_GATES_HEADER]
     declared = gate_declaration_problem()
     if declared: L.append("gate declaration mismatch (check_live_gates and loop refuse): " + declared)
     states = ([(gid, "fail: " + declared.splitlines()[0]) for gid, _ in LIVE_GATES] if declared else
               live_gate_states(a, spec, problems, ws, engines, DEFAULT_TOKENS if tokens is None else tokens,
-                               prices or {}, pf, verdict_of))
+                               prices or {}, pf, verdict_of, sum(r["bound_usd"] or 0.0 for r in dangling)))
     L += ["  %d. %s: %s" % (k, gid, state) for k, (gid, state) in enumerate(states, 1)]
     L += ["post-builder gates (loop): " + ", ".join(gid for gid, _ in POST_BUILDER_GATES)]
     L += ["preflight problems (block --live):"] + ["  - " + w for w in pf]
     names = [e.name for e in engines]
     notes = claude_shared_skill_notes(claude_config_dir()) if "claude" in names else []
     if notes: L += ["isolation notes (not blocking):"] + ["  - " + x for x in notes]
-    L += ["auth: subscription only (Claude: existing claude.ai Keychain login; Codex: ChatGPT login); `claude auth "
-          "status --json` is checked only by a real --live (not by --dry-run)"]
-    if grader_engine_of(a) == "codex":
+    p = AUTH["profile"]
+    if spend.preview_line(dangling): L.append(spend.preview_line(dangling))
+    if p is not None:
+        L.append(PERSONAL_DEFAULT_LINE if getattr(a, "auth_profile", None) is None else
+                 "auth profile: %s (billing %s)" % (p.name, p.billing))
+    if api_key_mode():
+        L += ["auth: API-key billing (auth profile %s): %s; gateways: %s; no `claude auth status` or ChatGPT login check; "
+              "key and gateway values are never shown" % (p.name, "; ".join(
+                  "%s reads %s" % (e, ", ".join(x["api_key_env"]) or "no key (refused)") for e, x in sorted(p.engines.items())),
+                  ", ".join(sorted(v for x in p.engines.values() for v in x["gateways"])) or "none listed")]
+    else:
+        L += ["auth: subscription only (Claude: existing claude.ai Keychain login; Codex: ChatGPT login); `claude auth "
+              "status --json` is checked only by a real --live (not by --dry-run)"]
+    if grader_engine_of(a) == "codex" and api_key_mode():
+        L += ["grader budget: " + spend.no_cap_reason("grader", "codex", p.name) + NO_REOPEN,
+              "grader isolation: none: the codex grader never starts in API-key mode"]
+    elif grader_engine_of(a) == "codex":
         L += ["grader budget: SOFT LIMIT (codex has no per-call cap): each grader/pairwise call starts only if its "
               "worst-case bound fits the remaining budget and is charged max(usage x price, bound); price %s" % (
                   "from --price" if price_for("grader", a.grader_model, parse_price_overrides(getattr(a, "price", None)))
@@ -3615,7 +3971,12 @@ def plan_text(spec, problems, a, engines, ws, est, tokens=None, prices=None):
                   % CODEX_GRADER_ASSUMED_PRICE),
               "grader isolation: " + CODEX_GRADER_NOTE]
     soft = [e.name for e in engines if budget_enforcement(e) == "soft_limit"]
-    if soft:
+    if api_key_mode():
+        refused = api_key_soft_refusals(engines, grader_engine_of(a), True, True, builds_now(a))
+        L += ["budget enforcement: " + (" | ".join(refused) if refused else
+              "HARD CAP (auth profile %s): a call starts only when the spend so far plus its per-call cap fits "
+              "--budget-usd" % p.name)]
+    elif soft:
         L += ["budget enforcement: %s" % ("STRICT (default): --live refuses %s (no per-call cap)" % ", ".join(soft)
               if getattr(a, "strict_budget", True) else "WARNING " + NO_STRICT_WARNING % ", ".join(soft))]
     if spec["cases"]:
@@ -3664,13 +4025,35 @@ def read_builder_prompt(a):
 
 def subscription_problems(a, engines):
     """Live gate: no API-key variable anywhere (run/loop also get it from preflight), and `claude auth status` shows a
-    claude.ai login whenever the command calls claude (Claude engine, grader for grade/calibrate/loop, builder)."""
+    claude.ai login whenever the command calls claude (Claude engine, grader for grade/calibrate/loop, builder). API-key
+    mode: the profile's env rules and a listed key for every Claude role, for every command; no subscription check."""
+    if api_key_mode(): return api_key_env_problems() + required_key_problems(a, engines)
     out = [] if a.cmd in ("run", "loop") else api_key_env_problems()  # run/loop: reported by preflight
     if needs_claude_auth(a, engines):
         out += claude_auth_problems()
     if grades_now(a) and grader_engine_of(a) == "codex":
         out += codex_auth_problems()  # reads only the auth_mode field of auth.json
     return out
+
+def required_key_problems(a, engines):
+    p = AUTH["profile"]
+    listed = p.engines["claude"]["api_key_env"]
+    if not needs_claude_auth(a, engines) or any(k in os.environ for k in listed): return []
+    return ["claude: auth profile %s needs one of %s set (value not shown)" % (p.name, ", ".join(listed) or "<none listed>")]
+
+def api_key_soft_refusals(engines, grader_engine, runs_engines, grades, builds=False):
+    """API-key mode: the spend.api_key_refusal of every call the command makes (the engines under test, the grader,
+    the builder): a Claude call (plan.md:902), and an engine or a Codex grader without a per-call cap (D5). The calls
+    without a per-call cap come first, so the D5 refusal stays the first one where it was."""
+    calls = ([("exec", e.name, e.has_call_cap) for e in engines] if runs_engines else []) \
+        + ([("grader", grader_engine, grader_engine != "codex")] if grades else []) \
+        + ([("builder", "claude", True)] if builds else [])
+    out = [spend.api_key_refusal(kind, engine, AUTH["profile"].name, cap)
+           for kind, engine, cap in sorted(calls, key=lambda c: c[2])]
+    return [x for x in out if x]
+
+def builds_now(a):
+    return a.cmd == "loop" and bool(_str_opt(a, "builder_prompt"))
 
 def grades_now(a):
     return a.cmd in ("grade", "calibrate", "loop")
@@ -3709,6 +4092,11 @@ def _live_eval_set(g):
     if g.problems: g.fail("eval set has %d validation problem(s); run `validate`" % len(g.problems))
 
 def _live_strict_budget(g):
+    if api_key_mode():  # --no-strict-budget does not reopen a soft engine here
+        for x in api_key_soft_refusals(g.engines, grader_engine_of(g.a), g.a.cmd in ("run", "loop"), grades_now(g.a),
+                                       builds_now(g.a)):
+            g.fail(x)
+        return
     soft = [e.name for e in g.engines if budget_enforcement(e) == "soft_limit"] if g.a.cmd in ("run", "loop") else []
     if getattr(g.a, "strict_budget", True) and soft:
         g.fail("--strict-budget (default): %s has no enforceable per-call budget cap (its budget is only a soft limit); "
@@ -3722,6 +4110,10 @@ def _live_codex_grader(g):
 
 def _live_auth(g):
     a = g.a
+    if api_key_mode():
+        auth = subscription_problems(a, g.engines)
+        if auth: g.fail("auth profile %s: %s" % (AUTH["profile"].name, " | ".join(auth)))
+        return
     if g.report is None:
         auth = subscription_problems(a, g.engines)
         if auth: g.fail("subscription auth: " + " | ".join(auth))
@@ -3816,18 +4208,19 @@ def check_live_gates(a, spec, problems, ws, n, engines, tokens, prices, budget_l
     for _, gate in LIVE_GATES: gate(g)
     return g.live_est
 
-def live_gate_states(a, spec, problems, ws, engines, tokens, prices, pf, verdict_of):
+def live_gate_states(a, spec, problems, ws, engines, tokens, prices, pf, verdict_of, spent=0.0):
     """[(id, state)] of LIVE_GATES for this command checked as `run --live` in report mode, starting no process: pass,
     fail: <first line of the gate's first failure>, or skipped: <the check only a real --live makes>. Without a finite
-    --budget-usd > 0 the two budget gates fail as the live start would refuse."""
+    --budget-usd > 0 the two budget gates fail as the live start would refuse. spent: the dangling bounds of the
+    workspace ledger, which the next live start counts against the budget."""
     budget = getattr(a, "budget_usd", None)
     priced = budget is not None and math.isfinite(budget) and budget > 0
     g = _LiveGates(argparse.Namespace(**dict(vars(a), cmd="run")), spec, problems, ws, None, engines, tokens, prices,
-                   budget, None, [], verdict_of, pf)
+                   budget - spent if priced else budget, None, [], verdict_of, pf)
     out = []
     for gid, gate in LIVE_GATES:
         if gid in BUDGET_GATES and not priced:
-            out.append((gid, "fail: " + NO_BUDGET))
+            out.append((gid, "fail: " + (CAP_REQUIRED % AUTH["profile"].name if api_key_mode() else NO_BUDGET)))
             continue
         start = len(g.report)
         try:
@@ -3840,18 +4233,23 @@ def live_gate_states(a, spec, problems, ws, engines, tokens, prices, pf, verdict
         out.append((gid, "fail: " + fails[0].splitlines()[0] if fails else "skipped: " + said[0] if said else "pass"))
     return out
 
-def live_dry_run(a, spec, problems, ws, n, engines, tokens, prices):
+def live_dry_run(a, spec, problems, ws, n, engines, tokens, prices, budget_left=None):
     """`--live --dry-run`: the plan of this exact command plus every live gate it would face, collected instead of
     raised. Nothing is executed: live mode stays off, no CLI (not even `claude auth status`) and no model is called,
-    no workspace file is written. Returns 0 when only the skipped auth status check is left, else 3."""
+    no workspace file is written. Returns 0 when only the skipped auth status check is left, else 3. budget_left: the
+    budget minus the dangling bounds of the workspace ledger."""
     report = []
-    live_est = check_live_gates(a, spec, problems, ws, n, engines, tokens, prices, a.budget_usd, report=report)
+    live_est = check_live_gates(a, spec, problems, ws, n, engines, tokens, prices,
+                                a.budget_usd if budget_left is None else budget_left, report=report)
     skipped = (AUTH_STATUS_SKIPPED, CODEX_AUTH_SKIPPED)
     fails = [r for r in report if r not in skipped]
     print(plan_text(spec, problems, a, engines, ws, live_est, tokens, prices))
     print("\nLIVE DRY RUN: nothing was executed (no model call, no `claude auth status`, no files written).")
-    print("budget: API-equivalent estimate $%.2f vs --budget-usd $%.2f (%s)" % (
-        live_est["total_usd"], a.budget_usd, "fits" if live_est["total_usd"] <= a.budget_usd else "EXCEEDS"))
+    left = a.budget_usd if budget_left is None else budget_left
+    print("budget: API-equivalent estimate $%.2f vs %s (%s)" % (
+        live_est["total_usd"], "--budget-usd $%.2f" % a.budget_usd if left == a.budget_usd else
+        "$%.2f left of --budget-usd $%.2f after the dangling intents" % (left, a.budget_usd),
+        "fits" if live_est["total_usd"] <= left else "EXCEEDS"))
     print("live gates that would refuse this command (%d):" % len(fails))
     for r in fails: print("  - " + r.replace("\n", "\n    "))
     for r in skipped:
@@ -3878,13 +4276,14 @@ def live_dry_run(a, spec, problems, ws, n, engines, tokens, prices):
 
 def live_plan_hash(a, spec, ws, builder_text=None):
     """What a --live signature covers next to the budget: the exact command line, the workspace, the skill folder bytes,
-    the approved inputs, and the bytes of every file the command reads through its options."""
+    the approved inputs, the bytes of every file the command reads through its options, and of the auth profiles."""
     golden, old = getattr(a, "golden", None), getattr(a, "old_skill", None)
     obj = {"format": 1, "argv": a.argv, "workspace": ws, "skill_sha256": skill_tree_hash(spec["skill_dir"]),
            "eval_set_sha256": gate_hash("eval_set", spec, ws), "requirements_sha256": gate_hash("requirements", spec, ws),
            "builder_prompt_sha256": hashlib.sha256(builder_text.encode("utf-8")).hexdigest() if builder_text else None,
            "golden_sha256": sha256_files(golden) if golden else None,
-           "old_skill_sha256": skill_tree_hash(old) if old and os.path.isdir(old) else None}
+           "old_skill_sha256": skill_tree_hash(old) if old and os.path.isdir(old) else None,
+           "auth_profiles_sha256": file_sha256(os.path.join(RULESET_ROOT, "policy", AUTH_PROFILES_FILE))}
     return hashlib.sha256(json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("ascii")).hexdigest()
 
 def spec_counts(spec, a):
@@ -3926,6 +4325,9 @@ def build_parser():
             s.add_argument("--tokens", action="append", help="KIND=IN,OUT assumed tokens per call; KIND exec|trigger|grader|pairwise")
             s.add_argument("--cases", type=int); s.add_argument("--llm-cases", type=int); s.add_argument("--trigger-queries", type=int)
             s.add_argument("--live", action="store_true")
+            s.add_argument("--auth-profile", help="personal-mac (subscription auth, the default of plan and estimate) or "
+                           "company (API keys under a hard --budget-usd cap), from policy/auth-profiles.json; every "
+                           "--live start requires it (the engine never detects a profile)")
             s.add_argument("--budget-usd", type=float, help="limit in API-equivalent USD (usage x API prices); "
                            "subscription runs are not billed per token")
             s.add_argument("--strict-budget", dest="strict_budget", action="store_true", default=True,
@@ -3984,11 +4386,14 @@ def main(argv=None):
     except approvals.Refused as ex:
         print(str(ex), file=sys.stderr)
         return 2
-    except EvalError as ex:
+    except (EvalError, spend.SpendError) as ex:
         print("error: %s" % ex, file=sys.stderr)
         return 2
     finally:
-        _LIVE["on"] = False
+        led = _LIVE.get("ledger")
+        _LIVE.update(on=False, gated=False, ledger=None)
+        AUTH["profile"] = None
+        if led is not None: led.close()
 
 def _dispatch(a):
     if a.cmd == "builder-check": return builder_check(a.skill, a.workspace, a.compare)
@@ -4000,6 +4405,7 @@ def _dispatch(a):
             rec = _approve_with(a.gate, load); print("approved %s sha256=%s" % (a.gate, rec["sha256"][:12])); return 0
         rec = _register_with(load); print("registered %s iteration-%d (%s)" % (rec["skill_name"], rec["iteration"],
                                           "auto" if rec["approval"] == "auto" else "approved")); return 0
+    if hasattr(a, "auth_profile"): select_auth_profile(a.auth_profile)  # plan/estimate/dry runs: personal-mac by default
     spec, problems = load_eval_set(a.skill)
     if a.cmd == "validate":  # before the workspace: an unsafe SKILL.md name is reported, not raised
         print("\n".join(problems) if problems else "eval set OK: %d cases, %d trigger queries" % (len(spec["cases"]), len(spec["triggers"] or [])))
@@ -4062,8 +4468,14 @@ def _dispatch(a):
                         "nothing); without --live every command is already a dry run")
     if a.cmd == "plan" or (a.cmd in live_cmds and not a.live and a.cmd != "grade"):
         print(plan_text(spec, problems, a, engines, ws, est, tokens, prices))
-        print("\nDRY RUN: nothing was executed. Real runs need --live --budget-usd X (API-equivalent USD), subscription "
-              "auth only, approved requirements/eval_set, no validation or preflight problems, and an estimate within budget.")
+        print("\nDRY RUN: nothing was executed. Real runs need " + (
+            "--live --auth-profile %s --budget-usd X (a hard cap in USD: API-key calls are billed per token, and each "
+            "call starts only when the spend so far plus its per-call cap fits), no claude call (the claude engine, the "
+            "claude grader and the builder are refused in API-key mode: --max-budget-usd is not an enforceable per-call "
+            "cap), no engine or grader without a per-call cap (codex and the codex grader: no enforceable per-call cap "
+            "in API-key mode; --no-strict-budget does not reopen them)" % AUTH["profile"].name if api_key_mode() else
+            "--live --budget-usd X (API-equivalent USD), subscription auth only")
+              + ", approved requirements/eval_set, no validation or preflight problems, and an estimate within budget.")
         return 0
     if a.cmd == "grade" and not a.live:
         n = a.iteration or (iterations(ws) or [None])[-1]
@@ -4071,25 +4483,28 @@ def _dispatch(a):
         grade_iteration(spec, ws, n, None, scope=grade_scope(a)); print("static + human queue only (dry run); LLM items not graded"); return 0
     # --- live: the same gates for run, loop, grade and calibrate ---
     if a.budget_usd is None or not math.isfinite(a.budget_usd) or a.budget_usd <= 0:
-        raise EvalError(NO_BUDGET)
+        raise EvalError(CAP_REQUIRED % AUTH["profile"].name if api_key_mode() else NO_BUDGET)
+    if a.auth_profile is None: raise EvalError(PROFILE_REQUIRED)
     n = None
     if a.cmd in ("grade", "calibrate"):
         n = a.iteration or (iterations(ws) or [None])[-1]
         if n is None or not os.path.isdir(os.path.join(ws, "iteration-%d" % n)): raise EvalError("no iterations in %s" % ws)
+    dangling = spend.preview(ws)  # read only: the bounds of crashed calls count against this command's cap
+    left = a.budget_usd - sum(r["bound_usd"] or 0.0 for r in dangling)
     if a.dry_run:
-        return live_dry_run(a, spec, problems, ws, n, engines, tokens, prices)
+        return live_dry_run(a, spec, problems, ws, n, engines, tokens, prices, left)
     def prepare():  # every gate that starts no process, before the person is asked to sign
         report = []
-        check_live_gates(a, spec, problems, ws, n, engines, tokens, prices, a.budget_usd, report=report)
+        check_live_gates(a, spec, problems, ws, n, engines, tokens, prices, left, report=report)
         fails = [r for r in report if r not in (AUTH_STATUS_SKIPPED, CODEX_AUTH_SKIPPED)]
         if fails: raise EvalError(fails[0])
         rules = ruleset_sha256()
         return approvals.Prepared(spec["skill_name"], live_plan_hash(a, spec, ws, builder_text), rules,
-                                  ["live command: " + shlex.join(["python3", "skill_eval.py"] + a.argv), "workspace: " + ws,
-                                   "ruleset_sha256 " + rules])
+                                  ["live command: " + shlex.join(["python3", "skill_eval.py"] + a.argv), "workspace: " + ws]
+                                  + [x for x in (spend.preview_line(dangling),) if x] + ["ruleset_sha256 " + rules])
     grant = APPROVER["it"].sign("live", a.cmd, prepare, budget_usd=a.budget_usd)
     print("signed %s --live by %s (plan sha256 %s)" % (a.cmd, grant.record["principal"], grant.sha256[:12]), file=sys.stderr)
-    check_live_gates(a, spec, problems, ws, n, engines, tokens, prices, a.budget_usd)
+    check_live_gates(a, spec, problems, ws, n, engines, tokens, prices, left)
     if a.cmd in ("run", "loop"):
         for e in engines:
             if budget_enforcement(e) == "soft_limit":
@@ -4101,15 +4516,27 @@ def _dispatch(a):
         raise EvalError("the command's inputs changed after signing (skill folder, eval set, requirements or a file named "
                         "by an option); nothing was run, sign again")
     enable_live(grant)
+    p = AUTH["profile"]
+    budget.ledger = _LIVE["ledger"] = spend.Ledger(ws, a.cmd, p.name, p.billing, a.budget_usd)
+    budget.spent = budget.ledger.open([r["call_id"] for r in dangling])  # lock, re-read, one recovered row per crash
+    if budget.ledger.torn:
+        print("WARNING: spend ledger %s: dropped a torn last row (%s)" % (budget.ledger.path, budget.ledger.torn),
+              file=sys.stderr)
+    paid = (lambda what: "%s, API-equivalent ~$%.2f; CLI-reported spend in %s (auth profile %s, API-key mode)"
+            % (what, budget.spent, budget.ledger.path, p.name)) if api_key_mode() else \
+        (lambda what: "%s, API-equivalent ~$%.2f (subscription: not billed per token)" % (what, budget.spent))
     if a.cmd == "run":
         n = run_iteration(spec, ws, engines, a.runs, a.baseline, a.old_skill, budget, prices, tokens=tokens,
                           run_root=a.run_root)
-        print("iteration-%d done, API-equivalent ~$%.2f (subscription: not billed per token)" % (n, budget.spent)); return 0
+        stopped = (rjson(os.path.join(ws, "iteration-%d" % n, "plan.json"), {}) or {}).get("stopped")
+        print(paid("iteration-%d done" % n)); return 3 if stopped and api_key_mode() else 0
     if a.cmd == "grade":
         grade_iteration(spec, ws, n, grader, a.seed, scope=grade_scope(a))
-        print("graded iteration-%d, API-equivalent ~$%.2f (subscription: not billed per token)" % (n, budget.spent)); return 0
+        if spend_halt(budget): raise EvalError(spend_halt(budget))
+        print(paid("graded iteration-%d" % n)); return 0
     if a.cmd == "calibrate":
         cal = calibrate_metered(a.golden, grader, os.path.join(ws, "iteration-%d" % n))
+        if spend_halt(budget): raise EvalError(spend_halt(budget))
         wjson(os.path.join(ws, "iteration-%d" % n, "calibration.json"), cal)
         print("agreement %.2f kappa %.2f (n=%d)" % (cal["agreement"], cal["kappa"], cal["n"])); return 0
     if a.cmd == "loop":

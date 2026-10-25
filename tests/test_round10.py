@@ -228,7 +228,7 @@ class TestEstimateAndGates(Base):
 
     def dry(self, *extra):
         d = self.approved_skill()
-        return self.cli("run", d, "--workspace", self.ws, "--live", "--dry-run", "--runs", "1", "--budget-usd", "50",
+        return self.cli("run", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--dry-run", "--runs", "1", "--budget-usd", "50",
                         "--claude-model", "claude-sonnet-5-5", "--claude-effort", "high", *extra)
 
     def test_strict_budget_still_refuses_codex_as_an_engine(self):

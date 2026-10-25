@@ -714,16 +714,16 @@ class TestCLI(Base):
         d = make_skill(self.tmp)
         rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live")
         self.assertEqual(rc, 2); self.assertIn("--budget-usd", err)
-        rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "100", "--engines", "claude")
+        rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "100", "--engines", "claude")
         self.assertEqual(rc, 2); self.assertIn("gate requirements not approved", err)
         os.makedirs(self.ws); write(os.path.join(self.ws, "requirements.md"), "goal")
         self.cli("approve", d, "--workspace", self.ws, "--gate", "requirements")
         self.cli("approve", d, "--workspace", self.ws, "--gate", "eval_set")
-        rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "100")
+        rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "100")
         self.assertEqual(rc, 2); self.assertIn("--strict-budget (default)", err)  # round 6: default engines include codex
-        rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "100", "--no-strict-budget")
+        rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "100", "--no-strict-budget")
         self.assertEqual(rc, 2); self.assertIn("no price for", err)
-        rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "1", "--engines", "claude")
+        rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "1", "--engines", "claude")
         self.assertEqual(rc, 2); self.assertIn("exceeds budget", err)
         self.assertFalse(se._LIVE["on"])
         self.assertEqual(se.iterations(self.ws), [])
@@ -741,7 +741,7 @@ class TestCLI(Base):
             seen_live.append(se._LIVE["on"])
             return fg(cmd, cwd, timeout) if "--json-schema" in cmd else fake(cmd, cwd, timeout)
         with mock.patch.object(se, "live_exec", fake_live):
-            rc, out, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "100", "--engines", "claude", "--runs", "1")
+            rc, out, err = self.cli("run", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "100", "--engines", "claude", "--runs", "1")
         self.assertEqual(rc, 0, err); self.assertTrue(seen_live and all(seen_live))
         self.assertFalse(se._LIVE["on"])  # reset after the command
         self.assertEqual(se.iterations(self.ws), [1])
@@ -752,7 +752,7 @@ class TestCLI(Base):
         rc, _, err = self.cli("register", d, "--workspace", self.ws)
         self.assertEqual(rc, 2); self.assertIn("needs `approve --gate registration`", err)
         with mock.patch.object(se, "live_exec", fake_live):
-            rc, out, err = self.cli("grade", d, "--workspace", self.ws, "--live", "--budget-usd", "5", "--engines", "claude")
+            rc, out, err = self.cli("grade", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "5", "--engines", "claude")
         self.assertEqual(rc, 0, err)
         self.assertTrue(all("--max-budget-usd" in c for c in fg.calls))
         rc, out, _ = self.cli("report", d, "--workspace", self.ws)
@@ -772,7 +772,7 @@ class TestCLI(Base):
                               "--trigger-queries", "0")
         self.assertEqual(rc, 0); self.assertIn("total calls 0", out)
         # live estimate is always the full validated set: $1 is far below it
-        rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "1", "--engines", "claude")
+        rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "1", "--engines", "claude")
         self.assertEqual(rc, 2); self.assertIn("exceeds budget", err)
         self.assertEqual(se.iterations(self.ws), [])
 
@@ -786,7 +786,7 @@ class TestCLI(Base):
                               "--price", "codex=0,0")
         self.assertEqual(rc, 2); self.assertIn("finite prices > 0", err)
         # codex worst case per exec call: 3 x (60000 x 100 + 4000 x 100) / 1e6 = $19.20 > $10 budget
-        rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "10", "--engines", "codex",
+        rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "10", "--engines", "codex",
                               "--price", "codex=100,100", "--runs", "1", "--no-strict-budget")
         self.assertEqual(rc, 2); self.assertIn("worst-case exec call bound $19.20", err); self.assertIn("no per-call cap", err)
         self.assertEqual(se.iterations(self.ws), [])
@@ -799,21 +799,21 @@ class TestCLI(Base):
         gp = os.path.join(self.tmp, "golden.json")
         wjson(gp, {"examples": [{"prompt": "p", "output": "o", "item": "i", "label": True}] * 2000})
         for cmd, extra in (("grade", []), ("calibrate", ["--golden", gp])):
-            rc, _, err = self.cli(cmd, d, "--workspace", self.ws, "--live", "--budget-usd", "100", "--engines", "claude", *extra)
+            rc, _, err = self.cli(cmd, d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "100", "--engines", "claude", *extra)
             self.assertEqual(rc, 2, cmd); self.assertIn("gate requirements not approved", err)
         write(os.path.join(self.ws, "requirements.md"), "goal")
         for g in ("requirements", "eval_set"): self.cli("approve", d, "--workspace", self.ws, "--gate", g)
         # 2000 golden examples x (12000 x 2 + 800 x 10) / 1e6 = $64 > $10
-        rc, _, err = self.cli("calibrate", d, "--workspace", self.ws, "--live", "--budget-usd", "10", "--golden", gp)
+        rc, _, err = self.cli("calibrate", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "10", "--golden", gp)
         self.assertEqual(rc, 2); self.assertIn("estimate $64.00 exceeds budget $10.00", err)
         # grade: 2 grader calls (eval 1, both configs) + 3 pairwise calls, priced from the iteration on disk
-        rc, _, err = self.cli("grade", d, "--workspace", self.ws, "--live", "--budget-usd", "0.05", "--engines", "claude",
+        rc, _, err = self.cli("grade", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "0.05", "--engines", "claude",
                               "--iteration", str(n))
         self.assertEqual(rc, 2); self.assertIn("exceeds budget", err)
         est = se.grader_estimate(*se.grade_counts(se.load_eval_set(d)[0], os.path.join(self.ws, "iteration-%d" % n)),
                                  "claude-sonnet-5-5", se.DEFAULT_TOKENS, {})
         self.assertEqual([r["calls"] for r in est["rows"]], [2, 3])
-        rc, _, err = self.cli("grade", d, "--workspace", self.ws, "--live", "--budget-usd", "10", "--grader-model", "x-model")
+        rc, _, err = self.cli("grade", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "10", "--grader-model", "x-model")
         self.assertEqual(rc, 2); self.assertIn("no price for", err)
         self.assertFalse(se._LIVE["on"])
 
@@ -839,7 +839,7 @@ class TestCLI(Base):
         pf = se.preflight(spec, ["claude", "codex"], self.runs)
         self.assertEqual(len(pf), 1); self.assertTrue(pf[0].startswith("claude: skill 'branch-setup' is also installed"), pf)
         # round 6: a user-invocable synced skill is left to the post-run init check; only `user-invocable: false` blocks
-        rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "1000", "--engines", "claude",
+        rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "1000", "--engines", "claude",
                               "--run-root", self.runs)
         self.assertEqual(rc, 2); self.assertIn("preflight: claude", err)
         shutil.rmtree(os.path.join(self.home, ".claude", "skills", "synced"))
@@ -873,7 +873,7 @@ class TestCLI(Base):
         spec = se.load_eval_set(d)[0]
         n = se.run_iteration(spec, self.ws, [se.ClaudeCodeEngine("claude-sonnet-5-5", exec_fn=FakeClaude())], runs=1, log=quiet)
         # the grade command's own --claude-model (default opus) differs from the grader, but the runs used sonnet
-        rc, _, err = self.cli("grade", d, "--workspace", self.ws, "--live", "--budget-usd", "10", "--engines", "claude",
+        rc, _, err = self.cli("grade", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "10", "--engines", "claude",
                               "--grader-model", "claude-sonnet-5-5", "--iteration", str(n))
         self.assertEqual(rc, 2); self.assertIn("equals the executor model of ['claude']", err)
 

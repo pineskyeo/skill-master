@@ -125,7 +125,7 @@ class TestCodexGraderSkillChecks(Base):
 class TestCodexExecutorWithCodexGraderGate(Base):
     def dry(self, *extra):
         d = self.approved_skill()
-        return self.cli("run", d, "--workspace", self.ws, "--live", "--dry-run", "--runs", "1", "--budget-usd", "50",
+        return self.cli("run", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--dry-run", "--runs", "1", "--budget-usd", "50",
                         "--claude-model", "claude-sonnet-5-5", *extra)
 
     def test_refused_even_with_no_strict_budget(self):

@@ -88,7 +88,7 @@ class TestOneClaudeLaunchPath(Base):
             d = self.approved_skill(evals=evals_doc(human=False))
             live = []
             with mock.patch.object(se, "live_exec", lambda *a, **k: live.append(a) or (0, "", "")):
-                rc, out, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", "50", "--engines",
+                rc, out, err = self.cli("run", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "50", "--engines",
                                         "claude", "--runs", "1", "--run-root", self.runs)
             self.assertEqual(rc, 2); self.assertIn("ANTHROPIC_BASE_URL is set", err); self.assertEqual(live, [])
             self.assertNotIn(SECRET, out + err)
@@ -317,7 +317,7 @@ class TestChargeFailedCalls(Base):
             if "--tools" in cmd: raise subprocess.TimeoutExpired(cmd, timeout)
             return fake(cmd, cwd, timeout, env)
         with mock.patch.object(se, "live_exec", live):
-            rc, out, err = self.cli("loop", d, "--workspace", self.ws, "--live", "--budget-usd", "200", "--engines",
+            rc, out, err = self.cli("loop", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "200", "--engines",
                                     "claude", "--runs", "1", "--builder-prompt", bp, "--run-root", self.runs)
         r = json.loads(out.strip().splitlines()[-1])
         self.assertEqual(rc, 3); self.assertEqual(r["status"], "builder-failed")
