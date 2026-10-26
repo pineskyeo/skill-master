@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """PreToolUse gate for file edits and the CSV skill's one permitted Bash invocation, and in edit-allowlist mode
-(argv: edit-allowlist <skill folder realpath>) the loop builder's writable set (engine/writable.py)."""
+(argv: edit-allowlist <skill folder realpath>) or agent-allowlist mode (argv: agent-allowlist <agent folder realpath>)
+the loop builder's writable set (engine/writable.py)."""
 import hashlib
 import json
 import os
@@ -132,17 +133,17 @@ def check(payload, root, skill_name, script_relative, script_hash, python3):
 COMMAND_TOOLS = ("Bash", "Monitor", "PowerShell")
 
 
-def builder_target_problem(writable, requested, cwd, root):
+def builder_target_problem(writable, requested, cwd, root, mode):
     if not isinstance(requested, str) or not requested or "\x00" in requested:
         return "invalid file edit path"
     if not os.path.isabs(requested):
         if not isinstance(cwd, str) or not os.path.isabs(cwd) or not os.path.samefile(cwd, root):
-            return "relative file edit path outside the skill folder"
+            return "relative file edit path outside the %s folder" % writable.MODES[mode].unit
         requested = os.path.join(root, requested)
     resolved = os.path.realpath(requested)
     for path in (os.path.normpath(requested), resolved):
-        if not writable.is_writable(writable.under(root, path)):
-            return "outside the builder's writable set (%s): %s" % (writable.SHOWN, requested)
+        if not writable.is_writable(writable.under(root, path), mode):
+            return "outside the builder's writable set (%s): %s" % (writable.MODES[mode].shown, requested)
     try: st = os.lstat(resolved)
     except FileNotFoundError: return None
     if stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
@@ -151,12 +152,13 @@ def builder_target_problem(writable, requested, cwd, root):
 
 
 def builder_decision(payload, mode, root):
-    """Edit-allowlist mode for the loop builder: None keeps reads in the normal permission flow."""
+    """Edit-allowlist (skill) and agent-allowlist (agent) mode for the loop builders: None keeps reads in the normal
+    permission flow."""
     from engine import writable
-    if mode != writable.ALLOWLIST_MODE:
+    if mode not in writable.MODES:
         return "deny", "unknown gate mode"
     if not isinstance(root, str) or not os.path.isabs(root) or os.path.realpath(root) != root or not os.path.isdir(root):
-        return "deny", "invalid skill root"
+        return "deny", "invalid %s root" % writable.MODES[mode].unit
     if not isinstance(payload, dict) or payload.get("hook_event_name") != "PreToolUse":
         return "deny", "unexpected hook event"
     tool, tool_input = payload.get("tool_name"), payload.get("tool_input")
@@ -170,7 +172,7 @@ def builder_decision(payload, mode, root):
     if not paths:
         return "deny", "file edit has no target path"
     for requested in paths:
-        problem = builder_target_problem(writable, requested, payload.get("cwd"), root)
+        problem = builder_target_problem(writable, requested, payload.get("cwd"), root, mode)
         if problem:
             return "deny", problem
     return "allow", "edit inside the builder's writable set"

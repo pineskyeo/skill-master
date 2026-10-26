@@ -15,10 +15,10 @@ variables are refused and scrubbed from every child, and costs are API-equivalen
 Usage: python3 skill_eval.py <validate|estimate|plan|run|grade|calibrate|report|approve|register|snapshot|loop> <skill> ...
        python3 skill_eval.py <approver-check|check-builtin-plugins>
        python3 skill_eval.py builder-check <skill> --workspace <ws> [--compare SAVED]
-       python3 skill_eval.py agent <validate|plan|run|grade|report> <agent> ...  (AGENT.md v2 agents per tool)
+       python3 skill_eval.py agent <validate|plan|run|grade|report|loop> <agent> ...  (AGENT.md v2 agents per tool)
        (also reachable as: python3 eva.py eval <subcommand> ...)
 """
-import argparse, contextlib, csv, datetime, errno, hashlib, itertools, json, math, mmap, os, platform, random, re, shlex, shutil, subprocess, sys, tempfile, time
+import argparse, contextlib, csv, datetime, errno, hashlib, io, itertools, json, math, mmap, os, platform, random, re, shlex, shutil, subprocess, sys, tempfile, time
 from engine import approvals, spend, writable
 
 POLICY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "policy")
@@ -1201,16 +1201,17 @@ def claude_bundled_skills(path=None, refresh=False):
                              binary=path, scanned=sorted(found), error=err)
     return dict(_BUNDLED_SCAN)
 
-def claude_settings(skill_name=None, bash_gate=None, edit_root=None):
+def claude_settings(skill_name=None, bash_gate=None, edit_root=None, edit_mode=writable.ALLOWLIST_MODE):
     """The --settings object of every Claude launch: bundled skills off (kill switch plus skillOverrides "off" for every
     known bundled name except skill_name, the skill under test) and every known built-in plugin disabled. bash_gate
-    adds the executor's PreToolUse gate; edit_root adds the builder's (edit-allowlist mode for that skill folder)."""
+    adds the executor's PreToolUse gate; edit_root adds the builder's (edit_mode of engine/writable.MODES for that
+    folder: edit-allowlist for a skill, agent-allowlist for an agent)."""
     if bash_gate and edit_root is not None: raise ValueError("one PreToolUse gate per launch")
     settings = {"disableBundledSkills": True,
             "enabledPlugins": {i: False for i in claude_builtin_plugins()["ids"]},
             "skillOverrides": {n: "off" for n in claude_bundled_skills()["names"] if n != skill_name}}
     gate = ([skill_name, bash_gate["script"], bash_gate["sha256"], bash_gate["python3"]] if bash_gate else
-            [writable.ALLOWLIST_MODE, edit_root] if edit_root is not None else None)
+            [edit_mode, edit_root] if edit_root is not None else None)
     if gate:
         settings["disableAllHooks"] = False
         settings["hooks"] = {"PreToolUse": [{"matcher": "*", "hooks": [{
@@ -1219,8 +1220,8 @@ def claude_settings(skill_name=None, bash_gate=None, edit_root=None):
             "onFailure": "block"}]}]}
     return settings
 
-def claude_settings_json(skill_name=None, bash_gate=None, edit_root=None):
-    return json.dumps(claude_settings(skill_name, bash_gate, edit_root), sort_keys=True)
+def claude_settings_json(skill_name=None, bash_gate=None, edit_root=None, edit_mode=writable.ALLOWLIST_MODE):
+    return json.dumps(claude_settings(skill_name, bash_gate, edit_root, edit_mode), sort_keys=True)
 
 # One sanitized launch shape for every claude -p call (executor, grader, builder): project/local setting sources only,
 # no MCP servers, bundled skills and built-in plugins off, auto memory, claude.ai MCP servers and /doctor off,
@@ -1228,9 +1229,9 @@ def claude_settings_json(skill_name=None, bash_gate=None, edit_root=None):
 CLAUDE_CHILD_ENV = {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
                     "DISABLE_DOCTOR_COMMAND": "1"}
 
-def claude_isolation_args(skill_name=None, bash_gate=None, edit_root=None):
+def claude_isolation_args(skill_name=None, bash_gate=None, edit_root=None, edit_mode=writable.ALLOWLIST_MODE):
     return ["--setting-sources", "project,local", "--strict-mcp-config", "--settings",
-            claude_settings_json(skill_name, bash_gate, edit_root)]
+            claude_settings_json(skill_name, bash_gate, edit_root, edit_mode)]
 
 def builtin_plugin_check_command():
     """Free check (plugin management only, no model call) of what the launch settings do to the built-in plugins."""
@@ -1276,12 +1277,14 @@ def claude_child_env(config_dir=None):
     if config_dir: env["CLAUDE_CONFIG_DIR"] = config_dir
     return with_account_marker(scrub_env(env), ["claude"])
 
-def launch_claude(exec_fn, cmd, cwd, timeout, env=None, skill_name=None, edit_allowlist=False):
+def launch_claude(exec_fn, cmd, cwd, timeout, env=None, skill_name=None, edit_allowlist=False,
+                  edit_mode=writable.ALLOWLIST_MODE):
     """Grader and builder launch path: refuses (EvalError, before the call) unless cmd carries the isolation args (for
-    skill_name, the skill the launch must not override; with edit_allowlist, the builder's gate for the realpath of
-    cwd) and cwd passes claude_launch_problems; the child gets claude_child_env(). The executor uses the same args, env
-    and checks through its Sandbox."""
-    iso = claude_isolation_args(skill_name, edit_root=os.path.realpath(cwd) if edit_allowlist else None)
+    skill_name, the skill the launch must not override; with edit_allowlist, the builder's gate in edit_mode for the
+    realpath of cwd) and cwd passes claude_launch_problems; the child gets claude_child_env(). The executor uses the
+    same args, env and checks through its Sandbox."""
+    iso = claude_isolation_args(skill_name, edit_root=os.path.realpath(cwd) if edit_allowlist else None,
+                                edit_mode=edit_mode)
     if cmd[:2] != ["claude", "-p"] or not any(cmd[i:i + len(iso)] == iso for i in range(len(cmd))):
         raise EvalError("refusing a claude call without the isolation arguments")
     probs = claude_launch_problems(cwd, require_hooks=edit_allowlist)
@@ -3765,6 +3768,7 @@ class ClaudeBuilder:
     shared Budget, and its cost charged to that Budget. The iteration's comparison.md is inlined into the prompt. Its
     PreToolUse gate (claude_bash_gate.py edit-allowlist mode) denies every write outside engine/writable.py's set."""
     TOOLS = "Read,Edit,Write,Glob,Grep"
+    MODE = writable.ALLOWLIST_MODE
     def __init__(self, instructions, model, budget, prices=None, exec_fn=None, timeout=900, skill_name=None):
         self.instructions, self.model, self.budget, self.prices = instructions, model, budget, prices or {}
         self.exec_fn, self.timeout, self.calls = exec_fn or live_exec, timeout, 0
@@ -3775,8 +3779,14 @@ class ClaudeBuilder:
         """skill_dir: the folder the gate lets the builder edit; empty makes the gate deny every edit."""
         cmd = ["claude", "-p", prompt, "--model", self.model, "--output-format", "json", "--no-session-persistence",
                "--permission-mode", "acceptEdits", "--tools", self.TOOLS, "--disable-slash-commands"]
-        cmd += claude_isolation_args(self.skill_name, edit_root=os.path.realpath(skill_dir) if skill_dir else "")
+        cmd += claude_isolation_args(self.skill_name, edit_root=os.path.realpath(skill_dir) if skill_dir else "",
+                                     edit_mode=self.MODE)
         return cmd + (["--max-budget-usd", "%.2f" % cap] if cap is not None else [])
+    def prompt(self, report):
+        import eva
+        return ("%s\n\nYou are improving the agent skill in the current directory (SKILL.md and its files). %s %s\n\n"
+                "Eval report of the last iteration:\n%s\n" % (self.instructions.strip(), eva.ENGLISH_BUILDER_RULE,
+                                                               eva.PARITY_BUILDER_RULE, report))
     def _record(self, it_dir, tin, tout, cost, ticket=None, outcome="ok", reported=None, source="unknown"):
         if self.budget is not None: self.budget.charge(cost)
         spend_settle(ticket, self.budget, outcome, reported, tin, tout, price_info("builder", self.model, self.prices),
@@ -3800,15 +3810,12 @@ class ClaudeBuilder:
         rp = os.path.join(it_dir, "comparison.md")
         if os.path.isfile(rp):
             with open(rp, encoding="utf-8") as f: report = f.read()[:TRANSCRIPT_CHARS]
-        import eva
-        prompt = ("%s\n\nYou are improving the agent skill in the current directory (SKILL.md and its files). %s %s\n\n"
-                  "Eval report of the last iteration:\n%s\n" % (self.instructions.strip(), eva.ENGLISH_BUILDER_RULE,
-                                                                 eva.PARITY_BUILDER_RULE, report))
+        prompt = self.prompt(report)
         unknown = lambda rep: api_equivalent(0, 0, rep, None, fallback)[1]
         if ticket is not None: ticket.launch()
         try:
             rc, out, err = launch_claude(self.exec_fn, self.command(prompt, cap, skill_dir), skill_dir, self.timeout,
-                                         skill_name=self.skill_name, edit_allowlist=True)
+                                         skill_name=self.skill_name, edit_allowlist=True, edit_mode=self.MODE)
         except (EvalError, LiveDisabled):
             if ticket is not None: ticket.not_launched(self.budget.spent)
             raise  # refused before launch: nothing spent
@@ -4539,8 +4546,17 @@ def agent_grade(a, agent, ws, prices, tokens):
     return 0
 
 def agent_report(a, agent, ws):
-    from engine import agent_eval
     n, it_dir = agent_iteration(a, ws)
+    gate = agent_report_gate(ws, n)
+    print("iteration-%d: %s -> %s" % (n, "NEEDS APPROVAL" if gate["needs_approval"] else "clean",
+                                     os.path.join(it_dir, "comparison.md")))
+    for p in gate["problems"]: print("  - " + p)
+    return 3 if gate["needs_approval"] else 0
+
+def agent_report_gate(ws, n):
+    """Writes benchmark.json, gate.json and comparison.md of iteration-n and returns the gate."""
+    from engine import agent_eval
+    it_dir = os.path.join(ws, "iteration-%d" % n)
     plan = rjson(os.path.join(it_dir, "plan.json"))
     runs = agent_eval.collect(it_dir)
     engines = plan.get("engines") if isinstance(plan.get("engines"), dict) else {}
@@ -4559,10 +4575,315 @@ def agent_report(a, agent, ws):
     wjson(os.path.join(it_dir, "gate.json"), gate)
     wtext(os.path.join(it_dir, "comparison.md"), agent_eval.comparison_md(
         bench, gate, n, [(t, cov[t]["status"], cov[t]["graded_runs"], gate["coverage"][t]) for t in cov]))
-    print("iteration-%d: %s -> %s" % (n, "NEEDS APPROVAL" if gate["needs_approval"] else "clean",
-                                     os.path.join(it_dir, "comparison.md")))
-    for p in gate["problems"]: print("  - " + p)
-    return 3 if gate["needs_approval"] else 0
+    return gate
+
+# ---------- agent loop (unit B4): the builder may change only AGENT.md ----------
+AGENT_ENGLISH_BUILDER_RULE = ("Write all agent content in English only (the AGENT.md frontmatter and body, from which the "
+                              "wrappers are generated); the loop stops if any non-English text appears.")
+AGENT_UNFIXABLE = ("coverage-missing:", "agent-load-unverified:")
+AGENT_NOT_REGULAR = "AGENT.md is not a regular file directly in the agent folder"
+
+class AgentBuilder(ClaudeBuilder):
+    """The builder `agent loop --live` accepts: ClaudeBuilder's one metered, capped `claude -p` call per iteration through
+    live_exec, run in the agent folder with its PreToolUse gate in agent-allowlist mode, so AGENT.md is the only file it
+    may write."""
+    MODE = writable.AGENT_MODE
+    def prompt(self, report):
+        return ("%s\n\nYou are improving the agent in the current directory. You may change only AGENT.md: the "
+                "scenarios, the wrappers (generated from AGENT.md after your call) and every other file are read-only, "
+                "and the loop stops if any of them changes. %s\n\nEval report of the last iteration:\n%s\n"
+                % (self.instructions.strip(), AGENT_ENGLISH_BUILDER_RULE, report))
+
+def agent_fingerprint(agent_dir, ws, old_dir=None):
+    """The agent-mode fingerprint: every entry of the agent folder but AGENT.md, the workspace, the rule bundle files
+    ruleset_sha256 hashes under RULESET_ROOT, named @ruleset/<path>, and every entry of the old agent folder, named
+    @old-agent/<path>. AGENT.md is named only when it is not a regular file with one link (writable.odd_file)."""
+    from engine import rule_runner
+    fp = writable.fingerprint(agent_dir, ws, writable.AGENT_MODE)
+    odd = writable.odd_file(os.path.join(os.path.realpath(agent_dir), "AGENT.md"))
+    if odd: fp["AGENT.md"] = odd
+    fp.update(writable.bundle_fingerprint(RULESET_ROOT, ("rules",) + rule_runner.HASHED_TREES + rule_runner.POLICY_FILES))
+    if old_dir: fp.update(writable.folder_fingerprint(os.path.realpath(old_dir), writable.OLD_AGENT_PREFIX))
+    return fp
+
+def agent_folder_problems(agent_dir):
+    """The start refusals of a folder a builder edits: AGENT.md must be a regular file with one link directly in it, and
+    no link may leave it (link_refusals, as snapshot reads them)."""
+    import eva
+    p = os.path.join(agent_dir, "AGENT.md")
+    out = [] if writable.odd_file(p) is None else [AGENT_NOT_REGULAR]
+    return out + link_refusals(agent_dir, eva.unit_tree(agent_dir, shutil.ignore_patterns()))
+
+def agent_regenerate(agent_dir):
+    """The wrappers regenerated through the `eva.py generate` code path: ([(name, value before, value after)] of every
+    file generate writes or removes, the refusal or error text or None)."""
+    from engine import generate, rule_runner
+    root = os.path.realpath(agent_dir)
+    try:
+        rule_runner.default_bundle(generate.ROOT)
+        planned = generate.outcome(agent_dir)
+    except (rule_runner.BundleError, generate.GenerateError) as ex:
+        return [], "generate refused: %s" % ex
+    rels = sorted(set(planned.writes) | set(planned.deletes))
+    before = {r: writable.entry(os.path.join(root, *r.split("/"))) for r in rels}
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = generate.cli(agent_dir)
+    writes = [(r, before[r], writable.entry(os.path.join(root, *r.split("/")))) for r in rels]
+    return writes, None if rc == 0 else (err.getvalue().strip() or "generate exited %d" % rc)
+
+def _agent_outside(st, outside):
+    if outside:
+        st["log"]("builder-wrote-outside " + writable.shown(outside[0]))
+        return _stop(st, "builder-wrote-outside", outside)
+
+def _agent_after_outside(st):
+    d = st["agent"].dir
+    st["post"] = agent_fingerprint(d, st["ws"], st["old"])
+    return _agent_outside(st, writable.changed(st["before"], st["post"],
+                                               [(writable.name(d, p), r, w) for p, r, w in st["harness"][st["seen"]:]]))
+
+def _agent_after_regenerate(st):
+    st["generated"], st["generate_error"] = agent_regenerate(st["agent"].dir)
+
+def _agent_after_english(st):
+    import eva
+    found = eva.english_violations(st["agent"].dir)
+    if found: return _stop(st, "builder-non-english", found)
+
+def _agent_after_parity(st):
+    import eva
+    from engine import generate
+    found = [st["generate_error"]] if st["generate_error"] else []
+    if not found:
+        check = generate.outcome(st["agent"].dir)
+        found = [check.refusal] if check.refusal else ["generate --check: " + p for p in check.problems]
+    found += [f for f in eva.parity_violations(st["agent"].dir) if f not in st["parity"]]
+    if found: return _stop(st, "builder-parity-missing", found)
+
+def _agent_after_review(st):
+    import eva
+    found = [x for x in eva.review_items(st["agent"].dir) if x not in st["review"]]
+    if found: return _stop(st, "builder-review-required", found)
+
+def _agent_after_outside_again(st):
+    return _agent_outside(st, writable.changed(st["post"], agent_fingerprint(st["agent"].dir, st["ws"], st["old"]),
+                                               st["generated"]))
+
+def _agent_after_reload(st):
+    try:
+        agent = Agent(st["agent"].dir)
+    except EvalError as ex:
+        return _stop(st, "agent-invalid", [str(ex)])
+    found = agent_folder_problems(agent.dir) + agent_validation_problems(agent)
+    if found: return _stop(st, "agent-invalid", found)
+    st["agent"] = agent
+
+# Not declared in policy/gates.json: editing policy/ would move ruleset_sha256. The writable-set gate runs first so that
+# regeneration never writes over a tree the builder changed outside AGENT.md.
+AGENT_POST_BUILDER_GATES = (("writable-set", _agent_after_outside), ("regenerate", _agent_after_regenerate),
+                            ("english", _agent_after_english), ("parity", _agent_after_parity),
+                            ("rules-unchanged", _after_rules), ("rule-review", _agent_after_review),
+                            ("writable-set-again", _agent_after_outside_again), ("builder-failed", _after_failed),
+                            ("agent-reload", _agent_after_reload))
+AGENT_CRASH_GATES = ("writable-set", "regenerate", "rules-unchanged")
+
+def agent_loop(agent, ws, engines, grader, builder, max_iterations=MAX_AUTO_ITERATIONS, runs=DEFAULT_RUNS, old=None,
+               budget=None, prices=None, tokens=None, precheck=None, run_root=None, log=print):
+    """run -> typed grading (and grader for llm criteria) -> report; stop when the gate is clean, with "needs-coverage"
+    when only coverage-missing or agent-load-unverified problems remain (no builder can fix them), else call
+    builder(iteration_dir, agent_dir), which may change only AGENT.md, and run AGENT_POST_BUILDER_GATES after it,
+    whatever it returned or raised; another exception than EvalError runs only AGENT_CRASH_GATES and is re-raised.
+    precheck(agent, iterations_left) -> [problems] runs before every iteration; any problem stops the loop with
+    "gates-failed". At most MAX_AUTO_ITERATIONS iterations."""
+    import eva
+    from engine import agent_eval
+    if not 1 <= max_iterations <= MAX_AUTO_ITERATIONS:
+        raise EvalError("max %d automatic iterations, got %d" % (MAX_AUTO_ITERATIONS, max_iterations))
+    budget = Budget(float("inf")) if budget is None else budget
+    prices, tokens = prices or {}, tokens or DEFAULT_TOKENS
+    grade_fn = lambda agent_dir, path: eva.grade_transcript(agent_dir, path).checks
+    n = None
+    for i in range(max_iterations):
+        if precheck is not None:
+            probs = precheck(agent, max_iterations - i)
+            if probs: return {"status": "gates-failed", "iteration": n, "problems": probs}
+        n = agent_run_iteration(agent, old, ws, engines, agent_cells(agent, engines), runs, budget, prices, tokens,
+                                run_root, log)
+        it_dir = os.path.join(ws, "iteration-%d" % n)
+        stopped = (rjson(os.path.join(it_dir, "plan.json"), {}) or {}).get("stopped")
+        if stopped: return {"status": "run-stopped", "iteration": n, "error": stopped}
+        if grader is None:
+            agent_eval.grade_runs(it_dir, agent.dir, agent.scenarios, grade_fn, log=log)
+        else:
+            used = dict(grader.usage)
+            with spend_scope(grader, iteration=n):
+                agent_eval.grade_runs(it_dir, agent.dir, agent.scenarios, grade_fn, grader, log=log)
+            append_cost(it_dir, "agent grade", usage_delta(grader.usage, used))
+        halt = spend_halt(budget)
+        if halt: return {"status": "run-stopped", "iteration": n, "error": halt}
+        gate = agent_report_gate(ws, n)
+        log("iteration-%d gate: %s" % (n, gate["problems"] or "clean"))
+        if not gate["problems"]: return {"status": "clean", "iteration": n}
+        if all(p.startswith(AGENT_UNFIXABLE) for p in gate["problems"]): return {"status": "needs-coverage", "iteration": n}
+        if budget.remaining() <= 0: return {"status": "budget-exhausted", "iteration": n}
+        if i == max_iterations - 1 or builder is None: break
+        harness = getattr(builder, "harness_writes", [])
+        old_dir = old.dir if old else None
+        st = {"agent": agent, "ws": ws, "old": old_dir, "n": n, "log": log, "harness": harness, "seen": len(harness),
+              "before": agent_fingerprint(agent.dir, ws, old_dir), "rules": ruleset_sha256(),
+              "parity": set(eva.parity_violations(agent.dir)), "review": set(eva.review_items(agent.dir)),
+              "rc": None, "error": None}
+        crash, led = None, getattr(budget, "ledger", None)
+        if led is not None: led.bracket = harness
+        try:
+            st["rc"] = builder(it_dir, agent.dir)
+        except EvalError as ex:
+            st["error"] = str(ex)
+        except Exception as ex:
+            crash, st["error"] = ex, "builder raised %s: %s" % (type(ex).__name__, ex)
+        finally:
+            if led is not None: led.bracket = None
+        st["extra"] = {} if st["error"] is None else {"error": st["error"]}
+        if st["rc"] is not None: st["extra"]["returncode"] = st["rc"]
+        for gid, gate_fn in AGENT_POST_BUILDER_GATES:
+            if crash is not None and gid not in AGENT_CRASH_GATES: continue
+            stop = gate_fn(st)
+            if stop: return stop
+        if crash is not None: raise crash
+        agent = st["agent"]
+    return {"status": "needs-approval", "iteration": n}
+
+def agent_scenario_hashes(agent):
+    return {rel: file_sha256(p) for rel, p in agent.files([]) if rel.startswith("scenarios/")}
+
+def agent_bound_files(pairs):
+    """(sha256_labeled(pairs), {label: file_sha256}) from one read of each file, so the per-file values are the bytes
+    the plan hash covered."""
+    h, each = hashlib.sha256(), {}
+    for label, p in pairs:
+        h.update(label.encode() + b"\0")
+        if os.path.isfile(p):
+            with open(p, "rb") as f: data = f.read()
+            h.update(data)
+            each[label] = hashlib.sha256(data).hexdigest()
+        else:
+            h.update(b"<missing>")
+            each[label] = None
+        h.update(b"\0")
+    return h.hexdigest(), each
+
+def agent_drift_problems(agent, signed, old=None, names=()):
+    """A scenario file, a signed file of the old agent or the ruleset that differs from the value bound by the
+    signature."""
+    now = agent_scenario_hashes(agent)
+    out = ["scenario %s changed since signing" % rel for rel in sorted(set(now) | set(signed["scenarios"]))
+           if now.get(rel) != signed["scenarios"].get(rel)]
+    if old is not None:
+        was = signed["old_agent"]
+        now_old = {rel: file_sha256(p) for rel, p in old.files(names)}
+        out += ["old agent %s changed since signing" % rel for rel in sorted(set(now_old) | set(was))
+                if now_old.get(rel) != was.get(rel)]
+    try:
+        moved = ruleset_sha256() != signed["rules"]
+    except EvalError:
+        moved = True
+    return out + (["ruleset_sha256 changed since signing"] if moved else [])
+
+def agent_loop_estimate(a, agent, old, engines, cells, prices, tokens, k):
+    """k iterations of exec and grader calls, plus a builder call between two iterations."""
+    from engine import agent_eval
+    calls = a.runs * agent_configs(old)
+    n_llm = sum(1 for c in cells if c["state"] == agent_eval.PLANNED and any(
+        agent_eval.llm_items(agent.dir, s["data"]) for s in agent.scenarios if s["id"] == c["scenario"])) * calls
+    ge = grader_engine_of(a)
+    rows = agent_estimate(engines, cells, a.runs, old, prices, tokens)["rows"] + \
+        grader_estimate(n_llm, 0, a.grader_model, tokens, prices, ge)["rows"][:1]
+    est = scale_estimate(est_result(rows, tokens), k)
+    if a.builder_prompt and k > 1:
+        per = call_cost(tokens["builder"], price_for("builder", a.builder_model, prices))
+        est = est_result(est["rows"] + [est_row("builder", "builder", a.builder_model, k - 1, tokens, per)], tokens)
+    return est
+
+def agent_grader_problems(a, engines, ge):
+    models = {e.name: e.model for e in engines}
+    if ge == "codex":
+        return ["a codex grader cannot grade codex runs; codex is a grader only"] if "codex" in models else []
+    same = sorted(e for e, m in models.items() if m and m == a.grader_model)
+    out = ["grader model %s equals the executor model of %s; use a different model" % (a.grader_model, same)] if same else []
+    if any(e == "claude" and not m for e, m in models.items()):
+        out.append("claude executor model unknown (CLI default); the grader cannot be shown to differ")
+    return out
+
+def agent_loop_cli(a, agent, ws, prices, tokens):
+    from engine import agent_eval
+    if not 1 <= a.max_iterations <= MAX_AUTO_ITERATIONS:
+        raise EvalError("--max-iterations must be 1..%d" % MAX_AUTO_ITERATIONS)
+    engines = make_agent_engines(a)
+    if a.runs < 1: raise EvalError("--runs must be >= 1")
+    old = Agent(a.old_agent) if a.old_agent else None
+    builder_text = read_builder_prompt(a) if a.builder_prompt else None
+    cells = agent_cells(agent, engines)
+    gates = ", ".join(gid for gid, _ in AGENT_POST_BUILDER_GATES)
+    loop_lines = ["loop: max iterations %d (MAX_AUTO_ITERATIONS %d, policy/eval-policy.json)" % (
+                      a.max_iterations, MAX_AUTO_ITERATIONS),
+                  "builder model: %s; builder prompt: %s; writable set: %s (hook mode %s)" % (
+                      a.builder_model, a.builder_prompt or "none (one iteration, no builder call)",
+                      writable.MODES[writable.AGENT_MODE].shown, writable.AGENT_MODE),
+                  "post-builder gates: " + gates]
+    if not a.live:
+        print(agent_plan_text(a, agent, old, ws, engines, cells, prices, tokens))
+        print("\n".join(loop_lines))
+        print("\nDRY RUN: nothing was executed. A real loop needs `agent loop --live --auth-profile P --budget-usd X "
+              "--builder-prompt FILE`, a clean `agent validate`, generated wrappers, an estimate within budget and a "
+              "signature at the terminal.")
+        return 0
+    agent_live_required(a)
+    ge, names = grader_engine_of(a), [e.name for e in engines]
+
+    def problems(left, k=a.max_iterations, now=agent):
+        cells_now = agent_cells(now, engines)
+        est = agent_loop_estimate(a, now, old, engines, cells_now, prices, tokens, k)
+        out = agent_folder_problems(now.dir) + agent_run_problems(a, now, old, engines, cells_now, est, prices, tokens,
+                                                                  left)
+        if api_key_mode(): out += api_key_soft_refusals([], ge, False, True, bool(builder_text))
+        out += agent_grader_problems(a, engines, ge)
+        if ge == "codex" and "codex" not in names and subscription_checks_on(): out += codex_auth_problems()
+        if builder_text is not None:
+            try: same = read_builder_prompt(a) == builder_text
+            except EvalError: same = False
+            if not same: out.append("--builder-prompt %s changed since it was read; sign again" % a.builder_prompt)
+        return out
+    bound = {}
+
+    def parts():
+        agent_sha, bound["agent"] = agent_bound_files(agent.files(list(agent_eval.TOOLS)))
+        old_sha, bound["old_agent"] = agent_bound_files(old.files(names)) if old else (None, {})
+        return {"agent": agent_sha, "old_agent": old_sha,
+                "engines": {e.name: [e.model, e.effort] for e in engines}, "budget_usd": a.budget_usd,
+                "builder": [a.builder_model,
+                            hashlib.sha256(builder_text.encode("utf-8")).hexdigest() if builder_text else None],
+                "max_iterations": a.max_iterations, "grader": [ge, a.grader_model, _str_opt(a, "grader_effort")]}
+    budget = agent_live_start(a, agent, ws, "agent-loop", problems, parts, [
+        "agent %s: loop of at most %d iteration(s), %d planned cell(s), runs %d, engines %s" % (
+            agent.name, a.max_iterations, sum(1 for c in cells if c["state"] == agent_eval.PLANNED), a.runs,
+            ", ".join(names))] + loop_lines[1:], "claude" in names or ge == "claude" or bool(builder_text))
+    # bound holds the per-file values of the post-sign recheck, which matched the signature; the reload makes
+    # iteration 1 run those scenarios, and the iteration-1 precheck refuses any later change.
+    signed = {"scenarios": {r: v for r, v in bound["agent"].items() if r.startswith("scenarios/")},
+              "old_agent": bound["old_agent"], "rules": ruleset_sha256()}
+    agent = Agent(agent.dir)
+    for e in engines:
+        if budget_enforcement(e) == "soft_limit":
+            print("WARNING: budget " + SOFT_LIMIT_NOTE % e.name, file=sys.stderr)
+            print("WARNING: " + NO_STRICT_WARNING % e.name, file=sys.stderr)
+    grader = make_grader(ge, a.grader_model, a.grader_effort, budget=budget, prices=prices, tokens=tokens)
+    builder = AgentBuilder(builder_text, a.builder_model, budget, prices) if builder_text else None
+    precheck = lambda now, left: agent_drift_problems(now, signed, old, names) + problems(budget.remaining(), left, now)
+    r = agent_loop(agent, ws, engines, grader, builder, a.max_iterations, a.runs, old, budget, prices, tokens, precheck,
+                   a.run_root)
+    print(json.dumps(r, ensure_ascii=False))
+    return 0 if r["status"] == "clean" else 3
 
 def agent_dispatch(a):
     agent = Agent(a.agent)
@@ -4573,6 +4894,7 @@ def agent_dispatch(a):
     prices, tokens = parse_price_overrides(a.price), parse_token_overrides(a.tokens)
     make_grader(grader_engine_of(a), a.grader_model, a.grader_effort)
     if a.agent_cmd == "grade": return agent_grade(a, agent, ws, prices, tokens)
+    if a.agent_cmd == "loop": return agent_loop_cli(a, agent, ws, prices, tokens)
     return agent_run(a, agent, ws, prices, tokens)
 
 # ---------- CLI ----------
@@ -5073,14 +5395,14 @@ def build_parser():
     sp.add_parser("approver-check", help="the approver key needs a passphrase and is not loaded in ssh-agent; the "
                   "approvers file lists it (~/.config/skill-master)")
     s = sp.add_parser("agent", help="evaluate an AGENT.md v2 agent per tool from its typed scenarios (validate, plan, "
-                      "run, grade, report)")
+                      "run, grade, report) and improve it in a loop whose builder may change only AGENT.md (loop)")
     asp = s.add_subparsers(dest="agent_cmd", required=True)
-    for n in ("validate", "plan", "run", "grade", "report"):
+    for n in ("validate", "plan", "run", "grade", "report", "loop"):
         x = asp.add_parser(n)
         x.add_argument("agent")
         if n != "validate": x.add_argument("--workspace")
         if n in ("grade", "report"): x.add_argument("--iteration", type=int)
-        if n in ("plan", "run"):
+        if n in ("plan", "run", "loop"):
             x.add_argument("--engines", default="claude,codex")
             x.add_argument("--runs", type=int, default=DEFAULT_RUNS)
             x.add_argument("--old-agent", help="the previous AGENT.md v2 version of this agent (its baseline)")
@@ -5094,7 +5416,7 @@ def build_parser():
             x.add_argument("--no-strict-budget", dest="strict_budget", action="store_false",
                            help="RISKY: allow codex --live runs (soft budget limit, auth.json copy readable by the agent)")
             x.add_argument("--run-root", help="folder for the per-run sandboxes (default: system temp folder)")
-        if n in ("plan", "run", "grade"):
+        if n in ("plan", "run", "grade", "loop"):
             x.add_argument("--grader-engine", choices=GRADER_ENGINES, default="claude")
             x.add_argument("--grader-model", default=None)
             x.add_argument("--grader-effort")
@@ -5102,7 +5424,12 @@ def build_parser():
             x.add_argument("--tokens", action="append")
             x.add_argument("--auth-profile")
             x.add_argument("--budget-usd", type=float)
-        if n in ("run", "grade"): x.add_argument("--live", action="store_true")
+        if n in ("run", "grade", "loop"): x.add_argument("--live", action="store_true")
+        if n == "loop":
+            x.add_argument("--builder-prompt", help="file with instructions for the metered Claude builder, which may "
+                           "change only AGENT.md")
+            x.add_argument("--builder-model", default=DEFAULT_BUILDER_MODEL)
+            x.add_argument("--max-iterations", type=int, default=MAX_AUTO_ITERATIONS)
     return p
 
 def main(argv=None):
