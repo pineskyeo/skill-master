@@ -1,20 +1,35 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "registration.json",
-  "description": "The record skill_eval.register writes: skill_eval.registration_record plus the register signature under signed. approval is auto (a clean gate) or the signed registration approval. Every hash is 64 lower hex; ruleset_sha256 is the rule bundle hash at registration (plan.md:844).",
+  "description": "Format 2 of the record skill_eval.register writes (unit B5): skill_eval.registration_record plus the register signature under signed. skill_path is the POSIX path from the folder that holds registration.json to the skill folder. version is the SemVer 2.0.0 version of SKILL.md. approvals copies each signed approvals.json record the registration relied on: registration when the gate needed approval, and each coverage_waiver:<tool> that counted. approval is auto (a clean gate) or the signed registration approval. The register signature covers every field but signed (skill_eval.REGISTRATION_SIGNED). Every hash is 64 lower hex; ruleset_sha256 is the rule bundle hash at registration (plan.md:844).",
   "type": "object",
   "additionalProperties": false,
-  "required": ["skill_name", "skill_path", "iteration", "benchmark_sha256", "skill_sha256", "eval_set_sha256",
-               "skill_md_sha256", "ruleset_sha256", "registered_at", "approval"],
+  "required": ["registration_format", "kind", "skill_name", "version", "skill_path", "iteration", "benchmark_sha256",
+               "skill_sha256", "eval_set_sha256", "skill_md_sha256", "ruleset_sha256", "approvals", "registered_at",
+               "approval"],
   "properties": {
-    "skill_name": {"type": "string", "minLength": 1},
-    "skill_path": {"type": "string", "minLength": 1},
+    "registration_format": {"const": 2},
+    "kind": {"const": "skill"},
+    "skill_name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}\\Z"},
+    "version": {"$ref": "#/$defs/semver"},
+    "skill_path": {"type": "string", "pattern": "^[^/~\\\\][^\\\\]*\\Z"},
     "iteration": {"type": "integer", "minimum": 1},
     "benchmark_sha256": {"$ref": "#/$defs/sha256"},
     "skill_sha256": {"$ref": "#/$defs/sha256"},
     "eval_set_sha256": {"$ref": "#/$defs/sha256"},
     "skill_md_sha256": {"$ref": "#/$defs/sha256"},
     "ruleset_sha256": {"$ref": "#/$defs/sha256"},
+    "approvals": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "registration": {"$ref": "#/$defs/signed"},
+        "coverage_waiver:claude": {"$ref": "#/$defs/waiver"},
+        "coverage_waiver:codex": {"$ref": "#/$defs/waiver"},
+        "coverage_waiver:opencode": {"$ref": "#/$defs/waiver"},
+        "coverage_waiver:hermes": {"$ref": "#/$defs/waiver"}
+      }
+    },
     "registered_at": {"$ref": "#/$defs/at"},
     "approval": {"oneOf": [{"const": "auto"}, {"$ref": "#/$defs/signed"}]},
     "signed": {"$ref": "#/$defs/signed"}
@@ -22,6 +37,11 @@
   "$defs": {
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}\\Z"},
     "at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\\Z"},
+    "semver": {
+      "description": "SemVer 2.0.0: MAJOR.MINOR.PATCH, an optional -PRERELEASE and +BUILD, no leading zeros, no v (engine/registry.py SEMVER_RE).",
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?\\Z"
+    },
     "signed": {
       "description": "A signed record of engine/approvals.py (Approver.sign).",
       "type": "object",
@@ -36,6 +56,23 @@
         "at": {"$ref": "#/$defs/at"},
         "signature": {"type": "string",
                       "pattern": "^-----BEGIN SSH SIGNATURE-----\\n[A-Za-z0-9+/=\\n]+-----END SSH SIGNATURE-----\\n?\\Z"}
+      }
+    },
+    "waiver": {
+      "description": "A signed coverage_waiver:<tool> record: the signed fields plus the reason typed at the terminal.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "method", "sha256", "ruleset_sha256", "principal", "at", "signature", "reason"],
+      "properties": {
+        "format": {"const": 1},
+        "method": {"const": "ssh-sig"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "ruleset_sha256": {"$ref": "#/$defs/sha256"},
+        "principal": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._@+-]{0,63}\\Z"},
+        "at": {"$ref": "#/$defs/at"},
+        "signature": {"type": "string",
+                      "pattern": "^-----BEGIN SSH SIGNATURE-----\\n[A-Za-z0-9+/=\\n]+-----END SSH SIGNATURE-----\\n?\\Z"},
+        "reason": {"type": "string", "pattern": "^[!-~]([ -~]{0,198}[!-~])?\\Z"}
       }
     }
   }

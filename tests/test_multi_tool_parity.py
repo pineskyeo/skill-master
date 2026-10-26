@@ -576,7 +576,7 @@ class TestValidateAndPlan(CliBase):
         d = T.make_skill(self.tmp, extra_files={"agents/openai.yaml": GENERATED_OPENAI_YAML})
         with open(os.path.join(d, "SKILL.md"), encoding="utf-8") as f: text = f.read()
         with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as f:
-            f.write(text.replace("---\n# Branch", 'disable-model-invocation: true\nmetadata:\n  opencode/autoinvoke: "false"\n---\n# Branch', 1))
+            f.write(text.replace("metadata:\n", 'disable-model-invocation: true\nmetadata:\n  opencode/autoinvoke: "false"\n', 1))
         rc, out, _ = self.cli("validate", d)
         self.assertEqual(rc, 3, out); self.assertIn("review: needs-review: [hermes] disable-model-invocation: true has no verified Hermes equivalent", out)
         self.assertIn("hermes=review", out); self.assertIn("RULE REVIEW NOT RECORDED", out)
@@ -790,7 +790,7 @@ class TestToolCoverage(T.Base):
 
     def test_registration_reads_coverage_only_in_the_coverage_check_and_the_waiver_gate(self):
         import inspect
-        fns = (se.register, se._register_with, se.registration_hash, se.registration_verdict,
+        fns = (se.register, se._register_with, se.registration_hash, se.registration_verdict, se.registration_state,
                se.approve, se._approve_with, se.approvals_data, se.approval_record, se.approval_verdict,
                se.approval_ok)
         assert_record_readers_listed(self, fns)

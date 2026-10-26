@@ -313,7 +313,7 @@ class TestIndexAndGolden(E.SkillMixin, unittest.TestCase):
         """Registration and approvals are hash-bound; the English rule must not invalidate a registered skill."""
         import inspect
         fns = (se.register, se._register_with, se.registration_record, se.registration_hash, se.registration_verdict,
-               se.approve, se._approve_with, se.approve_show, se.approvals_data, se.approval_record, se.approval_verdict,
+               se.registration_state, se.approve, se._approve_with, se.approve_show, se.approvals_data, se.approval_record, se.approval_verdict,
                se.approval_ok, se.gate_hash, se.skill_tree_hash)
         P.assert_record_readers_listed(self, fns)
         for fn in fns:

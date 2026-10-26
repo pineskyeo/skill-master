@@ -19,7 +19,7 @@ Usage: python3 skill_eval.py <validate|estimate|plan|run|grade|calibrate|report|
        (also reachable as: python3 eva.py eval <subcommand> ...)
 """
 import argparse, contextlib, csv, datetime, errno, hashlib, io, itertools, json, math, mmap, os, platform, random, re, shlex, shutil, subprocess, sys, tempfile, time
-from engine import approvals, spend, writable
+from engine import approvals, registry, spend, writable
 
 POLICY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "policy")
 RULESET_ROOT = os.path.dirname(os.path.abspath(__file__))  # rules/, schemas/, targets/, policy/ of ruleset_sha256()
@@ -228,7 +228,7 @@ FORBIDDEN_EXTRA_ARGS = {"claude": ("--model", "--fallback-model", "--max-budget-
                                    "--allow-dangerously-skip-permissions", "--bare", "--safe-mode"),
                         "codex": ("-m", "--model", "-p", "--profile", "--oss", "-C", "--cd", "--add-dir")}
 
-SAFE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")  # an eval `name` must be one safe path component
+SAFE_NAME_RE = registry.SAFE_NAME_RE  # an eval `name` must be one safe path component
 
 class EvalError(Exception): pass
 class LiveDisabled(RuntimeError): pass
@@ -237,8 +237,7 @@ class JudgeAnswerError(EvalError):
     def __init__(self, msg, winner):
         EvalError.__init__(self, msg); self.winner = winner
 
-def safe_name(name):
-    return isinstance(name, str) and bool(SAFE_NAME_RE.match(name)) and ".." not in name
+safe_name = registry.safe_name
 
 def ensure_inside(root, path):
     """Raises unless path (after resolving symlinks and '..') is root itself or inside it. Called before every
@@ -3660,16 +3659,26 @@ def report_iteration(spec, ws, n):
     wtext(os.path.join(it_dir, "comparison.md"), comparison_md(bench, gate, n))
     return bench, gate
 
-def registration_coverage(spec, ws, bench, n):
-    """The register summary line of each required tool: its coverage recomputed from bench's runs and planned engines
-    (never the stored field) and its current waiver. Refuses a stored tool_coverage that is malformed or claims run where
-    the runs do not, then every required tool that neither ran nor has a valid waiver."""
+def benchmark_runs(bench):
+    """(runs, planned engines) of a benchmark when both are well formed, else None."""
+    if not (isinstance(bench, dict) and isinstance(_meta(bench), dict)): return None
     runs, planned = bench.get("runs"), _meta(bench).get("engines")
     if not (isinstance(runs, list) and all(isinstance(r, dict) and isinstance(r.get("engine"), str)
                                            and isinstance(r.get("result"), dict) and "pass_rate" in r["result"] for r in runs)
             and (planned is None or isinstance(planned, (dict, list)) and all(isinstance(e, str) for e in planned))):
+        return None
+    return runs, planned
+
+def registration_coverage(spec, ws, bench, n):
+    """(lines, waived): the register summary line of each required tool, its coverage recomputed from bench's runs and
+    planned engines (never the stored field) and its current waiver, and the tools whose waiver counted. Refuses a
+    stored tool_coverage that is malformed or claims run where the runs do not, then every required tool that neither
+    ran nor has a valid waiver."""
+    got = benchmark_runs(bench)
+    if got is None:
         raise EvalError("iteration-%d cannot be registered: its benchmark.json runs or planned engines are malformed; "
                         "re-run `report`" % n)
+    runs, planned = got
     cov = runs_coverage(planned, runs)
     if "tool_coverage" in bench:
         stored = bench["tool_coverage"]
@@ -3690,18 +3699,20 @@ def registration_coverage(spec, ws, bench, n):
                         "coverage_waiver:<tool>` with a reason typed at the terminal; a registration approval does not "
                         "clear coverage" % (n, "; ".join(missing), ", ".join(COVERAGE_REQUIRED)))
     waived = {t: " (waived by %s, reason: %s)" % (c["principal"], c["reason"]) for t, c in states if c["state"] == "waived"}
-    return ["register coverage %s=%s%s" % (t, c["status"], waived.get(t, "")) for t, c in states if t in COVERAGE_REQUIRED]
+    return (["register coverage %s=%s%s" % (t, c["status"], waived.get(t, "")) for t, c in states if t in COVERAGE_REQUIRED],
+            [t for t, c in states if c["state"] == "waived"])
 
 def registration_record(spec, ws, shown=None):
-    """The record `register` writes for the last iteration, or EvalError when that iteration may not be registered.
-    Writes nothing. shown, when given, receives the per-tool lines of the registration_coverage check."""
+    """The format-2 record `register` writes for the last iteration (schemas/registration.schema.json, without signed),
+    or EvalError when that iteration may not be registered. Writes nothing. shown, when given, receives the per-tool
+    lines of the registration_coverage check."""
     its = iterations(ws)
     if not its: raise EvalError("no iteration to register in %s" % ws)
     n = its[-1]
     gate = rjson(os.path.join(ws, "iteration-%d" % n, "gate.json"))
     bench = rjson(os.path.join(ws, "iteration-%d" % n, "benchmark.json"))
     if gate is None or bench is None: raise EvalError("iteration-%d has no report; run `report` first" % n)
-    lines = registration_coverage(spec, ws, bench, n)
+    lines, waived = registration_coverage(spec, ws, bench, n)
     if bench.get("gate") != gate: raise EvalError("iteration-%d gate.json does not match benchmark.json; re-run `report`" % n)
     m = bench.get("metadata") or {}
     now_skill, now_evals = skill_tree_hash(spec["skill_dir"]), gate_hash("eval_set", spec, ws)
@@ -3710,28 +3721,45 @@ def registration_record(spec, ws, shown=None):
                         "registering" % (n, (m.get("skill_sha256") or "<unrecorded>")[:12], now_skill[:12]))
     if not m.get("eval_set_sha256") or m["eval_set_sha256"] != now_evals:
         raise EvalError("iteration-%d used a different eval set than the one on disk; re-run the eval" % n)
-    approval = "auto"
+    approval, relied = "auto", {}
     if gate["needs_approval"]:
         approval, v = approval_record("registration", spec, ws)
         if v.status != "approved":
             raise EvalError("iteration-%d has problems %s; registration needs `approve --gate registration` (%s)"
                             % (n, gate["problems"], "missing" if v.status == "missing" else "%s: %s" % (v.status, v.reason)))
+        relied["registration"] = approval
+    for tool in waived:
+        rec, v = approval_record(approvals.WAIVER_PREFIX + tool, spec, ws)
+        if v.status != "approved": raise EvalError("the waiver %s%s changed while registering" % (approvals.WAIVER_PREFIX, tool))
+        relied[approvals.WAIVER_PREFIX + tool] = rec
     now_rules = ruleset_sha256()
     if m.get("ruleset_sha256") != now_rules:
         raise EvalError("iteration-%d ran under ruleset %s but the rules now hash to %s; re-run the eval before "
                         "registering" % (n, (m.get("ruleset_sha256") or "<unrecorded>")[:12], now_rules[:12]))
+    version = registry.version_of(unit_spec(spec["skill_dir"])[1])
+    if registry.parse_semver(version) is None:
+        raise EvalError("SKILL.md %s; set metadata.version to a SemVer 2.0.0 version such as 1.0.0 (MAJOR.MINOR.PATCH, no "
+                        "leading zeros, no v) before registering" % ("has no version" if version in ("", None) else
+                                                                    "version %r is not SemVer 2.0.0" % (version,)))
+    rec = {"registration_format": registry.REGISTRATION_FORMAT, "kind": "skill", "skill_name": spec["skill_name"],
+           "version": version, "skill_path": registry.posix_rel(spec["skill_dir"], ws), "iteration": n,
+           "benchmark_sha256": gate_hash("iteration-%d" % n, spec, ws), "skill_sha256": now_skill,
+           "eval_set_sha256": now_evals,
+           "skill_md_sha256": sha256_files(os.path.join(spec["skill_dir"], "SKILL.md")), "ruleset_sha256": now_rules,
+           "approvals": relied, "registered_at": now_iso(), "approval": approval}
+    errors = registration_schema_errors(rec)
+    if errors:
+        raise EvalError("the record does not match %s (%s at /%s); nothing was signed" % (
+            registry.SCHEMA_NAME, errors[0][2], "/".join(map(str, errors[0][0]))))
     if shown is not None: shown.extend(lines)
-    return {"skill_name": spec["skill_name"], "skill_path": spec["skill_dir"], "iteration": n,
-            "benchmark_sha256": gate_hash("iteration-%d" % n, spec, ws), "skill_sha256": now_skill,
-            "eval_set_sha256": now_evals,
-            "skill_md_sha256": sha256_files(os.path.join(spec["skill_dir"], "SKILL.md")), "ruleset_sha256": now_rules,
-            "registered_at": now_iso(), "approval": approval}
+    return rec
 
 REGISTRATION_SIGNED = ("skill_name", "iteration", "benchmark_sha256", "skill_sha256", "eval_set_sha256", "skill_md_sha256",
-                       "ruleset_sha256")
+                       "ruleset_sha256", "registration_format", "kind", "version", "skill_path", "approvals", "approval",
+                       "registered_at")
 
 def registration_hash(rec):
-    """What a register signature covers: the identity fields of the registration record."""
+    """What a register signature covers: every field of the registration record but the signature itself."""
     if not all(k in rec for k in REGISTRATION_SIGNED): return None
     return hashlib.sha256(json.dumps({k: rec[k] for k in REGISTRATION_SIGNED}, sort_keys=True,
                                      separators=(",", ":")).encode("utf-8")).hexdigest()
@@ -3752,15 +3780,129 @@ def _register_with(load):
         spec, ws = load()
         shown = []
         rec = registration_record(spec, ws, shown)
+        try: old = rjson(os.path.join(ws, "registration.json"))
+        except (ValueError, RecursionError): old = None
+        problem = registry.bump_problem(rec, old)
+        if problem: raise EvalError("%s; nothing was signed" % problem)
         st.update(rec=rec, ws=ws)
         return approvals.Prepared(spec["skill_name"], registration_hash(rec), rec["ruleset_sha256"],
-                                  ["register %s=%s" % (k, rec[k]) for k in REGISTRATION_SIGNED] +
+                                  ["register %s=%s" % (k, rec[k]) for k in REGISTRATION_SIGNED
+                                   if k not in ("approvals", "approval")] +
+                                  ["register approvals: %s" % (", ".join(sorted(rec["approvals"])) or "none")] +
                                   ["register approval: %s" % ("auto (clean gate)" if rec["approval"] == "auto" else
                                                               "signed registration gate")] + shown)
     grant = APPROVER["it"].sign("register", "registration", prepare)
     rec = dict(st["rec"], signed=grant.record)
     wjson(os.path.join(st["ws"], "registration.json"), rec)
     return rec
+
+# ---------- registry and hub (unit B5) ----------
+HUB_AGENT = "not-run: no agent registration (gates.md G48)"
+HUB_NO_ITERATION = "not-run: no eval iteration"
+
+def unit_spec(unit_dir):
+    """(spec, frontmatter) of a skill folder without reading its eval set: the SKILL.md name, else the folder name."""
+    import eva
+    text, err = eva.read_text(os.path.join(unit_dir, "SKILL.md"))
+    meta = (eva.parse_frontmatter(text)[0] if not err else None) or {}
+    return {"skill_name": registry.unit_name(unit_dir, meta), "skill_dir": unit_dir}, meta
+
+def registration_schema_errors(rec):
+    from engine import schema
+    return schema.compile_schema(schema.load(os.path.join(RULESET_ROOT, registry.SCHEMA_NAME))).validate(rec)
+
+def registration_state(unit_dir, ws=None):
+    """(state, reason, record) of the unit's registration record, verified now (engine/registry.classify, B5 D4): the
+    register signature, the hashes it binds and every approval it relied on are checked against the files as they are.
+    Reads records and hashes only. ws: the workspace (default: the unit's). An agent is always unregistered."""
+    import eva
+    kind = eva.detect_kind(unit_dir)
+    spec, meta = unit_spec(unit_dir)
+    ws = ws or (registry.unit_workspace(unit_dir, meta) if kind == "skill" else None)
+    rules = []
+    def ruleset():
+        if not rules: rules.append(ruleset_sha256())
+        return rules[0]
+    def signature(rec):
+        return APPROVER["it"].verdict(rec["signed"], "register", "registration", spec["skill_name"], registration_hash(rec),
+                                      ruleset())
+    def current(rec):
+        yield "skill_sha256", skill_tree_hash(unit_dir)
+        yield "eval_set_sha256", gate_hash("eval_set", spec, ws)
+        yield "skill_md_sha256", sha256_files(os.path.join(unit_dir, "SKILL.md"))
+        yield "benchmark_sha256", gate_hash("iteration-%d" % rec["iteration"], spec, ws)
+        yield "version", registry.version_of(meta)
+    def approval(gate, copy):
+        return APPROVER["it"].verdict(copy, "approve", gate, spec["skill_name"], gate_hash(gate, spec, ws), ruleset())
+    return registry.classify(kind, ws, unit_dir, registration_schema_errors, signature, current, approval)
+
+def view_coverage(row):
+    """({tool: status}, iteration) for the hub: recomputed with runs_coverage from the runs and planned engines of one
+    benchmark.json, never its stored tool_coverage. The benchmark is the recorded iteration's while a registered or stale
+    record names one that exists, else the last iteration's."""
+    import eva
+    if row["kind"] != "skill": return {t: HUB_AGENT for t in eva.TOOLS}, None
+    ws, rec = row["workspace"], row["record"]
+    bench_path = lambda k: os.path.join(ws, "iteration-%d" % k, "benchmark.json")
+    n = rec.get("iteration") if isinstance(rec, dict) and row["registration"] in ("registered", "stale") else None
+    if not (type(n) is int and os.path.isfile(bench_path(n))):
+        its = iterations(ws) if ws else []
+        n = its[-1] if its else None
+    if n is None: return {t: HUB_NO_ITERATION for t in eva.TOOLS}, None
+    try: got = benchmark_runs(rjson(bench_path(n)))
+    except (OSError, ValueError, RecursionError): got = None
+    if got is None: return {t: "not-run: iteration-%d has no readable benchmark.json" % n for t in eva.TOOLS}, n
+    runs, planned = got
+    return {t: c["status"] for t, c in runs_coverage(planned, runs).items()}, n
+
+def unit_view(root, row):
+    """What the hub shows for one eva.build_index row (B5 D8): the row's check, English, parity and registration results,
+    the coverage per tool, the scripts flag, which agent wrappers exist, and the hashes."""
+    import eva
+    u = os.path.join(root, row["path"])
+    rec = row["record"] if isinstance(row["record"], dict) else {}
+    registered = row["registration"] == "registered"
+    coverage, n = view_coverage(row)
+    hashes = {"tree_sha256": skill_tree_hash(u)}
+    hashes.update((k, rec[k]) for k in registry.RECORD_HASHES
+                  if isinstance(rec.get(k), str) and approvals.SHA_RE.fullmatch(rec[k]))
+    label = (("registered %s by %s" % (rec["version"], rec["signed"]["principal"])) if registered else
+             registry.label(row["registration"], row["registration_reason"], rec))
+    files = eva.unit_tree(u).files
+    return {"kind": row["kind"], "name": row["name"], "description": row["description"],
+            "version": rec["version"] if registered else row["version"], "path": row["path"].replace(os.sep, "/"),
+            "registration": row["registration"], "registration_label": label,
+            "verdict": row["verdict"], "score": row["score"], "english": row["english"], "parity": row["parity"],
+            "coverage": coverage, "coverage_iteration": n, "hashes": hashes,
+            "scripts": any("scripts" in f.split("/")[:-1] or f.endswith((".py", ".sh", ".js")) for f in files),
+            "wrappers": {t: os.path.isfile(os.path.join(u, *eva._wrapper_rel(t, row["name"]).split("/")))
+                         for t in eva.TOOLS} if row["kind"] == "agent" else {},
+            "approvals": [{"gate": g, "principal": a["principal"], "reason": a.get("reason")}
+                          for g, a in sorted(rec["approvals"].items())] if registered else []}
+
+def hub_build(root, out, templates=None):
+    """`hub build`: (exit code, lines). The site is rendered in memory from eva.build_index (the same rows and registry
+    document as `eva.py index`), scanned (engine/hub.scan), and written into out only when out is absent or empty and
+    the scan found nothing. Exit 2: out is not usable or two units share a page; exit 1: the scan refused the site."""
+    import eva
+    from engine import hub
+    problem = hub.out_problem(out)
+    if problem: return 2, [problem]
+    try: rows, _ = eva.build_index(root)
+    except eva.rule_runner.BundleError as ex: return 2, ["bundle error: %s" % ex]
+    try:
+        files = hub.render([unit_view(root, r) for r in rows], registry.document_text(registry.document(root, rows)),
+                           eva.TOOL_LABELS, templates)
+    except hub.HubError as ex:
+        return 2, [str(ex)]
+    local = {os.path.abspath(root), os.path.realpath(root), os.path.expanduser("~")}
+    findings = hub.scan(files, local)
+    if findings: return 1, ["hub build: the output scan refused the site, nothing was written:"] + findings
+    try: hub.write(out, files)
+    except hub.HubError as ex: return 2, [str(ex)]
+    registered = sum(r["registration"] == "registered" for r in rows)
+    return 0, ["hub build: %d units -> %s (index.html, registry.json, style.css, %d unit pages; %d registered)"
+               % (len(rows), out, len(rows), registered)]
 
 class ClaudeBuilder:
     """The only builder `loop --live` accepts: one metered `claude -p` call per iteration through live_exec, run in the
@@ -5394,6 +5536,13 @@ def build_parser():
                    "1 when any changed")
     sp.add_parser("approver-check", help="the approver key needs a passphrase and is not loaded in ssh-agent; the "
                   "approvers file lists it (~/.config/skill-master)")
+    s = sp.add_parser("hub", help="the static registry site (no network, no push; publishing is a git push by a person)")
+    x = s.add_subparsers(dest="hub_cmd", required=True).add_parser(
+        "build", help="write index.html, registry.json, style.css and one page per unit of ROOT into --out, after an "
+                      "English-only and link scan of every file")
+    x.add_argument("root", nargs="?", default=".")
+    x.add_argument("--out", required=True, help="an absent or empty folder")
+    x.add_argument("--templates", help="a folder with index.html, unit.html and style.css (default engine/hub_templates)")
     s = sp.add_parser("agent", help="evaluate an AGENT.md v2 agent per tool from its typed scenarios (validate, plan, "
                       "run, grade, report) and improve it in a loop whose builder may change only AGENT.md (loop)")
     asp = s.add_subparsers(dest="agent_cmd", required=True)
@@ -5460,6 +5609,10 @@ def main(argv=None):
 
 def _dispatch(a):
     if a.cmd == "agent": return agent_dispatch(a)
+    if a.cmd == "hub":
+        rc, lines = hub_build(a.root, a.out, a.templates)
+        print("\n".join(lines), file=sys.stdout if rc == 0 else sys.stderr)
+        return rc
     if a.cmd == "builder-check": return builder_check(a.skill, a.workspace, a.compare)
     if a.cmd in ("approve", "register"):  # the human gate runs before the eval set is read, the same for every fixture
         def load():
@@ -5467,8 +5620,8 @@ def _dispatch(a):
             return spec, os.path.realpath(a.workspace) if a.workspace else default_workspace(spec)
         if a.cmd == "approve":
             rec = _approve_with(a.gate, load); print("approved %s sha256=%s" % (a.gate, rec["sha256"][:12])); return 0
-        rec = _register_with(load); print("registered %s iteration-%d (%s)" % (rec["skill_name"], rec["iteration"],
-                                          "auto" if rec["approval"] == "auto" else "approved")); return 0
+        rec = _register_with(load); print("registered %s %s iteration-%d (%s)" % (rec["skill_name"], rec["version"],
+                                          rec["iteration"], "auto" if rec["approval"] == "auto" else "approved")); return 0
     if hasattr(a, "auth_profile"): select_auth_profile(a.auth_profile)  # plan/estimate/dry runs: personal-mac by default
     spec, problems = load_eval_set(a.skill)
     if a.cmd == "validate":  # before the workspace: an unsafe SKILL.md name is reported, not raised

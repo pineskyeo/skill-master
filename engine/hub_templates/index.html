@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Skill Master registry</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+<h1>Skill Master registry</h1>
+<p>{{summary}}</p>
+</header>
+<main>
+<table class="units">
+<thead>
+<tr><th>kind</th><th>name</th><th>version</th><th>registration</th><th>verdict</th><th>English</th><th>parity per tool</th><th>coverage per tool</th><th>scripts</th></tr>
+</thead>
+<tbody>
+{{rows}}
+</tbody>
+</table>
+<p class="foot">Every badge is computed from the unit's records and checks when the site is built. A unit is registered only while its signed registration verifies against the files. The machine-readable list of registered units is <a href="registry.json">registry.json</a>.</p>
+</main>
+</body>
+</html>

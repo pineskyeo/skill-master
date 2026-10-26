@@ -93,7 +93,9 @@ class TestCommands(unittest.TestCase):
     def test_index(self):
         eva.main(["index", self.tmp])
         reg = json.load(open(os.path.join(self.tmp, "registry.json")))
-        self.assertEqual(len(reg), 6); self.assertTrue(os.path.exists(os.path.join(self.tmp, "INDEX.md")))
+        self.assertEqual(reg, {"registry_format": 1, "units": []}, "no bad/ unit has a registration that verifies")
+        rows = [ln for ln in open(os.path.join(self.tmp, "INDEX.md")).read().splitlines() if ln.startswith(("| skill |", "| agent |"))]
+        self.assertEqual(len(rows), 6); self.assertTrue(all("| unregistered |" in ln for ln in rows), rows)
     def test_transcript_without_citations_fails(self):
         r = eva.grade_transcript(RA, p("transcripts/research-followup.json"))
         self.assertEqual(r.verdict, "FAIL")

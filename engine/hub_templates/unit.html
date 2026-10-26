@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{name}} - Skill Master registry</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<header>
+<p><a href="../index.html">All units</a></p>
+<h1>{{name}}</h1>
+<p class="meta">{{kind}} at <code>{{path}}</code></p>
+</header>
+<main>
+<p class="description">{{description}}</p>
+<h2>Badges</h2>
+<ul class="badges">
+{{badges}}
+</ul>
+<p class="note">{{coverage_note}}</p>
+<h2>Hashes</h2>
+<ul class="hashes">
+{{hashes}}
+</ul>
+<h2>Approvals the registration relied on</h2>
+<ul class="approvals">
+{{approvals}}
+</ul>
+<h2>Copy into a project</h2>
+<p>Run a block in the project folder. <code>&lt;clone&gt;</code> is your local git clone of this repository. Each block copies the unit into the project scope of one tool.</p>
+{{snippets}}
+</main>
+</body>
+</html>

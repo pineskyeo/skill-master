@@ -183,8 +183,9 @@ class TestRegistrationDecision(unittest.TestCase):
         before = self.snapshot()
         rec = self.decide()
         self.assertEqual(self.snapshot(), before)
-        self.assertEqual(rec["skill_path"], os.path.realpath(self.skill))
-        drop = ("registered_at", "skill_path", "approval", "benchmark_sha256")
+        self.assertEqual(rec["skill_path"], "../csv-cleaner")
+        drop = ("registered_at", "skill_path", "approval", "benchmark_sha256", "registration_format", "kind", "version",
+                "approvals")
         self.assertEqual({k: v for k, v in rec.items() if k not in drop},
                          dict({k: v for k, v in reg.items() if k not in drop}, ruleset_sha256=se.ruleset_sha256()))
         self.assertEqual(rec["benchmark_sha256"], se.sha256_files(bp))

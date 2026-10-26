@@ -1,0 +1,17 @@
+body { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; margin: 2rem; color: #1f2328; background: #ffffff; }
+h1 { font-size: 1.6rem; margin: 0 0 0.5rem 0; }
+h2 { font-size: 1.15rem; margin-top: 1.8rem; }
+h3 { font-size: 1rem; margin: 0 0 0.3rem 0; }
+code, pre { font-family: Menlo, Consolas, monospace; font-size: 0.85rem; }
+pre { background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 6px; padding: 0.6rem; overflow-x: auto; }
+table.units { border-collapse: collapse; width: 100%; }
+table.units th, table.units td { border-bottom: 1px solid #d0d7de; padding: 0.4rem 0.5rem; text-align: left; vertical-align: top; }
+.badge { display: inline-block; border-radius: 4px; padding: 0.05rem 0.4rem; margin: 0.1rem 0.1rem; font-size: 0.8rem; border: 1px solid transparent; }
+.badge.ok { background: #dafbe1; border-color: #4ac26b; }
+.badge.bad { background: #ffebe9; border-color: #ff8182; }
+.badge.warn { background: #fff8c5; border-color: #d4a72c; }
+.badge.muted { background: #f6f8fa; border-color: #d0d7de; color: #57606a; }
+ul.badges, ul.hashes, ul.approvals { list-style: none; padding-left: 0; }
+ul.hashes li { margin: 0.15rem 0; }
+.snippet { margin: 0.8rem 0 1.2rem 0; }
+.note, .meta, .foot { color: #57606a; }

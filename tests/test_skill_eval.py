@@ -119,7 +119,7 @@ def rjson(path):
     with open(path, encoding="utf-8") as f: return json.load(f)
 
 SKILL_MD = ("---\nname: branch-setup\ndescription: Creates a git worktree and branch for new work. Use when the user "
-            "starts a new task and wants a fresh branch.\n---\n# Branch Setup\n## Inputs\n- task\n## Outputs\n- branch\n"
+            "starts a new task and wants a fresh branch.\nmetadata:\n  version: 1.0.0\n---\n# Branch Setup\n## Inputs\n- task\n## Outputs\n- branch\n"
             "## Example\nInput: start a task -> Output: feat/x\n")
 TRIGGERS = [{"query": "SHOULD start task %d" % i, "should_trigger": True} for i in range(10)] + \
            [{"query": "explain repo %d" % i, "should_trigger": False} for i in range(10)]

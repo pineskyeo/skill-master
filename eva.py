@@ -5,7 +5,7 @@ import argparse, codecs, collections, json, os, posixpath, re, shlex, shutil, sy
 from engine.loaders import (TomlError, _DQ_ESCAPES, _DQ_HEX, _TOML_BARE_KEY_RE, _TOML_ESCAPES, _TOML_FLOAT_RE, _TOML_INT_RE,
                             _TomlReader, _YAML_TYPED_RE, _block_scalar, _plain_scalar_error, _quoted_end, _scalar,
                             _strip_comment, _unquote, parse_flat_toml, parse_frontmatter_ex, yaml_typed_keys)
-from engine import rule_runner
+from engine import registry, rule_runner
 from engine.primitives import description_heuristics, heading_present, local_refs as refs_primitive
 from engine.primitives import parity as parity_primitive, script_denylist, transcript as transcript_primitive
 from engine.primitives.transcript import (CMD_KEYS, CWD_KEYS, FILELINE_RE, GIT_HISTORY_RE, GREP_LINE_RE, NOT_READ_TOOL_WORDS,
@@ -1554,22 +1554,32 @@ def english_state(rep):
     return "review" if any(c["status"] == "needs-review" for c in lang) else "pass"
 
 def build_index(root):
+    """(rows, INDEX.md text): one row per unit with its check, English, parity and registration state, verified now
+    (skill_eval.registration_state, imported only for a record that needs its signature and hashes checked).
+    engine/registry.document builds registry.json from the registered rows only."""
     reg = []
     for u in find_units(root):
         kind = detect_kind(u)
         raw, _ = read_text(os.path.join(u, "SKILL.md" if kind == "skill" else "AGENT.md"))
         meta = (parse_frontmatter(raw)[0] if raw is not None else None) or {}
         rep = check(u)
-        reg.append({"kind": kind, "name": meta.get("name", ""), "version": (meta.get("metadata") or {}).get("version", meta.get("version", "")) if isinstance(meta.get("metadata", {}), dict) else meta.get("version", ""),
+        ws = registry.unit_workspace(u, meta) if kind == "skill" else None
+        state, reason, rec = registry.early_state(kind, ws)
+        if state is None:
+            import skill_eval
+            state, reason, rec = skill_eval.registration_state(u, ws)
+        reg.append({"kind": kind, "name": meta.get("name", ""), "version": registry.version_of(meta),
                     "description": meta.get("description", ""), "path": os.path.relpath(u, root),
                     "verdict": rep.verdict, "score": rep.score,
                     "english": english_state(rep),
-                    "parity": {t: st["status"] for t, st in parity_status(u).items()}})
-    md = ["# INDEX", "", "| kind | name | version | verdict | score | english | parity | path | description |",
-          "|---|---|---|---|---|---|---|---|---|"]
+                    "parity": {t: st["status"] for t, st in parity_status(u).items()},
+                    "registration": state, "registration_reason": reason, "record": rec, "workspace": ws})
+    md = ["# INDEX", "", "| kind | name | version | verdict | score | english | parity | registration | path | description |",
+          "|---|---|---|---|---|---|---|---|---|---|"]
     for e in reg:
-        md.append("| %s | %s | %s | %s | %.2f | %s | %s | %s | %s |" % (e["kind"], e["name"], e["version"], e["verdict"],
-                  e["score"], e["english"], " ".join("%s=%s" % kv for kv in e["parity"].items()), e["path"],
+        md.append("| %s | %s | %s | %s | %.2f | %s | %s | %s | %s | %s |" % (e["kind"], e["name"], e["version"],
+                  e["verdict"], e["score"], e["english"], " ".join("%s=%s" % kv for kv in e["parity"].items()),
+                  registry.label(e["registration"], e["registration_reason"], e["record"]).replace("|", "/"), e["path"],
                   str(e["description"]).replace("|", "/")[:120]))
     return reg, "\n".join(md) + "\n"
 
@@ -1652,9 +1662,10 @@ def main(argv=None):
         return EXIT_CODES[r.verdict]
     if a.cmd == "index":
         reg, md = build_index(a.path)
-        open(os.path.join(a.path, "INDEX.md"), "w", encoding="utf-8").write(md)
-        json.dump(reg, open(os.path.join(a.path, "registry.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=2)
-        print("indexed %d units -> INDEX.md, registry.json" % len(reg))
+        doc = registry.document(a.path, reg)
+        for name, text in (("INDEX.md", md), ("registry.json", registry.document_text(doc))):
+            with open(os.path.join(a.path, name), "w", encoding="utf-8") as f: f.write(text)
+        print("indexed %d units -> INDEX.md, registry.json (%d registered)" % (len(reg), len(doc["units"])))
         return 0
 
 if __name__ == "__main__":

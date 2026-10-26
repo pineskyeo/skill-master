@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "registry.json",
+  "description": "The registry document `eva.py index` and `skill_eval.py hub build` write (unit B5, engine/registry.py document): one entry per unit whose registration.json verifies now, sorted by kind, name, then version descending. path and workspace are POSIX paths relative to the indexed root. The hashes, iteration, registered_at and principals are copied from the verified record.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["registry_format", "units"],
+  "properties": {
+    "registry_format": {"const": 1},
+    "units": {"type": "array", "items": {"$ref": "#/$defs/entry"}}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}\\Z"},
+    "principal": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._@+-]{0,63}\\Z"},
+    "relpath": {"type": "string", "pattern": "^[^/~\\\\][^\\\\]*\\Z"},
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "name", "version", "path", "workspace", "iteration", "benchmark_sha256", "skill_sha256",
+                   "eval_set_sha256", "skill_md_sha256", "ruleset_sha256", "registered_at", "registered_by", "approvals"],
+      "properties": {
+        "kind": {"const": "skill"},
+        "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}\\Z"},
+        "version": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?\\Z"
+        },
+        "path": {"$ref": "#/$defs/relpath"},
+        "workspace": {"$ref": "#/$defs/relpath"},
+        "iteration": {"type": "integer", "minimum": 1},
+        "benchmark_sha256": {"$ref": "#/$defs/sha256"},
+        "skill_sha256": {"$ref": "#/$defs/sha256"},
+        "eval_set_sha256": {"$ref": "#/$defs/sha256"},
+        "skill_md_sha256": {"$ref": "#/$defs/sha256"},
+        "ruleset_sha256": {"$ref": "#/$defs/sha256"},
+        "registered_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\\Z"},
+        "registered_by": {"$ref": "#/$defs/principal"},
+        "approvals": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["gate", "principal"],
+            "properties": {
+              "gate": {"enum": ["registration", "coverage_waiver:claude", "coverage_waiver:codex", "coverage_waiver:opencode",
+                                "coverage_waiver:hermes"]},
+              "principal": {"$ref": "#/$defs/principal"},
+              "reason": {"type": "string", "pattern": "^[!-~]([ -~]{0,198}[!-~])?\\Z"}
+            }
+          }
+        }
+      }
+    }
+  }
+}
