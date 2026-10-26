@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Agent run transcript (eva.py check --transcript)",
-  "description": "{\"scenario\": str, \"final\": str, \"workspace\": str (optional), \"tool_calls\": [\"<tool>\" | {\"tool\": str, \"input\": any (optional), \"result\": str (optional)}], \"tool_results\": [str] (optional)}. A $defs entry with a description is a message rule. Fix: write the transcript as {\"scenario\": str, \"tool_calls\": [...], \"final\": str} (see LOOP.md).",
-  "$comment": "source: house (eva.py load_transcript, transcript v1); severity: fail (the transcript-valid row of grade_transcript, must; no bundle rule, brief D2: a transcript is not a unit); protects: claude, codex, opencode, hermes.",
+  "title": "Agent run transcript (eva.py check --transcript; skill_eval.py agent grade)",
+  "description": "{\"scenario\": str, \"final\": str, \"workspace\": str (optional), \"tool_calls\": [\"<tool>\" | {\"tool\": str, \"input\": any (optional), \"result\": str (optional), \"id\": str (optional), \"is_error\": bool (optional)}], \"tool_results\": [str] (optional)}, plus the optional fields a normalizer of engine/normalize/ writes: tool (claude, codex, opencode or hermes), format, model, session_id, turns ([{\"user\": str, \"final\": str}]), usage ({\"input_tokens\": int, \"output_tokens\": int}), cost_usd (number or null), is_error (bool) and agent_loaded (verified, unverified or not-loaded). A $defs entry with a description is a message rule. Fix: write the transcript as {\"scenario\": str, \"tool_calls\": [...], \"final\": str} (see LOOP.md).",
+  "$comment": "source: house (eva.py load_transcript, transcript v1; unit B3 D5: the normalized form is a strict superset of v1, optional fields only); severity: fail (the transcript-valid row of grade_transcript, must; no bundle rule, brief D2: a transcript is not a unit); protects: claude, codex, opencode, hermes.",
   "$ref": "#/$defs/transcript",
   "$defs": {
     "nonblank": {"type": "string", "pattern": "\\S"},
@@ -13,7 +13,16 @@
         {"$ref": "#/$defs/final"},
         {"$ref": "#/$defs/workspace"},
         {"$ref": "#/$defs/tool-calls"},
-        {"$ref": "#/$defs/tool-results"}
+        {"$ref": "#/$defs/tool-results"},
+        {"$ref": "#/$defs/tool"},
+        {"$ref": "#/$defs/format"},
+        {"$ref": "#/$defs/model"},
+        {"$ref": "#/$defs/session-id"},
+        {"$ref": "#/$defs/turns"},
+        {"$ref": "#/$defs/usage"},
+        {"$ref": "#/$defs/cost-usd"},
+        {"$ref": "#/$defs/is-error"},
+        {"$ref": "#/$defs/agent-loaded"}
       ]},
       "else": {"$ref": "#/$defs/transcript-object"}
     },
@@ -29,7 +38,7 @@
     "tool-calls-list": {"description": "tool_calls: list required", "required": ["tool_calls"], "properties": {"tool_calls": {"type": "array"}}},
     "tool-call": {
       "if": {"$ref": "#/$defs/tool-call-shape"},
-      "then": {"if": {"type": "object"}, "then": {"allOf": [{"$ref": "#/$defs/tool-call-result"}, {"$ref": "#/$defs/tool-call-fields"}]}},
+      "then": {"if": {"type": "object"}, "then": {"allOf": [{"$ref": "#/$defs/tool-call-result"}, {"$ref": "#/$defs/tool-call-fields"}, {"$ref": "#/$defs/tool-call-id"}, {"$ref": "#/$defs/tool-call-is-error"}]}},
       "else": {"$ref": "#/$defs/tool-call-shape"}
     },
     "tool-call-shape": {
@@ -39,9 +48,26 @@
     "tool-call-result": {"description": "tool_calls[%(i)s].result: string required", "properties": {"result": {"type": "string"}}},
     "tool-call-fields": {
       "description": "tool_calls[%(i)s]: unknown fields %(extra)s",
-      "properties": {"tool": true, "input": true, "result": true},
+      "properties": {"tool": true, "input": true, "result": true, "id": true, "is_error": true},
       "additionalProperties": {"not": {}}
     },
-    "tool-results": {"description": "tool_results: list of strings required", "properties": {"tool_results": {"type": "array", "items": {"type": "string"}}}}
+    "tool-call-id": {"description": "tool_calls[%(i)s].id: non-empty string required", "properties": {"id": {"$ref": "#/$defs/nonblank"}}},
+    "tool-call-is-error": {"description": "tool_calls[%(i)s].is_error: true or false required", "properties": {"is_error": {"type": "boolean"}}},
+    "tool-results": {"description": "tool_results: list of strings required", "properties": {"tool_results": {"type": "array", "items": {"type": "string"}}}},
+    "tool": {"description": "tool: one of claude, codex, opencode, hermes required", "properties": {"tool": {"enum": ["claude", "codex", "opencode", "hermes"]}}},
+    "format": {"description": "format: non-empty string required", "properties": {"format": {"$ref": "#/$defs/nonblank"}}},
+    "model": {"description": "model: non-empty string required", "properties": {"model": {"$ref": "#/$defs/nonblank"}}},
+    "session-id": {"description": "session_id: non-empty string required", "properties": {"session_id": {"$ref": "#/$defs/nonblank"}}},
+    "turns": {
+      "description": "turns: list of {\"user\": str, \"final\": str} objects required",
+      "properties": {"turns": {"type": "array", "items": {"type": "object", "required": ["user", "final"], "properties": {"user": {"type": "string"}, "final": {"type": "string"}}, "additionalProperties": false}}}
+    },
+    "usage": {
+      "description": "usage: {\"input_tokens\": int >= 0, \"output_tokens\": int >= 0} required",
+      "properties": {"usage": {"type": "object", "required": ["input_tokens", "output_tokens"], "properties": {"input_tokens": {"type": "integer", "minimum": 0}, "output_tokens": {"type": "integer", "minimum": 0}}, "additionalProperties": false}}
+    },
+    "cost-usd": {"description": "cost_usd: number >= 0 or null required", "properties": {"cost_usd": {"anyOf": [{"type": "null"}, {"type": "number", "minimum": 0}]}}},
+    "is-error": {"description": "is_error: true or false required", "properties": {"is_error": {"type": "boolean"}}},
+    "agent-loaded": {"description": "agent_loaded: one of verified, unverified, not-loaded required", "properties": {"agent_loaded": {"enum": ["verified", "unverified", "not-loaded"]}}}
   }
 }

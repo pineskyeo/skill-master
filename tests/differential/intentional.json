@@ -571,5 +571,10 @@
  "messages:scenario_errors:turn-user-blank": "scenario v2 messages (brief B1 D3): both schemas reject the case, v2 names the v2 fields",
  "messages:scenario_errors:turn-user-missing": "scenario v2 messages (brief B1 D3): both schemas reject the case, v2 names the v2 fields",
  "messages:scenario_errors:turns-empty": "scenario v2 messages (brief B1 D3): both schemas reject the case, v2 names the v2 fields",
- "messages:scenario_errors:turns-missing": "scenario v2 messages (brief B1 D3): both schemas reject the case, v2 names the v2 fields"
+ "messages:scenario_errors:turns-missing": "scenario v2 messages (brief B1 D3): both schemas reject the case, v2 names the v2 fields",
+ "accept:load_transcript:normalized-fields-bad": "normalized transcript fields (unit B3 D5): v1 ignored unknown top-level keys, the superset types tool, format, model, session_id, turns, usage, cost_usd, is_error and agent_loaded",
+ "data:load_transcript:normalized-fields-bad": "normalized transcript fields (unit B3 D5): v1 ignored unknown top-level keys, the superset types tool, format, model, session_id, turns, usage, cost_usd, is_error and agent_loaded",
+ "messages:load_transcript:normalized-fields-bad": "normalized transcript fields (unit B3 D5): v1 ignored unknown top-level keys, the superset types tool, format, model, session_id, turns, usage, cost_usd, is_error and agent_loaded",
+ "transcript-rows:variant:transcript:normalized-fields-bad": "normalized transcript fields (unit B3 D5): v1 ignored unknown top-level keys, the superset types tool, format, model, session_id, turns, usage, cost_usd, is_error and agent_loaded",
+ "messages:load_transcript:tool-call-normalized-fields-bad": "normalized transcript fields (unit B3 D5): a tool call may carry id and is_error, so v2 names their types instead of unknown fields"
 }

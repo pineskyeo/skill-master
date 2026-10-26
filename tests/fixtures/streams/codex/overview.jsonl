@@ -1,0 +1,9 @@
+{"type":"thread.started","thread_id":"00000000-0000-4000-8000-0000000000c1"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"/bin/zsh -lc ls","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"/bin/zsh -lc ls","aggregated_output":"README.md\nsrc\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"I will read the README first."}}
+{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"/bin/zsh -lc 'cat -n README.md'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"/bin/zsh -lc 'cat -n README.md'","aggregated_output":"     1\t# Demo\n     2\t\n     3\tA small demo service.\n     4\tRun the tests with make test.\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"The repository is small. README.md:1 names it Demo and README.md:3 says it is a small demo service. The README also gives the test command."}}
+{"type":"turn.completed","usage":{"input_tokens":5200,"cached_input_tokens":4096,"cache_write_input_tokens":0,"output_tokens":120,"reasoning_output_tokens":64}}

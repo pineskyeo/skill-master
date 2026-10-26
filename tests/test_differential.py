@@ -503,6 +503,10 @@ TRANSCRIPT_VARIANTS = {
     "no-workspace-no-results": (edit(BASE_TRANSCRIPT, workspace=KeyError, tool_results=KeyError), False),
     "final-empty": (edit(BASE_TRANSCRIPT, final="", tool_calls=[]), False),
     "extra-top-keys": (edit(BASE_TRANSCRIPT, note=1), False),
+    "normalized-fields-bad": (edit(BASE_TRANSCRIPT, tool="cursor", format=" ", model=5, session_id="",
+                                   turns=[{"user": "u"}], usage={"input_tokens": -1, "output_tokens": 0}, cost_usd=-0.1,
+                                   is_error="no", agent_loaded="maybe"), False),
+    "tool-call-normalized-fields-bad": (edit(BASE_TRANSCRIPT, tool_calls=[{"tool": "t", "id": 1, "is_error": "x"}]), True),
 }
 
 
@@ -1573,7 +1577,9 @@ class TestA3Variants(unittest.TestCase):
         a4_keys = ["row-map:" + unit] + ["row-map:variant:a4:" + n for n in KO_VARIANTS]
         self.assertEqual(list(intentional())[:10], a4_keys)
         self.assertTrue(all("gates.md G16" in intentional()[k] or "A4 D5" in intentional()[k] for k in a4_keys))
-        self.assertTrue(all(k.startswith(("row-map:", "functions:", "accept:scenario_errors:", "messages:scenario_errors:"))
+        self.assertTrue(all(k.startswith(("row-map:", "functions:", "accept:scenario_errors:", "messages:scenario_errors:",
+                                          "accept:load_transcript:", "data:load_transcript:", "messages:load_transcript:",
+                                          "transcript-rows:variant:transcript:"))
                             for k in list(intentional())[10:]))
         diffs = all_differences()
         d = diffs[a4_keys[0]]

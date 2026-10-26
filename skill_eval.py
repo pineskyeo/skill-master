@@ -15,6 +15,7 @@ variables are refused and scrubbed from every child, and costs are API-equivalen
 Usage: python3 skill_eval.py <validate|estimate|plan|run|grade|calibrate|report|approve|register|snapshot|loop> <skill> ...
        python3 skill_eval.py <approver-check|check-builtin-plugins>
        python3 skill_eval.py builder-check <skill> --workspace <ws> [--compare SAVED]
+       python3 skill_eval.py agent <validate|plan|run|grade|report> <agent> ...  (AGENT.md v2 agents per tool)
        (also reachable as: python3 eva.py eval <subcommand> ...)
 """
 import argparse, contextlib, csv, datetime, errno, hashlib, itertools, json, math, mmap, os, platform, random, re, shlex, shutil, subprocess, sys, tempfile, time
@@ -3981,6 +3982,599 @@ def builder_check(skill, workspace, compare=None):
     print("\n".join(["changed " + writable.shown(n) for n in diff] + ["compare: %d changed" % len(diff)]))
     return 1 if diff else 0
 
+# ---------- agent evaluation (unit B3; data shapes and logic in engine/agent_eval.py) ----------
+class _AgentStream(object):
+    """Keeps the raw stdout of the last call, so the stream is saved even when parse() raises."""
+    def parse(self, stdout):
+        self.last_stream = stdout
+        return super(_AgentStream, self).parse(stdout)
+
+class AgentClaudeEngine(_AgentStream, ClaudeCodeEngine):
+    """`claude -p --agent <name>` (agent_eval.LAUNCH) with the executor's isolation args and per-call cap; the agent is
+    the generated wrapper at .claude/agents/<name>.md of the sandbox. Slash commands (skills) stay off."""
+    def command(self, prompt, with_skill, budget_usd=None, skill_name=None):
+        from engine import agent_eval
+        extra = claude_isolation_args()
+        if self.model: extra += ["--model", self.model]
+        if self.effort: extra += ["--effort", self.effort]
+        if budget_usd is not None: extra += ["--max-budget-usd", "%.2f" % budget_usd]
+        return agent_eval.launch_argv("claude", skill_name, prompt, extra + ["--disable-slash-commands"] + self.extra_args)
+
+class AgentCodexEngine(_AgentStream, CodexEngine):
+    """`codex exec --json` with the agent asked for by name (agent_eval.LAUNCH, UNVERIFIED house choice); the agent is
+    the generated wrapper at .codex/agents/<name>.toml of the sandbox."""
+    def command(self, prompt, with_skill, budget_usd=None, skill_name=None):
+        from engine import agent_eval
+        extra = ["-m", self.model] if self.model else []
+        if self.effort: extra += ["-c", CODEX_EFFORT_CONFIG % self.effort]
+        return agent_eval.launch_argv("codex", skill_name, prompt, extra + self.extra_args)
+
+AGENT_ENGINES = {"claude": AgentClaudeEngine, "codex": AgentCodexEngine}
+AGENT_CONTROL_DIRS = (".claude/agents", ".codex/agents", ".claude/skills", ".agents/skills")
+
+class Agent(object):
+    """An agent folder as the agent commands read it: realpath, name, the AGENT.md v2 frontmatter (None when invalid)
+    and the valid scenarios (agent_eval.scenarios)."""
+    def __init__(self, path):
+        import eva
+        from engine import agent_eval
+        from engine.primitives import transcript
+        self.dir = os.path.realpath(path)
+        if not os.path.isfile(os.path.join(self.dir, "AGENT.md")):
+            raise EvalError("%s holds no AGENT.md" % path)
+        info = transcript.read_agent(self.dir)
+        self.meta = info.meta if info.valid else None
+        self.name = self.meta["name"] if self.meta else os.path.basename(self.dir)
+        self.scenarios = agent_eval.scenarios(eva.load_scenarios(self.dir))
+    def files(self, tools):
+        """(label, path) of AGENT.md, every scenarios/*.json and the wrappers of tools: what a live start binds."""
+        from engine import agent_eval
+        d = os.path.join(self.dir, "scenarios")
+        rels = ["AGENT.md"] + ["scenarios/" + f for f in sorted(os.listdir(d)) if f.endswith(".json")] \
+            if os.path.isdir(d) else ["AGENT.md"]
+        rels += [agent_eval.wrapper_rel(t, self.name) for t in tools]
+        return [(r, os.path.join(self.dir, *r.split("/"))) for r in rels]
+    def wrapper(self, tool):
+        from engine import agent_eval
+        return ensure_inside(self.dir, os.path.join(self.dir, *agent_eval.wrapper_rel(tool, self.name).split("/")))
+
+AGENT_ROWS = (("AGENT.md v2", ("agent-frontmatter-v2",), True), ("scenario schema", ("scenarios-valid",), True),
+              ("scenarios present", ("scenarios-present",), False), ("tool subset", ("tools-subset",), True),
+              ("tools declared", ("tools-declared",), False))
+
+def agent_rows(agent):
+    """[(label, ok, reason, fails validate)] of the rule bundle rows of AGENT_ROWS (eva.check), then the agent name and
+    scenario id checks of the agent commands."""
+    import eva
+    from engine import agent_eval
+    rows = {c["id"]: c for c in eva.check(agent.dir).checks}
+    out = []
+    for label, ids, hard in AGENT_ROWS:
+        got = [rows.get(i) for i in ids]
+        ok = all(r is not None and r["status"] == "pass" for r in got)
+        reason = "; ".join("%s: %s" % (i, r["reason"] if r else "row missing") for i, r in zip(ids, got))
+        out.append((label, ok, reason, hard))
+    reserved = agent_eval.reserved_agent_name(agent.name)
+    name_reason = ("reserved agent name: Claude lists %r in the init agents of every session (or a colon names a "
+                   "plugin agent), so a run could not show the wrapper was loaded; rename the agent" if reserved else
+                   "%r is not a reserved Claude agent name") % agent.name
+    out.append(("agent name", not reserved, name_reason, True))
+    dup = agent_eval.duplicate_ids(agent.scenarios)
+    files = lambda i: ", ".join(s["file"] for s in agent.scenarios if s["id"] == i)
+    ids_reason = "; ".join("duplicate scenario id %r (%s)" % (i, files(i)) for i in dup) if dup else \
+        "%d scenario id(s), each unique" % len(agent.scenarios)
+    out.append(("scenario ids", not dup, ids_reason, True))
+    return out
+
+def agent_validation_problems(agent):
+    return ["%s %s: %s" % (agent.name, label, reason) for label, ok, reason, hard in agent_rows(agent) if hard and not ok]
+
+def agent_validate(agent):
+    from engine import agent_eval
+    rows = agent_rows(agent)
+    print("agent: %s (%s)" % (agent.name, agent.dir))
+    for label, ok, reason, _ in rows:
+        print("%s: %s (%s)" % (label, "pass" if ok else "fail", reason))
+    for tool, state in agent_eval.wrapper_states(agent.dir).items():
+        print("wrapper %s: %s" % (tool, agent_eval.wrapper_label(state, agent_eval.wrapper_rel(tool, agent.name))))
+    bad = [label for label, ok, _, hard in rows if hard and not ok]
+    print("validate: %s" % ("FAIL (%s)" % ", ".join(bad) if bad else "OK (a missing or out-of-date wrapper is shown "
+                                                                     "per cell by `agent plan`)"))
+    return 1 if bad else 0
+
+def make_agent_engines(a):
+    out, seen = [], set()
+    for name in [n.strip() for n in a.engines.split(",")]:
+        if name in UNAVAILABLE_ENGINES:
+            raise EvalError("engine %r (%s) is not available: no %s engine exists yet, so nothing could be run or graded "
+                            "for it (never faked). Available engines: %s" % (name, UNAVAILABLE_ENGINES[name],
+                                                                           UNAVAILABLE_ENGINES[name], "|".join(ENGINES)))
+        if name not in AGENT_ENGINES: raise EvalError("unknown engine %r (%s)" % (name, "|".join(AGENT_ENGINES)))
+        if name in seen: raise EvalError("engine %r is listed twice in --engines" % name)
+        seen.add(name)
+        extra = (a.claude_arg if name == "claude" else a.codex_arg) or ()
+        if any(x in ("--agent", "--agents") or x.startswith(("--agent=", "--agents=")) for x in extra):
+            raise EvalError("%s extra args may not choose an agent: the agent under test is the generated wrapper" % name)
+        out.append(AGENT_ENGINES[name](model=a.claude_model if name == "claude" else a.codex_model, extra_args=extra,
+                                       effort=_str_opt(a, "claude_effort" if name == "claude" else "codex_effort")))
+    return out
+
+def agent_workspace(a, agent):
+    if a.workspace: return os.path.realpath(a.workspace)
+    if not safe_name(agent.name):
+        raise EvalError("agent name %r is not a safe path component; fix AGENT.md name (or pass --workspace)" % agent.name)
+    return os.path.join(os.path.dirname(agent.dir), agent.name + "-workspace")
+
+def agent_user_scope(name):
+    """{tool: path} of a same-named agent at user scope, which a run could load next to the wrapper under test:
+    <Claude config dir>/agents/<name>.md (the config dir preflight reads) and agents/<name>.toml of ~/.codex and
+    $CODEX_HOME. Read only."""
+    found = {"claude": [os.path.join(claude_config_dir(), "agents", name + ".md")],
+             "codex": [os.path.join(h, "agents", name + ".toml")
+                       for h in (os.path.join(os.path.expanduser("~"), ".codex"), real_codex_home())]}
+    out = {}
+    for tool, paths in found.items():
+        hits = [p for p in paths if os.path.lexists(p)]
+        if hits: out[tool] = hits[0]
+    return out
+
+def agent_cells(agent, engines):
+    from engine import agent_eval
+    targets = (agent.meta or {}).get("targets") or []
+    errors = {t: agent_eval.error_state("a same-named agent is installed at user scope: %s" % p)
+              for t, p in agent_user_scope(agent.name).items()}
+    if agent_eval.reserved_agent_name(agent.name): errors["claude"] = agent_eval.RESERVED_NAME
+    return agent_eval.cell_table(agent.scenarios, targets, [t for t, e in TOOL_ENGINES.items() if e],
+                                 [e.name for e in engines], agent_eval.wrapper_states(agent.dir), errors)
+
+def agent_configs(old):
+    return 2 if old is not None else 1
+
+def agent_estimate(engines, cells, runs, old, prices, tokens):
+    """Exec cost of every planned cell: runs x configurations calls per cell (API-equivalent USD)."""
+    from engine import agent_eval
+    rows = []
+    for e in engines:
+        n = sum(1 for c in cells if c["tool"] == e.name and c["state"] == agent_eval.PLANNED) * runs * agent_configs(old)
+        rows.append(est_row(e.name, "exec", e.model or "%s CLI default" % e.name, n, tokens,
+                            call_cost(tokens["exec"], price_for(e.name, e.model, prices))))
+    return est_result(rows, tokens)
+
+def agent_plan_text(a, agent, old, ws, engines, cells, prices, tokens):
+    from engine import agent_eval
+    per = {e.name: call_cost(tokens["exec"], price_for(e.name, e.model, prices)) for e in engines}
+    calls = a.runs * agent_configs(old)
+    L = ["agent: %s (%s)" % (agent.name, agent.dir), "workspace: %s" % ws,
+         "scenarios: %d valid (%s)" % (len(agent.scenarios), ", ".join("%s: %s, %d turn(s)" % (s["file"], s["id"], s["turns"])
+                                                                    for s in agent.scenarios)),
+         "engines: %s | runs per cell: %d | baseline: %s" % (
+             ", ".join(e.label() for e in engines), a.runs,
+             "previous version %s (%s)" % (old.name, old.dir) if old else
+             "none (pass --old-agent DIR to compare with the previous version)"),
+         "cells (scenario x tool):"]
+    for c in cells:
+        est = ""
+        if c["state"] == agent_eval.PLANNED:
+            p = per.get(c["tool"])
+            est = " (est unpriced: pass --price)" if p is None else " (est $%.2f for %d exec call%s)" % (
+                p * calls, calls, "" if calls == 1 else "s")
+        L.append("cell %s %s: %s%s" % (c["scenario"], c["tool"], c["state"], est))
+    est = agent_estimate(engines, cells, a.runs, old, prices, tokens)
+    L.append("estimate: exec API-equivalent $%.2f over %d call(s)%s" % (
+        est["total_usd"], est["calls"], "; UNPRICED: %s (pass --price)" % ", ".join(est["unpriced_models"])
+        if est["unpriced_models"] else ""))
+    ge = grader_engine_of(a)
+    n_llm = sum(1 for c in cells if c["state"] == agent_eval.PLANNED and any(
+        agent_eval.llm_items(agent.dir, s["data"]) for s in agent.scenarios if s["id"] == c["scenario"])) * calls
+    g = grader_call_usd("grader", ge, a.grader_model, tokens, prices)
+    L.append("grader: %s for llm criteria with `agent grade --live`: %d call(s), est %s" % (
+        grader_label(ge, a.grader_model, _str_opt(a, "grader_effort")), n_llm,
+        "unpriced" if g is None else "$%.2f" % (g * n_llm)))
+    for tool, spec in sorted(agent_eval.LAUNCH.items()):
+        L.append("launch %s: %s (%s: %s)" % (tool, " ".join(
+            json.dumps(x) if " " in x else x for x in agent_eval.launch_argv(tool, agent.name, "<turn 1>")),
+            "verified" if spec["verified"] else "UNVERIFIED", spec["source"]))
+    p = AUTH["profile"]
+    L.append(PERSONAL_DEFAULT_LINE if getattr(a, "auth_profile", None) is None else
+             "auth profile: %s (billing %s)" % (p.name, p.billing))
+    soft = [e.name for e in engines if budget_enforcement(e) == "soft_limit"]
+    L.append("budget: %s%s" % (
+        "--live needs --budget-usd X (a finite cap in API-equivalent USD)" if getattr(a, "budget_usd", None) is None
+        else "--budget-usd $%.2f" % a.budget_usd,
+        "; STRICT (default): --live refuses %s (no per-call cap)" % ", ".join(soft) if soft and a.strict_budget else
+        "; WARNING " + NO_STRICT_WARNING % ", ".join(soft) if soft else ""))
+    L += ["tool coverage (dynamic): " + coverage_line(tool_coverage([e.name for e in engines])),
+          "registration coverage: registration needs a graded run on every tool of coverage_required (%s) or a signed "
+          "coverage_waiver:<tool> (G1, plan.md:1136); agent coverage waivers are not read yet, so a tool that did not "
+          "run stays coverage-missing" % ", ".join(COVERAGE_REQUIRED),
+          "multi-turn: non-interactive continuation is UNVERIFIED for %s; every scenario with more than one turn "
+          "records %s until an operator probe verifies a tool" % (
+              ", ".join(t for t, ok in agent_eval.MULTI_TURN_VERIFIED.items() if not ok), agent_eval.MULTI_TURN)]
+    return "\n".join(L)
+
+class AgentSandbox(object):
+    """One fresh temp folder per agent run: <run_root>/agent-eval-<engine>-XXXX/{work, home, codex_home}. work holds
+    exactly the generated wrapper at project scope; the agent folder and its scenarios stay outside. Removed after the
+    run."""
+    def __init__(self, engine, wrapper, rel, run_root):
+        self.engine, self.run_root, self.rel = engine, os.path.realpath(run_root), rel
+        self.root = tempfile.mkdtemp(prefix="agent-eval-%s-" % engine.name, dir=self.run_root)
+        try:
+            self.work = os.path.join(self.root, "work"); os.makedirs(self.work)
+            dst = ensure_inside(self.work, os.path.join(self.work, *rel.split("/")))
+            os.makedirs(os.path.dirname(dst))
+            shutil.copyfile(wrapper, dst)
+            self.env = engine.sandbox_env(self.root)
+        except BaseException as ex:
+            left = "; ".join(remove_sandbox(engine, self.run_root, self.root))
+            if left and isinstance(ex, Exception): raise EvalError("%s; and %s" % (ex, left)) from ex
+            if left: print("WARNING: " + left, file=sys.stderr)
+            raise
+    def problems(self):
+        out = self.engine.sandbox_problems(self.root, self.work, None, False)
+        found = sorted(os.path.relpath(os.path.join(dp, f), self.work).replace(os.sep, "/")
+                       for dp, _, fn in os.walk(self.work) for f in fn)
+        if found != [self.rel]:
+            out.append("the sandbox work folder holds %s, expected exactly %s" % (found, [self.rel]))
+        for a in ancestors(os.path.dirname(self.root)):
+            for d in AGENT_CONTROL_DIRS:
+                p = os.path.join(a, d)
+                if os.path.isdir(p) and os.listdir(p): out.append("ancestor %s is not empty; every run would see it" % p)
+        return out
+    def record(self):
+        return {"sandbox": self.root, "installed": self.rel, "auth": self.engine.auth_record(),
+                "env_overrides": sorted(k for k in self.env if os.environ.get(k) != self.env[k]),
+                "env_removed": sorted(k for k in os.environ if k not in self.env)}
+    def cleanup(self):
+        problems = []
+        try:
+            problems = list(self.engine.after_run(self.root))
+        finally:
+            problems += remove_sandbox(self.engine, self.run_root, self.root)
+        return problems
+
+def agent_isolated_run(eng, prompt, agent, run_root, cap, user_names, ticket=None):
+    """One CLI call in a fresh AgentSandbox: (result, fatal problems), as isolated_run for skills."""
+    from engine import agent_eval
+    sb = AgentSandbox(eng, agent.wrapper(eng.name), agent_eval.install_rel(eng.name, agent.name), run_root)
+    eng.last_stream = None
+    try:
+        probs = sb.problems()
+        if probs: raise EvalError("isolation (%s): %s" % (eng.name, " | ".join(probs)))
+        res = eng.run(prompt, sb.work, with_skill=False, budget_usd=cap, env=sb.env, skill_name=agent.name,
+                      ticket=ticket)
+        try:
+            iso = eng.isolation_problems(res, False, None, user_names)
+            res["isolation"] = dict(sb.record(), problems=iso)
+        except Exception as ex:
+            iso = []
+            res["launch_failed"] = res.get("launch_failed") or "output handling failed after the call (%s)" % type(ex).__name__
+            res["error"] = res["launch_failed"]
+    except BaseException as ex:
+        after = sb.cleanup()
+        if after and isinstance(ex, Exception): raise EvalError("%s; and %s" % (ex, "; ".join(after))) from ex
+        if after: print("WARNING: " + "; ".join(after), file=sys.stderr)
+        raise
+    after = sb.cleanup()
+    fatal = iso + after
+    if fatal and not res.get("error"): res["error"] = "isolation: " + "; ".join(fatal)
+    res["stream"] = eng.last_stream or ""
+    res["workdir"] = os.path.realpath(sb.work)
+    return res, fatal
+
+def record_agent_run(rd, res, eng, scenario, config, k, agent, api_eq):
+    """stream.jsonl, the normalized transcript.json (only when the stream normalizes and, for Claude, the init event
+    lists the agent: D8) and run.json with the run's state."""
+    from engine import agent_eval
+    from engine import normalize as N
+    wtext(os.path.join(rd, "stream.jsonl"), res["stream"])
+    state, loaded, t = agent_eval.RUN, None, None
+    if res.get("error"):
+        state = agent_eval.error_state(res["error"])
+    else:
+        try:
+            t = N.normalize(eng.name, res["stream"], scenario["id"], agent=agent.name)
+        except N.NormalizeError as ex:
+            state = agent_eval.error_state("normalize: %s" % ex)
+        else:
+            loaded = t["agent_loaded"]
+            if loaded == "not-loaded":
+                state, t = agent_eval.AGENT_NOT_LOADED, None
+            elif t["is_error"]:
+                state = agent_eval.error_state("the stream reports is_error")
+    if t is not None:
+        t.setdefault("workspace", res["workdir"])
+        t["turns"] = [{"user": agent_eval.prompt_of(scenario), "final": t["final"]}]
+        wjson(os.path.join(rd, "transcript.json"), N.checked(t))
+    wjson(os.path.join(rd, "run.json"), {
+        "scenario": scenario["id"], "file": scenario["file"], "tool": eng.name, "configuration": config, "run": k,
+        "agent": agent.name, "agent_dir": agent.dir, "state": state, "agent_loaded": loaded, "model": eng.model,
+        "effort": eng.effort, "command": res.get("command"), "returncode": res.get("returncode"), "error": res.get("error"),
+        "stderr_tail": res.get("stderr_tail", ""), "duration_ms": res.get("duration_ms", 0),
+        "input_tokens": res["input_tokens"], "output_tokens": res["output_tokens"], "cost_usd": res.get("cost_usd"),
+        "api_equivalent_usd": round(api_eq[0], 6), "api_equivalent_source": api_eq[1], "billing": current_billing(),
+        "isolation": res.get("isolation")})
+    return state
+
+def agent_run_iteration(agent, old, ws, engines, cells, runs, budget, prices, tokens, run_root=None, log=print):
+    """Every planned cell, runs times per configuration, each in its own AgentSandbox. Returns the iteration number."""
+    from engine import agent_eval
+    run_root = os.path.realpath(run_root or tempfile.gettempdir())
+    n = (iterations(ws) or [0])[-1] + 1
+    it_dir = os.path.join(ws, "iteration-%d" % n)
+    configs = [("new_agent", agent)] + ([("old_agent", old)] if old else [])
+    plan = {"agent_name": agent.name, "agent_path": agent.dir, "old_agent": old.dir if old else None,
+            "engines": {e.name: e.model for e in engines}, "efforts": {e.name: e.effort for e in engines},
+            "runs_per_cell": runs, "configurations": [c for c, _ in configs], "cells": cells,
+            "launch": {t: s["verified"] for t, s in agent_eval.LAUNCH.items()},
+            "multi_turn_verified": dict(agent_eval.MULTI_TURN_VERIFIED), "started_at": now_iso(),
+            "agent_sha256": sha256_labeled(agent.files([e.name for e in engines])),
+            "old_agent_sha256": sha256_labeled(old.files([e.name for e in engines])) if old else None,
+            "ruleset_sha256": ruleset_sha256(), "policy_sha256": policy_sha256(),
+            "auth_profile": None if AUTH["profile"] is None else AUTH["profile"].name,
+            "isolation": {"run_root": run_root, "per_run_sandbox": True},
+            "budget_enforcement": {e.name: budget_enforcement(e) for e in engines}}
+    wjson(os.path.join(it_dir, "plan.json"), plan)
+    spent0, stopped = budget.spent, None
+    user_names = sorted({nm for nm, _ in claude_user_skills(claude_config_dir(), config_dir=True)}) \
+        if any(e.name == "claude" for e in engines) else []
+    by_id = {s["id"]: s for s in agent.scenarios}
+    states = {}
+
+    def one(eng, scenario, config, src, k):
+        cap, fallback, stop = guard_call(eng, "exec", budget, prices, tokens)
+        ticket, stop = spend_admit(budget, "exec", eng.name, eng.model, n, cap, fallback, eng.has_call_cap, stop)
+        if stop: raise _Fatal(stop)
+        rd = ensure_inside(it_dir, agent_eval.run_dir(it_dir, eng.name, scenario["id"], config, k))
+        try:
+            res, fatal = agent_isolated_run(eng, agent_eval.prompt_of(scenario), src, run_root, cap, user_names, ticket)
+        except Exception:
+            if ticket is not None: ticket.not_launched(budget.spent)
+            raise
+        api_eq = run_cost(res, eng, prices, fallback)
+        if res.get("launch_failed") and fallback > api_eq[0]: api_eq = (fallback, "cap_charged")
+        budget.charge(api_eq[0])
+        failed = res.get("launch_failed") or ""
+        spend_settle(ticket, budget, "unparsed" if "could not be parsed" in failed else "launch_failed" if failed else
+                     "error" if res.get("error") else "ok", res.get("cost_usd"), res["input_tokens"],
+                     res["output_tokens"], price_info(eng.name, eng.model, prices), api_eq[0], api_eq[1])
+        try:
+            state = record_agent_run(rd, res, eng, scenario, config, k, src, api_eq)
+        except Exception as ex:
+            raise _Fatal("[%s %s] could not record the run (%s); charged $%.2f (%s) and stopped"
+                         % (eng.name, config, type(ex).__name__, api_eq[0], api_eq[1]))
+        log("[%s] %s %s run-%d: %s, %d tokens, %.1fs" % (eng.name, scenario["id"], config, k, state,
+            res["input_tokens"] + res["output_tokens"], res.get("duration_ms", 0) / 1000.0))
+        if res.get("launch_failed"):
+            raise _Fatal("[%s %s] %s; charged $%.2f (%s) and stopped%s" % (
+                eng.name, config, res["launch_failed"], api_eq[0], api_eq[1], "".join("; and " + x for x in fatal)))
+        if fatal: raise _Fatal("isolation [%s %s]: %s" % (eng.name, config, "; ".join(fatal)))
+        return state
+
+    try:
+        for eng in engines:
+            for c in cells:
+                if c["tool"] != eng.name or c["state"] != agent_eval.PLANNED: continue
+                got = [one(eng, by_id[c["scenario"]], config, src, k) for config, src in configs
+                       for k in range(1, runs + 1)]
+                states[(c["scenario"], c["tool"])] = agent_eval.RUN if agent_eval.RUN in got else got[0]
+    except (_Fatal, EvalError, spend.SpendError) as ex:
+        stopped = str(ex)
+    stopped = stopped or spend_halt(budget)
+    plan = rjson(os.path.join(it_dir, "plan.json"))
+    plan["cells"] = [dict(c, state=states.get((c["scenario"], c["tool"]), c["state"] if c["state"] != agent_eval.PLANNED
+                                               else agent_eval.error_state("not run: the iteration stopped")))
+                     for c in cells]
+    plan.update(finished_at=now_iso(), billing=current_billing(), stopped=stopped,
+                api_equivalent_usd=round(budget.spent - spent0, 4))
+    wjson(os.path.join(it_dir, "plan.json"), plan)
+    if stopped: log("STOPPED: " + stopped)
+    return n
+
+def agent_plan_hash(a, ws, parts):
+    obj = dict(parts, format=1, argv=a.argv, workspace=ws, ruleset_sha256=ruleset_sha256(),
+               auth_profiles_sha256=file_sha256(os.path.join(RULESET_ROOT, "policy", AUTH_PROFILES_FILE)))
+    return hashlib.sha256(json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("ascii")).hexdigest()
+
+def agent_live_start(a, agent, ws, gate, problems, parts, show, claude_called):
+    """The skill live order for an agent command: --budget-usd and --auth-profile were checked by the caller; then
+    the ledger preview, problems(left) (every check that starts no process) inside the human gate before signing, the
+    signature, problems(left) again plus `claude auth status` when Claude is called under subscription auth, the plan
+    hash recheck, enable_live and the spend ledger. Returns the Budget."""
+    dangling = spend.preview(ws)
+    left = a.budget_usd - sum(r["bound_usd"] or 0.0 for r in dangling)
+    def prepare():
+        probs = problems(left)
+        if probs: raise EvalError("agent %s --live refused: %s" % (a.agent_cmd, "; ".join(probs)))
+        rules = ruleset_sha256()
+        return approvals.Prepared(agent.name, agent_plan_hash(a, ws, parts()), rules,
+                                  ["live command: " + shlex.join(["python3", "skill_eval.py"] + a.argv),
+                                   "workspace: " + ws] + show + [x for x in (spend.preview_line(dangling),) if x]
+                                  + ["ruleset_sha256 " + rules])
+    grant = APPROVER["it"].sign("live", gate, prepare, budget_usd=a.budget_usd)
+    print("signed agent %s --live by %s (plan sha256 %s)" % (a.agent_cmd, grant.record["principal"], grant.sha256[:12]),
+          file=sys.stderr)
+    probs = problems(left) + (claude_auth_problems() if claude_called and not api_key_mode() else [])
+    if probs: raise EvalError("agent %s --live refused after signing: %s" % (a.agent_cmd, "; ".join(probs)))
+    if agent_plan_hash(a, ws, parts()) != grant.sha256:
+        raise EvalError("the command's inputs changed after signing (agent folder, scenarios, wrappers, iteration or a "
+                        "file named by an option); nothing was run, sign again")
+    budget = Budget(a.budget_usd)
+    enable_live(grant)
+    p = AUTH["profile"]
+    budget.ledger = _LIVE["ledger"] = spend.Ledger(ws, "agent-" + a.agent_cmd, p.name, p.billing, a.budget_usd)
+    budget.spent = budget.ledger.open([r["call_id"] for r in dangling])
+    if budget.ledger.torn:
+        print("WARNING: spend ledger %s: dropped a torn last row (%s)" % (budget.ledger.path, budget.ledger.torn),
+              file=sys.stderr)
+    return budget
+
+def agent_live_required(a):
+    if a.budget_usd is None or not math.isfinite(a.budget_usd) or a.budget_usd <= 0:
+        raise EvalError(CAP_REQUIRED % AUTH["profile"].name if api_key_mode() else NO_BUDGET)
+    if a.auth_profile is None: raise EvalError(PROFILE_REQUIRED)
+
+def agent_run_problems(a, agent, old, engines, cells, est, prices, tokens, left):
+    """Every check of an agent run --live that starts no process."""
+    from engine import agent_eval
+    out = []
+    if api_key_mode():
+        out += api_key_soft_refusals(engines, None, True, False)
+    else:
+        soft = [e.name for e in engines if budget_enforcement(e) == "soft_limit"]
+        if a.strict_budget and soft:
+            out.append("--strict-budget (default): %s has no enforceable per-call budget cap (its budget is only a soft "
+                       "limit); refusing the live run (drop it from --engines; --no-strict-budget overrides this, "
+                       "risky)" % ", ".join(soft))
+    for unit in [agent] + ([old] if old else []):
+        out += agent_validation_problems(unit)
+        states = agent_eval.wrapper_states(unit.dir)
+        out += ["%s wrapper %s: %s" % (unit.name, e.name, agent_eval.wrapper_label(states[e.name], ""))
+                for e in engines if states[e.name] is not None]
+    if old and old.name != agent.name:
+        out.append("--old-agent %s is named %s, not %s" % (old.dir, old.name, agent.name))
+    for tool, p in sorted(agent_user_scope(agent.name).items()):
+        if any(e.name == tool for e in engines):
+            out.append("%s: agent %r is also installed at user scope at %s; hiding it from the run is not verified, so "
+                       "it could load instead of the wrapper under test" % (tool, agent.name, p))
+    if not any(c["state"] == agent_eval.PLANNED for c in cells):
+        out.append("no runnable cell: every scenario x tool cell is not-run (%s)" % ", ".join(
+            sorted({c["state"] for c in cells})))
+    if est["unpriced_models"]: out.append("no price for %s; pass --price" % est["unpriced_models"])
+    for e in engines:
+        b = None if e.has_call_cap else call_bound(e.name, e.model, "exec", prices, tokens)
+        if b is not None and b > left:
+            out.append("%s worst-case exec call bound $%.2f exceeds budget $%.2f (%s budget is a soft limit: no per-call "
+                       "cap)" % (e.name, b, left, e.name))
+    if est["total_usd"] > left:
+        out.append("estimate $%.2f exceeds budget $%.2f" % (est["total_usd"], left))
+    out += api_key_env_problems()
+    if any(e.name == "codex" for e in engines) and subscription_checks_on(): out += codex_auth_problems()
+    root = os.path.realpath(a.run_root or tempfile.gettempdir())
+    for anc in ancestors(root):
+        for d in AGENT_CONTROL_DIRS:
+            p = os.path.join(anc, d)
+            if os.path.isdir(p) and os.listdir(p):
+                out.append("%s is not empty; every sandbox under %s would see it (use --run-root elsewhere)" % (p, root))
+    return out
+
+def agent_run(a, agent, ws, prices, tokens):
+    engines = make_agent_engines(a)
+    if a.runs < 1: raise EvalError("--runs must be >= 1")
+    old = Agent(a.old_agent) if a.old_agent else None
+    cells = agent_cells(agent, engines)
+    if a.agent_cmd == "plan" or not a.live:
+        print(agent_plan_text(a, agent, old, ws, engines, cells, prices, tokens))
+        print("\nDRY RUN: nothing was executed. A real run needs `agent run --live --auth-profile P --budget-usd X`, a "
+              "clean `agent validate`, generated wrappers, an estimate within budget and a signature at the terminal.")
+        return 0
+    agent_live_required(a)
+    est = agent_estimate(engines, cells, a.runs, old, prices, tokens)
+    names = [e.name for e in engines]
+    parts = lambda: {"agent": sha256_labeled(agent.files(names)),
+                     "old_agent": sha256_labeled(old.files(names)) if old else None,
+                     "engines": {e.name: [e.model, e.effort] for e in engines}, "budget_usd": a.budget_usd}
+    budget = agent_live_start(
+        a, agent, ws, "agent-run", lambda left: agent_run_problems(a, agent, old, engines, cells, est, prices, tokens, left),
+        parts, ["agent %s: %d planned cell(s), runs %d, engines %s" % (
+            agent.name, sum(1 for c in cells if c["state"] == "planned"), a.runs, ", ".join(names))], "claude" in names)
+    for e in engines:
+        if budget_enforcement(e) == "soft_limit":
+            print("WARNING: budget " + SOFT_LIMIT_NOTE % e.name, file=sys.stderr)
+            print("WARNING: " + NO_STRICT_WARNING % e.name, file=sys.stderr)
+    n = agent_run_iteration(agent, old, ws, engines, cells, a.runs, budget, prices, tokens, a.run_root)
+    stopped = (rjson(os.path.join(ws, "iteration-%d" % n, "plan.json"), {}) or {}).get("stopped")
+    print("iteration-%d done, API-equivalent ~$%.2f%s" % (n, budget.spent, "; STOPPED: %s" % stopped if stopped else ""))
+    return 3 if stopped else 0
+
+def agent_iteration(a, ws):
+    n = a.iteration or (iterations(ws) or [None])[-1]
+    if n is None or not os.path.isdir(os.path.join(ws, "iteration-%d" % n)): raise EvalError("no iterations in %s" % ws)
+    it_dir = os.path.join(ws, "iteration-%d" % n)
+    if not isinstance(rjson(os.path.join(it_dir, "plan.json")), dict): raise EvalError("%s has no plan.json" % it_dir)
+    return n, it_dir
+
+def agent_grade(a, agent, ws, prices, tokens):
+    import eva
+    from engine import agent_eval
+    n, it_dir = agent_iteration(a, ws)
+    grade_fn = lambda agent_dir, path: eva.grade_transcript(agent_dir, path).checks
+    if not a.live:
+        done = agent_eval.grade_runs(it_dir, agent.dir, agent.scenarios, grade_fn)
+        print("agent grade: iteration-%d, %d run(s) graded; llm criteria stay needs-review (no grader ran: agent grade "
+              "--live grades them)" % (n, len(done)))
+        return 0
+    agent_live_required(a)
+    ge = grader_engine_of(a)
+    by_id = {s["id"]: s for s in agent.scenarios}
+    todo = [r for r in agent_eval.iter_runs(it_dir) if r.get("state") == agent_eval.RUN
+            and os.path.isfile(os.path.join(r["dir"], "transcript.json")) and r["scenario"] in by_id
+            and agent_eval.llm_items(agent.dir, by_id[r["scenario"]]["data"])]
+    est = grader_estimate(len(todo), 0, a.grader_model, tokens, prices, ge)
+    def problems(left):
+        out = api_key_soft_refusals([], ge, False, True) if api_key_mode() else []
+        try:
+            check_grader_model(it_dir, a.grader_model, ge)
+        except EvalError as ex:
+            out.append(str(ex))
+        if not todo: out.append("nothing for a grader: no run of iteration-%d holds an llm criterion" % n)
+        if est["unpriced_models"]: out.append("no price for %s; pass --price" % est["unpriced_models"])
+        if est["total_usd"] > left: out.append("estimate $%.2f exceeds budget $%.2f" % (est["total_usd"], left))
+        out += api_key_env_problems()
+        if ge == "codex" and subscription_checks_on(): out += codex_auth_problems()
+        return out
+    shas = lambda: {"runs": sorted((os.path.relpath(r["dir"], it_dir), sha256_files(os.path.join(r["dir"], "transcript.json")))
+                                   for r in todo),
+                    "agent": sha256_labeled(agent.files([])), "iteration": n,
+                    "grader": [ge, a.grader_model, _str_opt(a, "grader_effort")], "budget_usd": a.budget_usd}
+    budget = agent_live_start(a, agent, ws, "agent-grade", problems, shas, [
+        "agent %s: %d run(s) with llm criteria, grader %s" % (
+            agent.name, len(todo), grader_label(ge, a.grader_model, _str_opt(a, "grader_effort")))], ge == "claude")
+    grader = make_grader(ge, a.grader_model, a.grader_effort, budget=budget, prices=prices, tokens=tokens)
+    with spend_scope(grader, iteration=n):
+        agent_eval.grade_runs(it_dir, agent.dir, agent.scenarios, grade_fn, grader, signed={r["dir"] for r in todo})
+    append_cost(it_dir, "agent grade", grader.usage)
+    if spend_halt(budget): raise EvalError(spend_halt(budget))
+    print("graded iteration-%d with %s, API-equivalent ~$%.2f" % (n, grader.label(), budget.spent))
+    return 0
+
+def agent_report(a, agent, ws):
+    from engine import agent_eval
+    n, it_dir = agent_iteration(a, ws)
+    plan = rjson(os.path.join(it_dir, "plan.json"))
+    runs = agent_eval.collect(it_dir)
+    engines = plan.get("engines") if isinstance(plan.get("engines"), dict) else {}
+    tested = [r for r in runs if r["configuration"] == "new_agent"]
+    graded = {e: sum(1 for r in tested if r["tool"] == e and r["grading"] and r["grading"].get("pass_rate") is not None)
+              for e in engines}
+    collected = {e: sum(1 for r in tested if r["tool"] == e and r.get("state") == agent_eval.RUN) for e in engines}
+    cov = tool_coverage(list(engines), graded, collected)
+    states = coverage_states({"tool_coverage": cov, "coverage_waivers": {}})
+    missing = [GATE_MESSAGES["coverage-missing"] % c for _, c in states if c["state"] == "missing"]
+    gate = agent_eval.gate(plan, runs, missing)
+    gate["coverage"] = {t: COVERAGE_STATES[c["state"]] for t, c in states}
+    bench = agent_eval.benchmark(plan, runs, cov)
+    bench["gate"] = gate
+    wjson(os.path.join(it_dir, "benchmark.json"), bench)
+    wjson(os.path.join(it_dir, "gate.json"), gate)
+    wtext(os.path.join(it_dir, "comparison.md"), agent_eval.comparison_md(
+        bench, gate, n, [(t, cov[t]["status"], cov[t]["graded_runs"], gate["coverage"][t]) for t in cov]))
+    print("iteration-%d: %s -> %s" % (n, "NEEDS APPROVAL" if gate["needs_approval"] else "clean",
+                                     os.path.join(it_dir, "comparison.md")))
+    for p in gate["problems"]: print("  - " + p)
+    return 3 if gate["needs_approval"] else 0
+
+def agent_dispatch(a):
+    agent = Agent(a.agent)
+    if a.agent_cmd == "validate": return agent_validate(agent)
+    select_auth_profile(getattr(a, "auth_profile", None))
+    ws = agent_workspace(a, agent)
+    if a.agent_cmd == "report": return agent_report(a, agent, ws)
+    prices, tokens = parse_price_overrides(a.price), parse_token_overrides(a.tokens)
+    make_grader(grader_engine_of(a), a.grader_model, a.grader_effort)
+    if a.agent_cmd == "grade": return agent_grade(a, agent, ws, prices, tokens)
+    return agent_run(a, agent, ws, prices, tokens)
+
 # ---------- CLI ----------
 def make_engines(a, spec=None):
     out = []
@@ -4478,6 +5072,37 @@ def build_parser():
                    "1 when any changed")
     sp.add_parser("approver-check", help="the approver key needs a passphrase and is not loaded in ssh-agent; the "
                   "approvers file lists it (~/.config/skill-master)")
+    s = sp.add_parser("agent", help="evaluate an AGENT.md v2 agent per tool from its typed scenarios (validate, plan, "
+                      "run, grade, report)")
+    asp = s.add_subparsers(dest="agent_cmd", required=True)
+    for n in ("validate", "plan", "run", "grade", "report"):
+        x = asp.add_parser(n)
+        x.add_argument("agent")
+        if n != "validate": x.add_argument("--workspace")
+        if n in ("grade", "report"): x.add_argument("--iteration", type=int)
+        if n in ("plan", "run"):
+            x.add_argument("--engines", default="claude,codex")
+            x.add_argument("--runs", type=int, default=DEFAULT_RUNS)
+            x.add_argument("--old-agent", help="the previous AGENT.md v2 version of this agent (its baseline)")
+            x.add_argument("--claude-model", default=DEFAULT_EXECUTOR_MODELS["claude"])
+            x.add_argument("--codex-model", default=DEFAULT_EXECUTOR_MODELS["codex"])
+            x.add_argument("--claude-arg", action="append")
+            x.add_argument("--codex-arg", action="append")
+            x.add_argument("--claude-effort", choices=CLAUDE_EFFORTS)
+            x.add_argument("--codex-effort", choices=CODEX_EFFORTS)
+            x.add_argument("--strict-budget", dest="strict_budget", action="store_true", default=True)
+            x.add_argument("--no-strict-budget", dest="strict_budget", action="store_false",
+                           help="RISKY: allow codex --live runs (soft budget limit, auth.json copy readable by the agent)")
+            x.add_argument("--run-root", help="folder for the per-run sandboxes (default: system temp folder)")
+        if n in ("plan", "run", "grade"):
+            x.add_argument("--grader-engine", choices=GRADER_ENGINES, default="claude")
+            x.add_argument("--grader-model", default=None)
+            x.add_argument("--grader-effort")
+            x.add_argument("--price", action="append")
+            x.add_argument("--tokens", action="append")
+            x.add_argument("--auth-profile")
+            x.add_argument("--budget-usd", type=float)
+        if n in ("run", "grade"): x.add_argument("--live", action="store_true")
     return p
 
 def main(argv=None):
@@ -4507,6 +5132,7 @@ def main(argv=None):
         if led is not None: led.close()
 
 def _dispatch(a):
+    if a.cmd == "agent": return agent_dispatch(a)
     if a.cmd == "builder-check": return builder_check(a.skill, a.workspace, a.compare)
     if a.cmd in ("approve", "register"):  # the human gate runs before the eval set is read, the same for every fixture
         def load():
