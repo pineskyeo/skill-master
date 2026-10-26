@@ -16,6 +16,7 @@ Usage: python3 skill_eval.py <validate|estimate|plan|run|grade|calibrate|report|
        python3 skill_eval.py <approver-check|check-builtin-plugins>
        python3 skill_eval.py builder-check <skill> --workspace <ws> [--compare SAVED]
        python3 skill_eval.py agent <validate|plan|run|grade|report|loop> <agent> ...  (AGENT.md v2 agents per tool)
+       python3 skill_eval.py <install|deprecate> <unit> ... | version bump <unit> <part> | drift [ROOT]  (unit B6)
        (also reachable as: python3 eva.py eval <subcommand> ...)
 """
 import argparse, contextlib, csv, datetime, errno, hashlib, io, itertools, json, math, mmap, os, platform, random, re, shlex, shutil, subprocess, sys, tempfile, time
@@ -80,6 +81,7 @@ POLICY_SPECS = {
     "AGREEMENT_MIN": PolicySpec("gate.rules.json", "float", _FRACTION, "a finite number from 0 to 1"),
     "REGRESSION_TOLERANCE": PolicySpec("gate.rules.json", "float", _FRACTION, "a finite number from 0 to 1"),
     "HIGH_VARIANCE_STDDEV": PolicySpec("eval-policy.json", "float", _FRACTION, "a finite number from 0 to 1"),
+    "RULE_VERIFIED_MAX_DAYS": PolicySpec("eval-policy.json", "int", _COUNT, "an integer >= 1"),
     "PRICES": PolicySpec("pricing.json", "dict", _each(_pair(_finite(0))), "a non-empty map of model ids to price rows"),
     "DEFAULT_TOKENS": PolicySpec("pricing.json", "dict", _each(_pair(_finite(0, kind=int))),
                                  "a non-empty map to [input, output] token counts, integers >= 0"),
@@ -192,6 +194,7 @@ MAX_AUTO_ITERATIONS = _POLICY["MAX_AUTO_ITERATIONS"]
 AGREEMENT_MIN = _POLICY["AGREEMENT_MIN"]
 REGRESSION_TOLERANCE = _POLICY["REGRESSION_TOLERANCE"]
 HIGH_VARIANCE_STDDEV = _POLICY["HIGH_VARIANCE_STDDEV"]
+RULE_VERIFIED_MAX_DAYS = _POLICY["RULE_VERIFIED_MAX_DAYS"]
 STATIC_TYPES = ("regex", "not_regex", "tool_call", "skill_triggered", "file_exists",
                 "file_equals_fixture", "csv_cleaned", "csv_rows")
 CSV_ROWS_KEYS = ("type", "path", "rows", "min", "max", "normalize", "unique")
@@ -2396,7 +2399,7 @@ def gate_hash(gate, spec, ws):
     if gate == "requirements":
         return sha256_files(os.path.join(ws, "requirements.md")) if os.path.isfile(os.path.join(ws, "requirements.md")) else None
     if gate == "eval_set":
-        return sha256_labeled(eval_set_files(spec["skill_dir"]))
+        return sha256_labeled(unit_eval_files(spec))
     if gate == "rule_review":
         return rule_review_hash(spec["skill_dir"])
     if gate.startswith(approvals.WAIVER_PREFIX):
@@ -2454,7 +2457,16 @@ def eval_set_files(skill_dir):
                    for f in (c.get("files") if isinstance(c.get("files"), list) else []) if isinstance(f, str)})
     return out + [("files:" + f, os.path.join(skill_dir, f)) for f in refs]
 
-APPROVER = {"it": approvals.cli_approver()}  # the human gate (engine/approvals.py); in-process tests replace it
+def agent_scenario_files(agent_dir):
+    """[(label, path)] of every scenarios/*.json of an agent folder, sorted: an agent's eval set."""
+    d = os.path.join(agent_dir, "scenarios")
+    return [("scenarios/" + f, os.path.join(d, f)) for f in sorted(os.listdir(d)) if f.endswith(".json")] \
+        if os.path.isdir(d) else []
+
+def unit_eval_files(spec):
+    return agent_scenario_files(spec["skill_dir"]) if spec.get("kind") == "agent" else eval_set_files(spec["skill_dir"])
+
+APPROVER ={"it": approvals.cli_approver()}  # the human gate (engine/approvals.py); in-process tests replace it
 POLICY_HASHED = (("pricing", "pricing.json"), ("models", "models.json"), ("auth_profiles", "auth-profiles.json"))
 
 def file_sha256(path):
@@ -2525,17 +2537,20 @@ def _approve_with(gate, load):
         rules = ruleset_sha256()
         return approvals.Prepared(spec["skill_name"], h, rules, approve_show(gate, spec, ws, rules))
     grant = APPROVER["it"].sign("approve", gate, prepare)
-    data = approvals_data(st["ws"])
-    data[gate] = grant.record
-    wjson(os.path.join(st["ws"], "approvals.json"), data)
-    return grant.record
+    return store_approval(st["ws"], gate, grant.record)
+
+def store_approval(ws, gate, record):
+    data = approvals_data(ws)
+    data[gate] = record
+    wjson(os.path.join(ws, "approvals.json"), data)
+    return record
 
 def approve_show(gate, spec, ws, rules):
     """What the person approves, printed before the challenge; the last line is the rule bundle hash it binds."""
     if gate == "requirements": shown = ["requirements: %s" % os.path.join(ws, "requirements.md")]
     elif gate == "eval_set":
         shown = ["eval set file %s: %s" % (label, sha256_files(p)[:12] if os.path.isfile(p) else "<missing>")
-                 for label, p in eval_set_files(spec["skill_dir"])]
+                 for label, p in unit_eval_files(spec)]
     elif gate == "rule_review": shown = ["rule review finding: " + x[:300] for x in rule_review_items(spec["skill_dir"])]
     elif gate.startswith(approvals.WAIVER_PREFIX):
         tool, n = gate[len(approvals.WAIVER_PREFIX):], (iterations(ws) or [None])[-1]
@@ -3669,17 +3684,23 @@ def benchmark_runs(bench):
         return None
     return runs, planned
 
+def bench_coverage(bench, agent):
+    """tool_coverage of a benchmark recomputed from its runs and planned engines (agent_bench_coverage for an agent,
+    runs_coverage for a skill), never its stored field; None when they are malformed."""
+    if agent:
+        return agent_bench_coverage(bench) if isinstance(bench, dict) and isinstance(_meta(bench), dict) else None
+    got = benchmark_runs(bench)
+    return runs_coverage(got[1], got[0]) if got is not None else None
+
 def registration_coverage(spec, ws, bench, n):
     """(lines, waived): the register summary line of each required tool, its coverage recomputed from bench's runs and
     planned engines (never the stored field) and its current waiver, and the tools whose waiver counted. Refuses a
     stored tool_coverage that is malformed or claims run where the runs do not, then every required tool that neither
     ran nor has a valid waiver."""
-    got = benchmark_runs(bench)
-    if got is None:
+    cov = bench_coverage(bench, spec.get("kind") == "agent")
+    if cov is None:
         raise EvalError("iteration-%d cannot be registered: its benchmark.json runs or planned engines are malformed; "
                         "re-run `report`" % n)
-    runs, planned = got
-    cov = runs_coverage(planned, runs)
     if "tool_coverage" in bench:
         stored = bench["tool_coverage"]
         if not (isinstance(stored, dict) and all(t in cov and isinstance(c, dict) and isinstance(c.get("status"), str)
@@ -3716,10 +3737,16 @@ def registration_record(spec, ws, shown=None):
     if bench.get("gate") != gate: raise EvalError("iteration-%d gate.json does not match benchmark.json; re-run `report`" % n)
     m = bench.get("metadata") or {}
     now_skill, now_evals = skill_tree_hash(spec["skill_dir"]), gate_hash("eval_set", spec, ws)
-    if not m.get("skill_sha256") or m["skill_sha256"] != now_skill:
+    agent = spec.get("kind") == "agent"
+    if agent:
+        tested = sha256_labeled(Agent(spec["skill_dir"]).files(list(m.get("engines") or {})))
+        if not m.get("agent_sha256") or m["agent_sha256"] != tested:
+            raise EvalError("iteration-%d tested other agent files (AGENT.md, scenarios or wrappers) than the ones on "
+                            "disk; re-run the eval before registering" % n)
+    elif not m.get("skill_sha256") or m["skill_sha256"] != now_skill:
         raise EvalError("iteration-%d tested skill %s but the skill folder now hashes to %s; re-run the eval before "
                         "registering" % (n, (m.get("skill_sha256") or "<unrecorded>")[:12], now_skill[:12]))
-    if not m.get("eval_set_sha256") or m["eval_set_sha256"] != now_evals:
+    elif not m.get("eval_set_sha256") or m["eval_set_sha256"] != now_evals:
         raise EvalError("iteration-%d used a different eval set than the one on disk; re-run the eval" % n)
     approval, relied = "auto", {}
     if gate["needs_approval"]:
@@ -3736,16 +3763,17 @@ def registration_record(spec, ws, shown=None):
     if m.get("ruleset_sha256") != now_rules:
         raise EvalError("iteration-%d ran under ruleset %s but the rules now hash to %s; re-run the eval before "
                         "registering" % (n, (m.get("ruleset_sha256") or "<unrecorded>")[:12], now_rules[:12]))
+    main, field = ("AGENT.md", "version") if agent else ("SKILL.md", "metadata.version")
     version = registry.version_of(unit_spec(spec["skill_dir"])[1])
     if registry.parse_semver(version) is None:
-        raise EvalError("SKILL.md %s; set metadata.version to a SemVer 2.0.0 version such as 1.0.0 (MAJOR.MINOR.PATCH, no "
-                        "leading zeros, no v) before registering" % ("has no version" if version in ("", None) else
-                                                                    "version %r is not SemVer 2.0.0" % (version,)))
-    rec = {"registration_format": registry.REGISTRATION_FORMAT, "kind": "skill", "skill_name": spec["skill_name"],
-           "version": version, "skill_path": registry.posix_rel(spec["skill_dir"], ws), "iteration": n,
-           "benchmark_sha256": gate_hash("iteration-%d" % n, spec, ws), "skill_sha256": now_skill,
+        raise EvalError("%s %s; set %s to a SemVer 2.0.0 version such as 1.0.0 (MAJOR.MINOR.PATCH, no leading zeros, no "
+                        "v) before registering" % (main, "has no version" if version in ("", None) else
+                                                   "version %r is not SemVer 2.0.0" % (version,), field))
+    rec = {"registration_format": registry.REGISTRATION_FORMAT, "kind": "agent" if agent else "skill",
+           "skill_name": spec["skill_name"], "version": version, "skill_path": registry.posix_rel(spec["skill_dir"], ws),
+           "iteration": n, "benchmark_sha256": gate_hash("iteration-%d" % n, spec, ws), "skill_sha256": now_skill,
            "eval_set_sha256": now_evals,
-           "skill_md_sha256": sha256_files(os.path.join(spec["skill_dir"], "SKILL.md")), "ruleset_sha256": now_rules,
+           "skill_md_sha256": sha256_files(os.path.join(spec["skill_dir"], main)), "ruleset_sha256": now_rules,
            "approvals": relied, "registered_at": now_iso(), "approval": approval}
     errors = registration_schema_errors(rec)
     if errors:
@@ -3797,15 +3825,17 @@ def _register_with(load):
     return rec
 
 # ---------- registry and hub (unit B5) ----------
-HUB_AGENT = "not-run: no agent registration (gates.md G48)"
 HUB_NO_ITERATION = "not-run: no eval iteration"
 
 def unit_spec(unit_dir):
-    """(spec, frontmatter) of a skill folder without reading its eval set: the SKILL.md name, else the folder name."""
+    """(spec, frontmatter) of a skill or agent folder without reading its eval set: the SKILL.md (AGENT.md) name, else
+    the folder name; an agent's spec has kind agent."""
     import eva
-    text, err = eva.read_text(os.path.join(unit_dir, "SKILL.md"))
+    agent = eva.detect_kind(unit_dir) == "agent"
+    text, err = eva.read_text(os.path.join(unit_dir, "AGENT.md" if agent else "SKILL.md"))
     meta = (eva.parse_frontmatter(text)[0] if not err else None) or {}
-    return {"skill_name": registry.unit_name(unit_dir, meta), "skill_dir": unit_dir}, meta
+    spec = {"skill_name": registry.unit_name(unit_dir, meta), "skill_dir": unit_dir}
+    return (dict(spec, kind="agent") if agent else spec), meta
 
 def registration_schema_errors(rec):
     from engine import schema
@@ -3814,11 +3844,13 @@ def registration_schema_errors(rec):
 def registration_state(unit_dir, ws=None):
     """(state, reason, record) of the unit's registration record, verified now (engine/registry.classify, B5 D4): the
     register signature, the hashes it binds and every approval it relied on are checked against the files as they are.
-    Reads records and hashes only. ws: the workspace (default: the unit's). An agent is always unregistered."""
+    Reads records and hashes only. ws: the workspace (default: the skill's, or the agent's by the rule of the agent
+    commands, registry.agent_workspace)."""
     import eva
     kind = eva.detect_kind(unit_dir)
     spec, meta = unit_spec(unit_dir)
-    ws = ws or (registry.unit_workspace(unit_dir, meta) if kind == "skill" else None)
+    ws = ws or (registry.unit_workspace(unit_dir, meta) if kind == "skill" else
+                registry.agent_workspace(unit_dir) if kind == "agent" else None)
     rules = []
     def ruleset():
         if not rules: rules.append(ruleset_sha256())
@@ -3829,7 +3861,7 @@ def registration_state(unit_dir, ws=None):
     def current(rec):
         yield "skill_sha256", skill_tree_hash(unit_dir)
         yield "eval_set_sha256", gate_hash("eval_set", spec, ws)
-        yield "skill_md_sha256", sha256_files(os.path.join(unit_dir, "SKILL.md"))
+        yield "skill_md_sha256", sha256_files(os.path.join(unit_dir, "AGENT.md" if kind == "agent" else "SKILL.md"))
         yield "benchmark_sha256", gate_hash("iteration-%d" % rec["iteration"], spec, ws)
         yield "version", registry.version_of(meta)
     def approval(gate, copy):
@@ -3837,11 +3869,10 @@ def registration_state(unit_dir, ws=None):
     return registry.classify(kind, ws, unit_dir, registration_schema_errors, signature, current, approval)
 
 def view_coverage(row):
-    """({tool: status}, iteration) for the hub: recomputed with runs_coverage from the runs and planned engines of one
+    """({tool: status}, iteration) for the hub: recomputed with bench_coverage from the runs and planned engines of one
     benchmark.json, never its stored tool_coverage. The benchmark is the recorded iteration's while a registered or stale
     record names one that exists, else the last iteration's."""
     import eva
-    if row["kind"] != "skill": return {t: HUB_AGENT for t in eva.TOOLS}, None
     ws, rec = row["workspace"], row["record"]
     bench_path = lambda k: os.path.join(ws, "iteration-%d" % k, "benchmark.json")
     n = rec.get("iteration") if isinstance(rec, dict) and row["registration"] in ("registered", "stale") else None
@@ -3849,11 +3880,10 @@ def view_coverage(row):
         its = iterations(ws) if ws else []
         n = its[-1] if its else None
     if n is None: return {t: HUB_NO_ITERATION for t in eva.TOOLS}, None
-    try: got = benchmark_runs(rjson(bench_path(n)))
-    except (OSError, ValueError, RecursionError): got = None
-    if got is None: return {t: "not-run: iteration-%d has no readable benchmark.json" % n for t in eva.TOOLS}, n
-    runs, planned = got
-    return {t: c["status"] for t, c in runs_coverage(planned, runs).items()}, n
+    try: cov = bench_coverage(rjson(bench_path(n)), row["kind"] == "agent")
+    except (OSError, ValueError, RecursionError): cov = None
+    if cov is None: return {t: "not-run: iteration-%d has no readable benchmark.json" % n for t in eva.TOOLS}, n
+    return {t: c["status"] for t, c in cov.items()}, n
 
 def unit_view(root, row):
     """What the hub shows for one eva.build_index row (B5 D8): the row's check, English, parity and registration results,
@@ -4173,14 +4203,12 @@ class Agent(object):
             raise EvalError("%s holds no AGENT.md" % path)
         info = transcript.read_agent(self.dir)
         self.meta = info.meta if info.valid else None
-        self.name = self.meta["name"] if self.meta else os.path.basename(self.dir)
+        self.name = registry.agent_name(self.dir, info)
         self.scenarios = agent_eval.scenarios(eva.load_scenarios(self.dir))
     def files(self, tools):
         """(label, path) of AGENT.md, every scenarios/*.json and the wrappers of tools: what a live start binds."""
         from engine import agent_eval
-        d = os.path.join(self.dir, "scenarios")
-        rels = ["AGENT.md"] + ["scenarios/" + f for f in sorted(os.listdir(d)) if f.endswith(".json")] \
-            if os.path.isdir(d) else ["AGENT.md"]
+        rels = ["AGENT.md"] + [label for label, _ in agent_scenario_files(self.dir)]
         rels += [agent_eval.wrapper_rel(t, self.name) for t in tools]
         return [(r, os.path.join(self.dir, *r.split("/"))) for r in rels]
     def wrapper(self, tool):
@@ -4250,9 +4278,10 @@ def make_agent_engines(a):
 
 def agent_workspace(a, agent):
     if a.workspace: return os.path.realpath(a.workspace)
-    if not safe_name(agent.name):
+    ws = registry.agent_workspace(agent.dir, agent.name)
+    if ws is None:
         raise EvalError("agent name %r is not a safe path component; fix AGENT.md name (or pass --workspace)" % agent.name)
-    return os.path.join(os.path.dirname(agent.dir), agent.name + "-workspace")
+    return ws
 
 def agent_user_scope(name):
     """{tool: path} of a same-named agent at user scope, which a run could load next to the wrapper under test:
@@ -4334,8 +4363,9 @@ def agent_plan_text(a, agent, old, ws, engines, cells, prices, tokens):
         "; WARNING " + NO_STRICT_WARNING % ", ".join(soft) if soft else ""))
     L += ["tool coverage (dynamic): " + coverage_line(tool_coverage([e.name for e in engines])),
           "registration coverage: registration needs a graded run on every tool of coverage_required (%s) or a signed "
-          "coverage_waiver:<tool> (G1, plan.md:1136); agent coverage waivers are not read yet, so a tool that did not "
-          "run stays coverage-missing" % ", ".join(COVERAGE_REQUIRED),
+          "coverage_waiver:<tool> (G1, plan.md:1136); `agent report`, `agent loop` and `register` read the agent's "
+          "signed coverage waivers, so a tool that did not run stays coverage-missing unless its waiver verifies"
+          % ", ".join(COVERAGE_REQUIRED),
           "multi-turn: non-interactive continuation is UNVERIFIED for %s; every scenario with more than one turn "
           "records %s until an operator probe verifies a tool" % (
               ", ".join(t for t, ok in agent_eval.MULTI_TURN_VERIFIED.items() if not ok), agent_eval.MULTI_TURN)]
@@ -4689,29 +4719,43 @@ def agent_grade(a, agent, ws, prices, tokens):
 
 def agent_report(a, agent, ws):
     n, it_dir = agent_iteration(a, ws)
-    gate = agent_report_gate(ws, n)
+    gate = agent_report_gate(ws, n, agent_spec(agent))
     print("iteration-%d: %s -> %s" % (n, "NEEDS APPROVAL" if gate["needs_approval"] else "clean",
                                      os.path.join(it_dir, "comparison.md")))
     for p in gate["problems"]: print("  - " + p)
     return 3 if gate["needs_approval"] else 0
 
-def agent_report_gate(ws, n):
-    """Writes benchmark.json, gate.json and comparison.md of iteration-n and returns the gate."""
+def agent_spec(agent):
+    return {"skill_name": agent.name, "skill_dir": agent.dir, "kind": "agent"}
+
+def agent_bench_coverage(bench):
+    """tool_coverage of an agent benchmark recomputed from its runs and planned engines, None when they are
+    malformed."""
+    from engine import agent_eval
+    engines, runs = _meta(bench).get("engines"), bench.get("runs")
+    if not (isinstance(engines, dict) and isinstance(runs, list)
+            and all(isinstance(r, dict) and isinstance(r.get("tool"), str) for r in runs)):
+        return None
+    tested = [r for r in runs if r.get("configuration") == "new_agent"]
+    graded = {e: sum(1 for r in tested if r["tool"] == e and r.get("graded") is True and r.get("pass_rate") is not None)
+              for e in engines}
+    collected = {e: sum(1 for r in tested if r["tool"] == e and r.get("state") == agent_eval.RUN) for e in engines}
+    return tool_coverage(list(engines), graded, collected)
+
+def agent_report_gate(ws, n, spec):
+    """Writes benchmark.json, gate.json and comparison.md of iteration-n and returns the gate. spec: the agent's, whose
+    signed coverage waivers in ws clear exactly their tool (waiver_verdicts, as G1 does for skills)."""
     from engine import agent_eval
     it_dir = os.path.join(ws, "iteration-%d" % n)
     plan = rjson(os.path.join(it_dir, "plan.json"))
     runs = agent_eval.collect(it_dir)
-    engines = plan.get("engines") if isinstance(plan.get("engines"), dict) else {}
-    tested = [r for r in runs if r["configuration"] == "new_agent"]
-    graded = {e: sum(1 for r in tested if r["tool"] == e and r["grading"] and r["grading"].get("pass_rate") is not None)
-              for e in engines}
-    collected = {e: sum(1 for r in tested if r["tool"] == e and r.get("state") == agent_eval.RUN) for e in engines}
-    cov = tool_coverage(list(engines), graded, collected)
-    states = coverage_states({"tool_coverage": cov, "coverage_waivers": {}})
+    bench = agent_eval.benchmark(plan, runs, None)
+    cov = bench["tool_coverage"] = agent_bench_coverage(bench)
+    states = coverage_states({"tool_coverage": cov, "coverage_waivers": waiver_verdicts(spec, ws)})
     missing = [GATE_MESSAGES["coverage-missing"] % c for _, c in states if c["state"] == "missing"]
     gate = agent_eval.gate(plan, runs, missing)
-    gate["coverage"] = {t: COVERAGE_STATES[c["state"]] for t, c in states}
-    bench = agent_eval.benchmark(plan, runs, cov)
+    gate["coverage"] = {t: "waived by %s" % c["principal"] if c["state"] == "waived" else COVERAGE_STATES[c["state"]]
+                        for t, c in states}
     bench["gate"] = gate
     wjson(os.path.join(it_dir, "benchmark.json"), bench)
     wjson(os.path.join(it_dir, "gate.json"), gate)
@@ -4864,7 +4908,7 @@ def agent_loop(agent, ws, engines, grader, builder, max_iterations=MAX_AUTO_ITER
             append_cost(it_dir, "agent grade", usage_delta(grader.usage, used))
         halt = spend_halt(budget)
         if halt: return {"status": "run-stopped", "iteration": n, "error": halt}
-        gate = agent_report_gate(ws, n)
+        gate = agent_report_gate(ws, n, agent_spec(agent))
         log("iteration-%d gate: %s" % (n, gate["problems"] or "clean"))
         if not gate["problems"]: return {"status": "clean", "iteration": n}
         if all(p.startswith(AGENT_UNFIXABLE) for p in gate["problems"]): return {"status": "needs-coverage", "iteration": n}
@@ -5038,6 +5082,258 @@ def agent_dispatch(a):
     if a.agent_cmd == "grade": return agent_grade(a, agent, ws, prices, tokens)
     if a.agent_cmd == "loop": return agent_loop_cli(a, agent, ws, prices, tokens)
     return agent_run(a, agent, ws, prices, tokens)
+
+# ---------- install, version bump, deprecate, drift (unit B6) ----------
+INSTALL_POLICY = os.path.join(POLICY_DIR, "install.json")
+Q12 = "user scope is allowed only for Claude agents (Appendix E, Q12)"
+INSTALL_USER_GATE = "install_user"
+
+def install_stamp():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+def install_policy():
+    from engine import install
+    return install.load_policy(INSTALL_POLICY)
+
+def lifecycle_dispatch(a):
+    from engine import install, lifecycle
+    try:
+        if a.cmd == "install": return install_cmd(a)
+        if a.cmd == "version": return version_bump(a)
+        if a.cmd == "deprecate": return deprecate_cmd(a)
+        return drift_cmd(a)
+    except (install.InstallError, lifecycle.LifecycleError) as ex:
+        raise EvalError(str(ex))
+
+def load_unit(path, workspace=None):
+    """(spec, frontmatter, workspace) of a skill or AGENT.md v2 folder: the workspace is --workspace, else
+    <parent>/<name>-workspace."""
+    import eva
+    if eva.detect_kind(path) is None: raise EvalError("%s holds no SKILL.md or AGENT.md" % path)
+    spec, meta = unit_spec(os.path.realpath(path))
+    if not safe_name(spec["skill_name"]):
+        raise EvalError("unit name %r is not a safe path component; fix the frontmatter name" % (spec["skill_name"],))
+    ws = os.path.realpath(workspace) if workspace else \
+        os.path.join(os.path.dirname(spec["skill_dir"]), spec["skill_name"] + "-workspace")
+    return spec, meta, ws
+
+def unit_kind(spec):
+    return spec.get("kind", "skill")
+
+def parse_install_tools(text):
+    tools = [t.strip() for t in text.split(",") if t.strip()]
+    if not tools or len(set(tools)) != len(tools) or any(t not in approvals.COVERAGE_TOOLS for t in tools):
+        raise EvalError("--tools %r: name tools from %s, each at most once" % (text, ",".join(approvals.COVERAGE_TOOLS)))
+    return [t for t in approvals.COVERAGE_TOOLS if t in tools]
+
+def target_wrapper_rel(tool, name):
+    return rjson(os.path.join(RULESET_ROOT, "targets", tool + ".json"))["wrapper"]["path"].format(name=name)
+
+def install_items(spec, tools, places, user_dest=None):
+    """[(tool, source path, destination, UNVERIFIED source or None)]: an agent's generated wrappers, refused when one
+    is missing or out of date (install never generates), or every regular file of a skill folder. places: the
+    policy destinations of the unit kind; user_dest: the absolute user-scope destination."""
+    from engine import agent_eval, install
+    d, name, out = spec["skill_dir"], spec["skill_name"], []
+    if unit_kind(spec) == "agent":
+        states = agent_eval.wrapper_states(d)
+        bad = ["wrapper %s is %s" % (target_wrapper_rel(t, name), states[t]) for t in tools if states[t] is not None]
+        if bad:
+            raise EvalError("%s: run `python3 eva.py generate %s` first (install never generates); nothing was written"
+                            % ("; ".join(bad), d))
+        files = {t: [("", os.path.join(d, *target_wrapper_rel(t, name).split("/")))] for t in tools}
+    else:
+        listed = install.skill_files(d)
+        files = {t: [(rel, p) for rel, p in listed] for t in tools}
+    for t in tools:
+        conf = places[t]
+        base = user_dest or conf["path"].format(name=name)
+        for rel, p in files[t]:
+            out.append((t, p, base + rel, conf["source"] if conf["verified"] == "UNVERIFIED" else None))
+    return out
+
+def deprecation_notes(spec, meta, ws):
+    from engine import lifecycle
+    version = registry.version_of(meta)
+    try: data = rjson(os.path.join(ws, "deprecations.json"))
+    except ValueError: data = None
+    reason = lifecycle.deprecated_reason(data, version) if isinstance(version, str) else None
+    return ["warning: %s %s is deprecated: %s" % (spec["skill_name"], version, reason)] if reason else []
+
+def install_cmd(a):
+    from engine import install
+    spec, meta, ws = load_unit(a.unit, a.workspace)
+    tools = parse_install_tools(a.tools)
+    if a.scope == "user": return install_user_scope(a, spec, meta, ws, tools)
+    if not a.target: raise EvalError("a project install needs --target <folder>; nothing was written")
+    target = os.path.realpath(a.target)
+    if not os.path.isdir(target): raise EvalError("--target %s is not a folder; nothing was written" % a.target)
+    pol, homes = install_policy(), install.homes()
+    probs = install.target_problems(target, homes, pol)
+    if probs: raise EvalError("; ".join(probs) + "; nothing was written")
+    items = install_items(spec, tools, pol.destinations[unit_kind(spec)])
+    plan = install.build(spec["skill_name"], unit_kind(spec), "project", target, items, pol, homes, a.force,
+                         install.project_check(target, pol, homes))
+    notes = [install.HERMES_NOTE] if unit_kind(spec) == "agent" and "hermes" in tools else []
+    return install_finish(plan, pol, a.dry_run, notes + deprecation_notes(spec, meta, ws))
+
+def install_finish(plan, pol, dry_run, notes):
+    from engine import install
+    lines = install.entry_lines(plan) + (install.diff_lines(plan) if dry_run else []) + notes
+    if not dry_run:
+        backup = install.apply(plan, pol, install_stamp())
+        if backup: lines.append("backup %s" % backup)
+    if all(e.action == "unchanged" for e in plan.entries): lines.append("no change")
+    print("\n".join(lines + [install.summary(plan, plan.unit, dry_run)]))
+    return 0
+
+def install_user_scope(a, spec, meta, ws, tools):
+    """Only `--scope user --tools claude` on an agent, into exactly $HOME/.claude/agents/<name>.md, after a
+    signature of the manifest hash (engine/install.py manifest) taken once the record reads registered now and the
+    wrapper is fresh."""
+    from engine import install
+    if unit_kind(spec) != "agent": raise EvalError("%s: a skill is refused; nothing was written" % Q12)
+    if tools != ["claude"]:
+        raise EvalError("%s: %s refused; pass --tools claude; nothing was written"
+                        % (Q12, ", ".join(t for t in tools if t != "claude") or "claude"))
+    if a.target: raise EvalError("--target is for a project install; user scope writes only $HOME/.claude/agents")
+    if os.environ.get("CLAUDE_CONFIG_DIR"):
+        raise EvalError("CLAUDE_CONFIG_DIR is set, so Claude Code may not read $HOME/.claude/agents; user scope "
+                        "refuses (unset it); nothing was written")
+    pol, homes = install_policy(), install.homes()
+    home = os.path.realpath(os.path.expanduser("~"))
+    dest = os.path.join(home, *install.USER_AGENT_PATH.format(name=spec["skill_name"]).split("/"))
+
+    def planned():
+        state, reason, rec = registration_state(spec["skill_dir"], ws)
+        if state != "registered":
+            raise EvalError("user scope needs a record that reads registered now: %s reads %s%s; nothing was signed"
+                            % (ws, state, " (%s)" % reason if reason else ""))
+        items = install_items(spec, tools, pol.user_scope["agent"], dest)
+        plan = install.build(spec["skill_name"], "agent", "user", home, items, pol, homes, a.force,
+                             install.user_check(home, pol, homes))
+        return plan, rec, install.manifest_hash(install.manifest(plan, registration_hash(rec)))
+
+    if a.dry_run:
+        try:
+            plan, rec, _ = planned()
+        except (EvalError, install.InstallError) as ex:
+            print("prerequisites: %s" % ex)
+            return 2
+        print("registration: registered %s (by %s)" % (rec["version"], rec["signed"]["principal"]))
+        print("wrapper: claude up to date; nothing is signed or written in a dry run")
+        return install_finish(plan, pol, True, [])
+    try:
+        plan, _, _ = planned()
+        if all(e.action == "unchanged" for e in plan.entries): return install_finish(plan, pol, False, [])
+    except (EvalError, install.InstallError):
+        pass
+    st = {}
+    def prepare():
+        plan, rec, h = planned()
+        rules = ruleset_sha256()
+        st.update(hash=h)
+        return approvals.Prepared(spec["skill_name"], h, rules, [
+            "install user scope: %s" % e.dest for e in plan.entries] + [
+            "install source sha256 %s (%s)" % (hashlib.sha256(e.data).hexdigest(), e.source) for e in plan.entries] + [
+            "install record: %s %s registered by %s" % (spec["skill_name"], rec["version"], rec["signed"]["principal"]),
+            "ruleset_sha256 " + rules])
+    grant = APPROVER["it"].sign("approve", INSTALL_USER_GATE, prepare)
+    plan, _, h = planned()
+    if h != grant.sha256:
+        raise EvalError("the install inputs changed after signing (a wrapper, the record or the destination); nothing "
+                        "was written, sign again")
+    store_approval(ws, INSTALL_USER_GATE, grant.record)
+    return install_finish(plan, pol, False, deprecation_notes(spec, meta, ws))
+
+def version_bump(a):
+    import eva
+    from engine import lifecycle
+    spec, meta, _ = load_unit(a.unit)
+    main = "AGENT.md" if unit_kind(spec) == "agent" else "SKILL.md"
+    old = registry.version_of(meta)
+    if registry.parse_semver(old) is None:
+        raise EvalError("%s %s; set a SemVer 2.0.0 version such as 1.0.0 first" % (
+            main, "has no version" if old in ("", None) else "version %r is not SemVer 2.0.0" % (old,)))
+    new = lifecycle.next_version(old, a.part)
+    text, _ = eva.read_text(os.path.join(spec["skill_dir"], "CHANGELOG.md"))
+    problem = lifecycle.changelog_problem(text, new)
+    if problem:
+        raise EvalError('version bump needs a changelog entry: add "## %s" and a line of text to %s (%s); nothing was '
+                        'written' % (new, os.path.join(a.unit, "CHANGELOG.md"), problem))
+    path = os.path.join(spec["skill_dir"], main)
+    with open(path, encoding="utf-8", newline="") as f: raw = f.read()
+    out = lifecycle.set_version(raw, unit_kind(spec), new,
+                                lambda t: registry.version_of(eva.parse_frontmatter(t)[0] or {}))
+    if a.dry_run:
+        print("dry run: would bump %s %s -> %s" % (spec["skill_name"], old, new))
+        return 0
+    with open(path, "w", encoding="utf-8", newline="") as f: f.write(out)
+    if unit_kind(spec) == "agent":
+        print("the wrappers embed the AGENT.md digest: run `python3 eva.py generate %s` before the next install" % a.unit)
+    print("bumped %s %s -> %s" % (spec["skill_name"], old, new))
+    return 0
+
+def deprecate_cmd(a):
+    from engine import lifecycle
+    spec, meta, ws = load_unit(a.unit, a.workspace)
+    p = os.path.join(ws, "deprecations.json")
+    try: data = rjson(p)
+    except ValueError as ex: raise EvalError("%s is not readable JSON (%s); nothing was written" % (p, ex))
+    new, changed = lifecycle.deprecate(data, a.version, a.reason, registry.version_of(meta), now_iso())
+    if not changed:
+        print("no change")
+        return 0
+    wjson(p, new)
+    print("deprecated %s %s: %s (an unsigned marker; the version stays installable)" % (spec["skill_name"], a.version,
+                                                                                        a.reason))
+    return 0
+
+def recorded_ruleset(unit_dir, name):
+    """The ruleset_sha256 a unit was last recorded under: its registration.json, else the metadata of its last
+    iteration's benchmark.json, else None (workspace <parent>/<name>-workspace). Reads those two files only."""
+    if not safe_name(name): return None
+    ws = os.path.join(os.path.dirname(unit_dir), name + "-workspace")
+    n = (iterations(ws) or [None])[-1]
+    for p, pick in ((os.path.join(ws, "registration.json"), lambda d: d),
+                    (os.path.join(ws, "iteration-%s" % n, "benchmark.json"), lambda d: d.get("metadata"))):
+        try: doc = rjson(p)
+        except (ValueError, RecursionError): doc = None
+        got = pick(doc) if isinstance(doc, dict) else None
+        if isinstance(got, dict) and isinstance(got.get("ruleset_sha256"), str): return got["ruleset_sha256"]
+    return None
+
+def rule_dates():
+    """[(rules/<file>, rule id, source.verified)] of every rule of the bundle under RULESET_ROOT."""
+    out, d = [], os.path.join(RULESET_ROOT, "rules")
+    for f in sorted(x for x in os.listdir(d) if x.endswith(".rules.json")):
+        doc = rjson(os.path.join(d, f))
+        for r in doc.get("rules") or [] if isinstance(doc, dict) else []:
+            src = r.get("source") if isinstance(r, dict) and isinstance(r.get("source"), dict) else {}
+            out.append(("rules/" + f, r.get("id") if isinstance(r, dict) else None, src.get("verified")))
+    return out
+
+def drift_cmd(a):
+    """Tools, units and rules, read from files only: drift starts no process and opens no socket."""
+    import eva
+    from engine import lifecycle
+    if not os.path.isdir(a.root): raise EvalError("drift ROOT %s is not a folder" % a.root)
+    observed = {}
+    for item in a.observed:
+        tool, _, version = item.partition("=")
+        if tool not in approvals.COVERAGE_TOOLS or not version.strip() or tool in observed:
+            raise EvalError("--observed %r: give TOOL=VERSION once per tool, TOOL one of %s"
+                            % (item, ", ".join(approvals.COVERAGE_TOOLS)))
+        observed[tool] = version.strip()
+    today = a.today or datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+    units = []
+    for u in eva.find_units(a.root):
+        spec, _ = unit_spec(u)
+        units.append((unit_kind(spec), spec["skill_name"], recorded_ruleset(u, spec["skill_name"])))
+    lines, listed = lifecycle.drift_report(install_policy().tool_pins, observed, units, ruleset_sha256(), rule_dates(),
+                                           today, RULE_VERIFIED_MAX_DAYS)
+    print("\n".join(lines))
+    return 3 if listed else 0
 
 # ---------- CLI ----------
 def make_engines(a, spec=None):
@@ -5579,6 +5875,31 @@ def build_parser():
                            "change only AGENT.md")
             x.add_argument("--builder-model", default=DEFAULT_BUILDER_MODEL)
             x.add_argument("--max-iterations", type=int, default=MAX_AUTO_ITERATIONS)
+    s = sp.add_parser("install", help="install an agent's generated wrappers or a skill folder per tool (policy/install"
+                      ".json; references/install.md): project scope under --target, or the Claude agent at user scope "
+                      "after a signature of the manifest")
+    s.add_argument("unit")
+    s.add_argument("--tools", default=",".join(approvals.COVERAGE_TOOLS))
+    s.add_argument("--scope", choices=("project", "user"), default="project")
+    s.add_argument("--target", help="the project folder (project scope)")
+    s.add_argument("--dry-run", action="store_true", help="print the plan and a diff per overwrite; write nothing")
+    s.add_argument("--force", action="store_true", help="back up and overwrite a destination with other bytes")
+    s.add_argument("--workspace")
+    s = sp.add_parser("version", help="version bump: the next SemVer release, after a CHANGELOG.md entry")
+    x = s.add_subparsers(dest="version_cmd", required=True).add_parser("bump")
+    x.add_argument("unit")
+    x.add_argument("part", choices=("major", "minor", "patch"))
+    x.add_argument("--dry-run", action="store_true")
+    s = sp.add_parser("deprecate", help="mark a version deprecated (an unsigned marker; it stays installable)")
+    s.add_argument("unit")
+    s.add_argument("--version", required=True)
+    s.add_argument("--reason", required=True)
+    s.add_argument("--workspace")
+    s = sp.add_parser("drift", help="pinned tool versions, units recorded under an older ruleset and old rule dates; "
+                      "starts no process")
+    s.add_argument("root", nargs="?", default=".")
+    s.add_argument("--observed", action="append", default=[], metavar="TOOL=VERSION")
+    s.add_argument("--today", metavar="YYYY-MM-DD")
     return p
 
 def main(argv=None):
@@ -5614,8 +5935,13 @@ def _dispatch(a):
         print("\n".join(lines), file=sys.stdout if rc == 0 else sys.stderr)
         return rc
     if a.cmd == "builder-check": return builder_check(a.skill, a.workspace, a.compare)
+    if a.cmd in ("install", "version", "deprecate", "drift"): return lifecycle_dispatch(a)
     if a.cmd in ("approve", "register"):  # the human gate runs before the eval set is read, the same for every fixture
         def load():
+            import eva
+            if eva.detect_kind(a.skill) == "agent":
+                agent = Agent(a.skill)
+                return agent_spec(agent), agent_workspace(a, agent)
             spec, _ = load_eval_set(a.skill)
             return spec, os.path.realpath(a.workspace) if a.workspace else default_workspace(spec)
         if a.cmd == "approve":

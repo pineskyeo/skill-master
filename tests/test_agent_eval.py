@@ -771,8 +771,9 @@ class TestLiveRun(AgentBase):
         bench, gate = rjson(os.path.join(it, "benchmark.json")), rjson(os.path.join(it, "gate.json"))
         self.assertEqual(bench["tool_coverage"]["claude"]["status"], "run")
         self.assertEqual(bench["tool_coverage"]["claude"]["graded_runs"], 1)
-        for tool, status in (("codex", se.NOT_SELECTED), ("opencode", NOT_AVAILABLE), ("hermes", NOT_AVAILABLE)):
-            self.assertIn(T.coverage_missing(tool, status), gate["problems"])
+        for tool, status, waiver in (("codex", se.NOT_SELECTED, "missing"), ("opencode", NOT_AVAILABLE, "unsigned"),
+                                     ("hermes", NOT_AVAILABLE, "missing")):
+            self.assertIn(T.coverage_missing(tool, status, waiver), gate["problems"])
         self.assertFalse(any(p.startswith("coverage-missing:claude") for p in gate["problems"]))
         self.assertTrue(os.path.isfile(os.path.join(it, "comparison.md")))
         self.assertIn("coverage-missing:hermes", out)

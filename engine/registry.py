@@ -1,12 +1,13 @@
-"""The skill registry (unit B5): SemVer 2.0.0 parse and order, the format-2 registration record rules, the verify-now
-state classifier over injected callables, and the registry document with its canonical text. Standard library only;
-no import of eva or skill_eval (the callers pass the hashes and the approver in)."""
+"""The unit registry (units B5, B6): SemVer 2.0.0 parse and order, the default skill and agent workspaces, the format-2
+registration record rules, the verify-now state classifier over injected callables, and the registry document with its
+canonical text. No import of eva or skill_eval (the callers pass the hashes and the approver in)."""
 import json, os, re
 
 REGISTRATION_FORMAT = 2
 REGISTRY_FORMAT = 1
-AGENT_UNREGISTERED = "agents have no registration (gates.md G48)"
+NOT_A_UNIT = "neither SKILL.md nor AGENT.md is a regular file"
 NO_WORKSPACE = "the SKILL.md name is not a safe path component"
+NO_AGENT_WORKSPACE = "the agent name (the AGENT.md v2 name, else the folder name) is not a safe path component"
 SAFE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _ID = r"(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
 SEMVER_RE = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-(%s(?:\.%s)*))?"
@@ -46,6 +47,21 @@ def unit_workspace(unit_dir, meta):
     return os.path.join(os.path.dirname(unit_dir), name + "-workspace") if safe_name(name) else None
 
 
+def agent_name(agent_dir, info):
+    """The agent name of the agent commands: the AGENT.md v2 name when info (engine/primitives/transcript.read_agent of
+    the folder) is valid, else the name of the realpath folder."""
+    return info.meta["name"] if info.valid else os.path.basename(os.path.realpath(agent_dir))
+
+
+def agent_workspace(agent_dir, name=None):
+    """The default agent workspace of the agent commands, the record command and the index: <name>-workspace next to
+    the realpath agent folder, None when the name is not a safe path component. name: agent_name, read here when None."""
+    if name is None:
+        from engine.primitives import transcript
+        name = agent_name(agent_dir, transcript.read_agent(os.path.realpath(agent_dir)))
+    return os.path.join(os.path.dirname(os.path.realpath(agent_dir)), name + "-workspace") if safe_name(name) else None
+
+
 def version_of(meta):
     """The unit version: SKILL.md metadata.version, else version."""
     md = meta.get("metadata")
@@ -79,16 +95,17 @@ def bump_problem(rec, old):
     if new < was:
         return "version %s is lower than the registered version %s" % (rec["version"], old["version"])
     if new == was and old.get("skill_sha256") != rec["skill_sha256"]:
-        return ("version %s is already registered for another skill tree; bump the version in SKILL.md "
-                "metadata.version" % rec["version"])
+        return ("version %s is already registered for another skill tree; bump the version in %s" % (
+            rec["version"], "AGENT.md version" if rec.get("kind") == "agent" else "SKILL.md metadata.version"))
     return None
 
 
 def early_state(kind, ws):
     """The verify-now steps that read no hash and no signature (B5 D4 steps 1 to 4, up to the format): (state, reason,
-    record) when one decides, else (None, None, record) for a format-2 record that classify must verify."""
-    if kind != "skill": return "unregistered", AGENT_UNREGISTERED, None
-    if ws is None: return "unregistered", NO_WORKSPACE, None
+    record) when one decides, else (None, None, record) for a format-2 record that classify must verify. ws is None when
+    the unit name is not a safe path component."""
+    if kind not in ("skill", "agent"): return "unregistered", NOT_A_UNIT, None
+    if ws is None: return "unregistered", NO_AGENT_WORKSPACE if kind == "agent" else NO_WORKSPACE, None
     fp = os.path.join(ws, "registration.json")
     if not os.path.isfile(fp): return "unregistered", "no registration.json", None
     try:
@@ -137,7 +154,9 @@ def entry(root, row):
     rec = row["record"]
     out = {"kind": rec["kind"], "name": rec["skill_name"], "version": rec["version"],
            "path": row["path"].replace(os.sep, "/"),
-           "workspace": os.path.relpath(row["workspace"], root).replace(os.sep, "/"),
+           # an agent workspace sits next to the realpath agent folder, so it is compared with the realpath root
+           "workspace": posix_rel(row["workspace"], root) if rec["kind"] == "agent" else
+                        os.path.relpath(row["workspace"], root).replace(os.sep, "/"),
            "iteration": rec["iteration"], "registered_at": rec["registered_at"],
            "registered_by": rec["signed"]["principal"],
            "approvals": [dict({"gate": g, "principal": a["principal"]}, **({"reason": a["reason"]} if "reason" in a else {}))

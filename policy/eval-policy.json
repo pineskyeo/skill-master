@@ -11,6 +11,7 @@
     "TRIGGER_POS": {"value": 10, "type": "int", "source": "house", "note": "House rule (H): exactly 10 should-trigger queries; skill-creator and agentskills.io say 8-10 each. trigger-evals.schema.json x-count-where uses the same bound."},
     "TRIGGER_NEG": {"value": 10, "type": "int", "source": "house", "note": "House rule (H): exactly 10 should-not queries; skill-creator and agentskills.io say 8-10 each. trigger-evals.schema.json x-count-where uses the same bound."},
     "MAX_AUTO_ITERATIONS": {"value": 5, "type": "int", "source": "skill-creator, agentskills.io", "note": "skill-creator run_loop --max-iterations 5; agentskills.io: five iterations."},
-    "HIGH_VARIANCE_STDDEV": {"value": 0.3, "type": "float", "source": "house", "note": "H: per-eval pass_rate stddev that gets a flaky note."}
+    "HIGH_VARIANCE_STDDEV": {"value": 0.3, "type": "float", "source": "house", "note": "H: per-eval pass_rate stddev that gets a flaky note."},
+    "RULE_VERIFIED_MAX_DAYS": {"value": 180, "type": "int", "source": "house", "note": "Unit B6 (plan.md:1370): skill_eval.py drift lists a rule whose source.verified date is more than this many days before today, or null."}
   }
 }

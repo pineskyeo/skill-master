@@ -11,6 +11,7 @@ import test_skill_eval as T
 import test_registry as TR
 import test_multi_tool_parity as P
 import test_eva as E
+import test_install as TI
 from test_skill_eval import se, eva, write, read, rjson
 
 ROOT = T.ROOT
@@ -130,7 +131,7 @@ class TestGoldenSite(Golden):
             self.assertEqual(badge(self.page("skills/pdf-summarizer"), "coverage-" + tool),
                              "%s coverage: not-run: no eval iteration" % LABELS[tool])
             self.assertEqual(badge(self.page("agents/code-reviewer"), "coverage-" + tool),
-                             "%s coverage: not-run: no agent registration (gates.md G48)" % LABELS[tool])
+                             "%s coverage: not-run: no eval iteration" % LABELS[tool])
 
     def test_every_page_has_four_project_scope_snippet_blocks(self):
         for rel in GOLDEN_UNITS:
@@ -333,6 +334,23 @@ class TestRegisteredSite(TR.Reg):
         page = site(os.path.join(self.tmp, "site"))["units/skills--branch-setup.html"].decode("ascii")
         self.assertEqual(badge(page, "coverage-hermes"), "Hermes Agent coverage: not-run: engine not available")
         self.assertEqual(badge(page, "registration"), "stale (benchmark_sha256 changed)")
+
+    def test_a_registered_agent_beside_the_skill_leaves_the_skill_row_entry_and_page_byte_equal(self):
+        self.registered()
+        def outputs(tag):
+            rc, _, text, md = self.index()
+            out = os.path.join(self.tmp, "site-" + tag)
+            self.assertEqual(self.build(out)[0], 0)
+            row = next(ln for ln in md.splitlines() if "| branch-setup |" in ln)
+            return row, json.loads(text)["units"], read(os.path.join(out, "units", "skills--branch-setup.html"))
+        row, units, page = outputs("alone")
+        agent = TI.agent_copy(os.path.join(self.repo, "agents"))
+        TI.register_agent_at(self, agent, os.path.join(self.repo, "agents", TI.NAME + "-workspace"), self.runs)
+        row2, units2, page2 = outputs("both")
+        self.assertEqual(row2, row)
+        self.assertEqual(page2, page)
+        self.assertEqual([u for u in units2 if u["kind"] == "skill"], units)
+        self.assertEqual([(u["kind"], u["name"]) for u in units2], [("agent", TI.NAME), ("skill", "branch-setup")])
 
     def test_an_agent_with_wrappers_gets_copy_snippets_for_claude_and_codex(self):
         a = os.path.join(self.repo, "agents", "code-scout")

@@ -1563,7 +1563,8 @@ def build_index(root):
         raw, _ = read_text(os.path.join(u, "SKILL.md" if kind == "skill" else "AGENT.md"))
         meta = (parse_frontmatter(raw)[0] if raw is not None else None) or {}
         rep = check(u)
-        ws = registry.unit_workspace(u, meta) if kind == "skill" else None
+        ws = (registry.unit_workspace(u, meta) if kind == "skill" else
+              registry.agent_workspace(u) if kind == "agent" else None)
         state, reason, rec = registry.early_state(kind, ws)
         if state is None:
             import skill_eval

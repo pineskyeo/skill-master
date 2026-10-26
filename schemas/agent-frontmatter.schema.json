@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "AGENT.md v2 frontmatter",
-  "description": "The canonical AGENT.md v2 frontmatter (inputs/agent-master-skills.md section 3.3, unit B1): name, description, goal, capabilities from the closed vocabulary, model_policy as a role name, success_criteria as typed criterion objects, and targets as exactly the four tools. The strict frontmatter reader types every scalar as a string and refuses YAML flow mappings, so each success criterion is written as one single-quoted JSON object per list item and decoded with the strict JSON loader before this schema runs (engine/primitives/transcript.py read_agent). Fix: write the frontmatter with exactly these seven keys.",
+  "description": "The canonical AGENT.md v2 frontmatter (inputs/agent-master-skills.md section 3.3, unit B1): name, description, goal, capabilities from the closed vocabulary, model_policy as a role name, success_criteria as typed criterion objects, and targets as exactly the four tools. The strict frontmatter reader types every scalar as a string and refuses YAML flow mappings, so each success criterion is written as one single-quoted JSON object per list item and decoded with the strict JSON loader before this schema runs (engine/primitives/transcript.py read_agent). Fix: write the frontmatter with exactly these seven keys, plus the optional version. Unit B6 (D7, plan.md:1368): version is the agent's SemVer 2.0.0 version that register records and version bump rewrites.",
   "$comment": "source: house (agent-master-skills.md section 3.3, assessment section 4.5, plan.md:787-788; no dated record); severity: fail (agent-frontmatter-v2, must, CRITICAL); protects: claude, codex, opencode, hermes. The criterion definitions are copied in schemas/scenario.schema.json and pinned equal by tests/test_typed_criteria.py.",
   "type": "object",
   "required": ["name", "description", "goal", "capabilities", "model_policy", "success_criteria", "targets"],
@@ -13,7 +13,8 @@
     "capabilities": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/capability"}},
     "model_policy": {"type": "string", "pattern": "^[a-z]+(-[a-z]+)*$"},
     "success_criteria": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/criterion"}},
-    "targets": {"type": "array", "minItems": 4, "maxItems": 4, "uniqueItems": true, "items": {"enum": ["claude", "codex", "opencode", "hermes"]}}
+    "targets": {"type": "array", "minItems": 4, "maxItems": 4, "uniqueItems": true, "items": {"enum": ["claude", "codex", "opencode", "hermes"]}},
+    "version": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?\\Z"}
   },
   "$defs": {
     "nonblank": {"type": "string", "pattern": "\\S"},

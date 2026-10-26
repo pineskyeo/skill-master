@@ -1,0 +1,34 @@
+{
+  "$comment": "Install policy of skill_eval.py install (unit B6, plan.md:1367-1370), read by engine/install.py load_policy. destinations: per unit kind and tool, the project-scope path under --target ({name} is the unit name; a path ending in / is a folder that receives every file of a skill), its source, and verified (a date the source was read, or UNVERIFIED, which every install line prints). user_scope: Claude agents only (Appendix E Q12, plan.md:1779-1782); the loader refuses any other entry. forbidden_roots and forbidden_files are relative to both homes ($HOME and the account home from pwd); the loader refuses a policy that drops any root or file plan.md:1369 names (engine/install.py FLOOR_ROOTS, FLOOR_FILES). tool_pins: the tool versions drift compares against (plan.md:1370); they live here and not in targets/*.json because schemas/targets.schema.json is closed (additionalProperties false) and outside unit B6.",
+  "format": 1,
+  "backup_dir": ".unit-install-backup",
+  "forbidden_roots": [".claude", ".codex", ".config/opencode", ".hermes", ".agents", "Library/Keychains", ".ssh",
+                      ".config/skill-master"],
+  "forbidden_files": [".claude/settings.json", ".claude/settings.local.json", ".claude/hooks", ".codex/config.toml",
+                      ".codex/auth.json"],
+  "destinations": {
+    "agent": {
+      "claude": {"path": ".claude/agents/{name}.md", "source": "inputs/design.md:46", "verified": "2026-10-19"},
+      "codex": {"path": ".codex/agents/{name}.toml", "source": "inputs/design.md:62", "verified": "2026-10-19"},
+      "opencode": {"path": ".opencode/agents/{name}.md", "source": "inputs/design.md:77", "verified": "2026-10-19"},
+      "hermes": {"path": ".hermes/profiles/{name}/SOUL.md", "source": "inputs/design.md:114 records ~/.hermes/profiles/<name>/ only; whether Hermes reads a project profile is not recorded", "verified": "UNVERIFIED"}
+    },
+    "skill": {
+      "claude": {"path": ".claude/skills/{name}/", "source": "inputs/design.md:53", "verified": "2026-10-19"},
+      "codex": {"path": ".agents/skills/{name}/", "source": "inputs/design.md:68", "verified": "2026-10-19"},
+      "opencode": {"path": ".opencode/skills/{name}/", "source": "plan.md:1022 (plan line only)", "verified": "UNVERIFIED"},
+      "hermes": {"path": ".hermes/skills/{name}/", "source": "plan.md:1076 (plan line only)", "verified": "UNVERIFIED"}
+    }
+  },
+  "user_scope": {
+    "agent": {
+      "claude": {"path": ".claude/agents/{name}.md", "source": "inputs/design.md:46; Appendix E Q12 (plan.md:1779-1782)", "verified": "2026-10-19"}
+    }
+  },
+  "tool_pins": {
+    "claude": {"version": "2.1.302", "verified": "2026-10-19", "source": "inputs/design.md:225 (claude --version)"},
+    "codex": {"version": "0.162.1", "verified": "2026-10-19", "source": "inputs/design.md:225 (codex --version: codex-cli 0.162.1)"},
+    "opencode": {"version": "1.17.13", "verified": "2026-10-19", "source": "inputs/design.md:225 (opencode --version)"},
+    "hermes": null
+  }
+}

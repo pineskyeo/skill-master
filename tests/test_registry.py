@@ -222,8 +222,7 @@ class TestStates(Reg):
 
     def test_an_agent_is_unregistered(self):
         state, reason, rec = se.registration_state(E.p("golden", "agents", "code-reviewer"))
-        self.assertEqual((state, rec), ("unregistered", None))
-        self.assertIn("G48", reason)
+        self.assertEqual((state, reason, rec), ("unregistered", "no registration.json", None))
 
     def test_a_moved_workspace_reads_moved_and_a_copy_of_the_whole_tree_still_verifies(self):
         self.registered()
@@ -327,7 +326,7 @@ class TestSchemas(Reg):
         self.assertEqual(errors(REGISTRATION_SCHEMA, {k: v for k, v in rec.items() if k != "signed"}), [])
         for bad in (dict(rec, skill_path="/abs/branch-setup"), dict(rec, skill_path="~/branch-setup"),
                     dict(rec, version="v1.0.0"), dict(rec, version="1.0"), dict(rec, registration_format=1),
-                    dict(rec, kind="agent"), dict(rec, extra=1), dict(rec, approvals={"eval_set": rec["signed"]}),
+                    dict(rec, kind="tool"), dict(rec, extra=1), dict(rec, approvals={"eval_set": rec["signed"]}),
                     dict(rec, approvals={"coverage_waiver:hermes": rec["signed"]}),
                     {k: v for k, v in rec.items() if k != "approvals"},
                     {k: v for k, v in rec.items() if k != "version"}):
@@ -347,6 +346,22 @@ class TestSchemas(Reg):
                     dict(doc, units=[dict(entry, extra=1)]), dict(doc, units=[dict(entry, path="/abs")]),
                     dict(doc, units=[dict(entry, version="1.0")])):
             self.assertTrue(errors(REGISTRY_SCHEMA, bad), bad)
+
+    def test_the_registry_schema_takes_a_skill_or_an_agent_entry_and_no_other_kind(self):
+        self.registered()
+        doc = json.loads(self.index()[2])
+        entry = doc["units"][0]
+        self.assertEqual(entry["kind"], "skill")
+        self.assertEqual(errors(REGISTRY_SCHEMA, doc), [])
+        self.assertEqual(errors(REGISTRY_SCHEMA, dict(doc, units=[dict(entry, kind="agent")])), [])
+        for kind in ("tool", "Skill", "", None, 1):
+            self.assertTrue(errors(REGISTRY_SCHEMA, dict(doc, units=[dict(entry, kind=kind)])), kind)
+
+    def test_no_text_claims_that_agents_have_no_registration(self):
+        for rel in ("engine/registry.py", "skill_eval.py", "eva.py"):
+            text = read(os.path.join(ROOT, *rel.split("/")))
+            for claim in ("agents have no registration", "no agent registration", "waivers are not read yet"):
+                self.assertFalse(claim in text, (rel, claim))
 
 
 class TestIndex(Reg):
