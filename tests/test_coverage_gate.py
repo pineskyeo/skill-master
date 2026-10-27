@@ -458,6 +458,31 @@ class TestPolicy(Cov):
         with mock.patch.object(se, "POLICY_DIR", self.policy_copy(put(["hermes", "claude"]))):
             self.assertEqual(se.load_coverage_required(), ("claude", "hermes"))
 
+    def test_the_loader_refuses_a_malformed_machine_waivable(self):
+        """S1: machine_waivable lists the tools a machine waiver may clear; never claude or codex (gates.md G33)."""
+        def put(value):
+            return lambda doc: doc.update(machine_waivable=value)
+        for label, edit in (("missing", lambda doc: doc.pop("machine_waivable")), ("a string", put("hermes")),
+                            ("empty", put([])), ("duplicate", put(["hermes", "hermes"])), ("claude", put(["claude"])),
+                            ("codex", put(["opencode", "codex"])), ("unknown tool", put(["gemini"])), ("null", put(None))):
+            with self.subTest(label), mock.patch.object(se, "POLICY_DIR", self.policy_copy(edit)):
+                with self.assertRaises(se.PolicyError) as cm: se.load_machine_waivable()
+                self.assertIn("policy/gate.rules.json: machine_waivable", str(cm.exception))
+        with mock.patch.object(se, "POLICY_DIR", self.policy_copy(lambda doc: None)):
+            self.assertEqual(se.load_machine_waivable(), ("opencode", "hermes"))
+
+    def test_a_machine_waived_entry_counts_as_waived_and_shows_its_source(self):
+        clean = RB.B1_FIXTURES["clean"][0]
+        two = se.tool_coverage(["claude", "codex"], {"claude": 1, "codex": 1})
+        machine = {"status": "approved", "principal": "p", "verdict_reason": "", "reason": "r", "source": "machine",
+                   "machine_waiver": {"sha256": SHA, "expires": AT}}
+        waivers = {t: dict(machine) if t in ("opencode", "hermes") else {"status": "missing"} for t in TOOLS}
+        gate = se.compute_gate(dict(clean, tool_coverage=two, coverage_waivers=waivers))
+        self.assertEqual(missing_tools(gate), [])
+        self.assertEqual(gate["coverage"]["hermes"], "waived by machine policy %s" % SHA[:12])
+        self.assertIn("coverage waived: hermes (dynamic eval %s) by machine policy %s (p, expires %s): r"
+                      % (NOT_AVAILABLE, SHA, AT), gate["notes"])
+
     def test_removing_hermes_moves_the_ruleset_and_existing_approvals_read_stale(self):
         n = self.run_both()
         self.waive("hermes"); se.approve("eval_set", self.spec, self.ws)

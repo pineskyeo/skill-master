@@ -25,7 +25,9 @@ CLAUDE_NAMES = {"read": "Read", "search": "Glob, Grep", "write": "Write, Edit", 
                 "web_search": "WebSearch", "delegate": "Task", "skill": "Skill"}
 OPENCODE_ALLOW = {"read": {"read", "lsp"}, "search": {"glob", "grep", "list"}, "write": {"edit"}, "shell": {"bash"},
                   "web_fetch": {"webfetch"}, "web_search": {"websearch"}, "delegate": {"task"}, "skill": {"skill"}}
-PATTERNS = ["*approve*", "*register*", "*--live*", "*install*--user*", "*install*--scope*user*"]
+S1_PATTERNS = ["*approve-ui*", "*scripts/approve-ui.sh*", "*approver-session*", "*machine-waiver*sign*",
+               "*machine-waiver*revoke*"]
+PATTERNS = ["*approve*", "*register*", "*--live*", "*install*--user*", "*install*--scope*user*"] + S1_PATTERNS
 for _b in ("claude", "codex", "opencode", "hermes"):
     PATTERNS += [_b, _b + " *", "*/" + _b, "*/" + _b + " *", "* " + _b, "* " + _b + " *"]
 PATTERNS += ["git push*", "* git push*"]
@@ -357,12 +359,29 @@ class TestCapabilityMapping(Base):
             self.assertEqual(list(perm["bash"]), ["*"] + PATTERNS)
             self.assertEqual(perm["bash"]["*"], "allow")
             self.assertEqual({perm["bash"][p] for p in PATTERNS}, {"deny"})
+            self.assert_s1_denies(perm["bash"])
         else:
             self.assertEqual(perm["bash"], "deny", caps)
         self.assertEqual(os.listdir(os.path.join(d, "wrappers", "hermes")), ["SOUL.md"])
         soul = self.text(d, "wrappers/hermes/SOUL.md")
         for word in ("permission", "allow", "deny", "tools"):
             self.assertNotIn(word, soul, caps)
+
+    def assert_s1_denies(self, bash):
+        """S1 (plan.md:1510): each new signing command has its own deny pattern, checked with Python fnmatch as a proxy
+        for OpenCode's matching (UNVERIFIED, gates.md G31); no pattern denies `pending` or `machine-waiver show`."""
+        import fnmatch
+        denied = [p for p, v in bash.items() if v == "deny"]
+        for p in S1_PATTERNS: self.assertEqual(bash.get(p), "deny", p)
+        for cmd, pattern in (("python3 skill_eval.py approve-ui --unit x", "*approve-ui*"),
+                             ("zsh scripts/approve-ui.sh --tailscale", "*scripts/approve-ui.sh*"),
+                             ("python3 skill_eval.py approver-session", "*approver-session*"),
+                             ("python3 skill_eval.py machine-waiver sign --tools opencode", "*machine-waiver*sign*"),
+                             ("python3 skill_eval.py machine-waiver  sign", "*machine-waiver*sign*"),
+                             ("python3 skill_eval.py machine-waiver revoke", "*machine-waiver*revoke*")):
+            self.assertTrue(fnmatch.fnmatchcase(cmd, pattern), cmd)
+        for cmd in ("python3 skill_eval.py pending --unit a --workspace b", "python3 skill_eval.py machine-waiver show"):
+            self.assertEqual([p for p in denied if fnmatch.fnmatchcase(cmd, p)], [], cmd)
 
     def test_each_capability_alone_on_every_tool(self):
         for c in VOCAB:

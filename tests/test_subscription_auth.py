@@ -61,6 +61,7 @@ class TestApiKeysRefusedAndScrubbed(Base):
     def test_child_env_never_carries_api_keys(self):
         keys = {k: SECRET for k in se.API_KEY_ENV}
         with mock.patch.dict(os.environ, dict(keys, CLAUDE_CODE_OAUTH_TOKEN="oat-fake")):
+            for k in se.APPROVER_SESSION_ENV: os.environ.pop(k, None)  # a Terminal's SSH_AUTH_SOCK joins env_removed
             spec, _ = self.spec(evals=evals_doc(human=False))
             claude_env = se.ClaudeCodeEngine().sandbox_env(self.runs)
             sb = se.Sandbox(se.CodexEngine(), spec, {"files": []}, None, self.runs)

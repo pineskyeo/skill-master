@@ -8,7 +8,7 @@
     {"id": "subscription-auth", "label": "Subscription auth only: no API-key variable, and a claude.ai login wherever claude is called."},
     {"id": "grader-not-model-under-test", "label": "The claude grader model differs from every claude model under test."},
     {"id": "rule-review", "label": "Every rule-review finding has a signed decision bound to these exact findings."},
-    {"id": "approvals", "label": "The requirements and eval_set gates carry current signed approvals."},
+    {"id": "approvals", "label": "The requirements_eval_set gate, or both the requirements and eval_set gates, carry current signed approvals."},
     {"id": "priced-models", "label": "Every model the command calls has a price."},
     {"id": "preflight", "label": "Preflight finds nothing that blocks a live run (skill copies, API keys, isolation)."},
     {"id": "per-call-bound", "label": "Each engine without a per-call cap has a worst-case call bound within the budget."},

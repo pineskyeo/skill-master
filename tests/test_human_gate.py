@@ -12,7 +12,7 @@ get a stdin that is not a TTY and a sitecustomize audit hook (GATE_SITE) that bl
 ~/.config/skill-master or any start of ssh-add or ssh-keygen; the pty and in-process cases run only where the real
 ancestry probe sees an agent (require_agent_ancestor) and carry GateSentinel traps after the presence checks.
 """
-import contextlib, ctypes, hashlib, io, os, pwd, select, shutil, struct, subprocess, sys, tempfile, time, unittest
+import contextlib, ctypes, hashlib, io, json, os, pwd, select, shutil, struct, subprocess, sys, tempfile, time, unittest
 from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_skill_eval as T
@@ -729,6 +729,13 @@ class KeyChecks(Keys):
         other = (0, (self.intruder_pub + " someone\n").encode(), b"")
         self.assertEqual(self.approver(environ=env, ssh_add=lambda: other).key_problems(), [])
         self.assertEqual(self.approver(environ=env).key_problems(), [])
+        session = SessionAgent.session_approver(self, listed={SessionAgent.LAUNCHD: True})
+        probs = session.key_problems()
+        self.assertEqual(len(probs), 1, probs); self.assertIn("approver key is loaded in ssh-agent", probs[0])
+        self.assertIn(SessionAgent.LAUNCHD, probs[0])
+        terminal = self.approver(environ={"SSH_AUTH_SOCK": SessionAgent.LAUNCHD}, ssh_add=lambda: loaded,
+                                 launchd=lambda: [SessionAgent.LAUNCHD], lstat=SessionAgent.fake_lstat())
+        self.assertIn("approver key is loaded in ssh-agent", terminal.key_problems()[0])
 
     def test_ssh_add_that_cannot_answer_fails_closed(self):
         """Coordinator question 2: SSH_AUTH_SOCK unset, exit 2, or exit 1 with other output all fail."""
@@ -772,6 +779,304 @@ class KeyChecks(Keys):
                 probs = self.approver(environ=env, signers=p).key_problems()
                 self.assertTrue(any(want in x for x in probs), probs)
         self.assertIn("approver key missing: ", self.approver(environ=env, key=os.path.join(d, "none")).key_problems()[0])
+
+
+class SessionAgent(Keys):
+    """S1 D4: approver-check accepts the key in an agent only through a live approver-session socket, and asks the
+    launchd agent too. Fake glob, fake sockets (an lstat table) and a fake ssh-add; no real agent or socket."""
+    FOLDER = "/tmp/skill-master-approver-test0001"
+    SOCK = FOLDER + "/agent.sock"
+    LAUNCHD = "/private/tmp/com.apple.launchd.TEST0001/Listeners"
+
+    @staticmethod
+    def fake_lstat(overrides=None):
+        import stat
+        uid = os.getuid()
+        table = {os.path.realpath(SessionAgent.FOLDER): (stat.S_IFDIR | 0o700, uid),
+                 os.path.realpath(SessionAgent.SOCK): (stat.S_IFSOCK | 0o600, uid),
+                 os.path.dirname(SessionAgent.LAUNCHD): (stat.S_IFDIR | 0o700, uid),
+                 SessionAgent.LAUNCHD: (stat.S_IFSOCK | 0o777, uid)}
+        table.update(overrides or {})
+        def lstat(path):
+            if path not in table: raise FileNotFoundError(2, "No such file", path)
+            mode, owner = table[path]
+            return os.stat_result((mode, 0, 0, 1, owner, 0, 0, 0, 0, 0))
+        return lstat
+
+    @staticmethod
+    def session_approver(case, listed=None, environ=None, overrides=None, asked=None, launchd=None):
+        """listed: {socket: True (lists the approver key) | False (no identities) | (rc, out, err)}."""
+        listed = dict({SessionAgent.SOCK: True, SessionAgent.LAUNCHD: False}, **(listed or {}))
+        def answer(sock):
+            if asked is not None: asked.append(sock)
+            v = listed.get(sock, (2, b"", b"Could not open a connection to your authentication agent.\n"))
+            if v is True: return 0, (case.pub + " approver\n").encode(), b""
+            if v is False: return T.NO_IDENTITIES
+            return v
+        env = {"SSH_AUTH_SOCK": SessionAgent.SOCK, "SKILL_MASTER_APPROVER_SESSION": SessionAgent.FOLDER}
+        if environ is not None: env = environ
+        return case.approver(environ=env, ssh_add=lambda: answer(env.get("SSH_AUTH_SOCK")), ask_agent=answer,
+                             launchd=launchd or (lambda: [SessionAgent.LAUNCHD]), lstat=SessionAgent.fake_lstat(overrides))
+
+    def test_a_key_in_a_live_session_socket_passes_and_signs_through_that_agent(self):
+        asked = []
+        ap = self.session_approver(self, asked=asked)
+        self.assertEqual(ap.key_problems(), [])
+        self.assertEqual(sorted(set(asked)), sorted({self.SOCK, self.LAUNCHD}))
+        s = ap.open_sitting("approve")
+        self.assertEqual(s.agent, (self.SOCK, self.pub))
+
+    def test_a_key_in_the_launchd_agent_fails_inside_a_session(self):
+        probs = self.session_approver(self, listed={self.LAUNCHD: True}).key_problems()
+        self.assertEqual(len(probs), 1, probs)
+        self.assertIn("the approver key is loaded in ssh-agent", probs[0]); self.assertIn(self.LAUNCHD, probs[0])
+
+    def test_a_session_socket_from_another_folder_fails(self):
+        other = "/tmp/skill-master-approver-other002/agent.sock"
+        env = {"SSH_AUTH_SOCK": other, "SKILL_MASTER_APPROVER_SESSION": self.FOLDER}
+        import stat
+        ap = self.session_approver(self, listed={other: True}, environ=env,
+                                   overrides={os.path.realpath(other): (stat.S_IFSOCK | 0o600, os.getuid())})
+        probs = ap.key_problems()
+        self.assertEqual(len(probs), 1, probs); self.assertIn("approver key is loaded in ssh-agent", probs[0])
+
+    def test_a_session_folder_that_breaks_the_rule_is_another_agent(self):
+        import stat
+        uid, folder, sock = os.getuid(), os.path.realpath(self.FOLDER), os.path.realpath(self.SOCK)
+        for why, overrides, env in (
+                ("mode 0755", {folder: (stat.S_IFDIR | 0o755, uid)}, None),
+                ("a symlinked folder", {folder: (stat.S_IFLNK | 0o700, uid)}, None),
+                ("another owner", {folder: (stat.S_IFDIR | 0o700, uid + 1)}, None),
+                ("not a socket", {sock: (stat.S_IFREG | 0o600, uid)}, None),
+                ("no marker", {}, {"SSH_AUTH_SOCK": self.SOCK}),
+                ("outside /tmp", {}, {"SSH_AUTH_SOCK": "/var/x/skill-master-approver-test0001/agent.sock",
+                                      "SKILL_MASTER_APPROVER_SESSION": "/var/x/skill-master-approver-test0001"}),
+                ("another prefix", {}, {"SSH_AUTH_SOCK": "/tmp/approver-test0001/agent.sock",
+                                        "SKILL_MASTER_APPROVER_SESSION": "/tmp/approver-test0001"})):
+            with self.subTest(why):
+                listed = {env["SSH_AUTH_SOCK"]: True} if env else None
+                probs = self.session_approver(self, listed=listed, environ=env, overrides=overrides).key_problems()
+                self.assertEqual(len(probs), 1, probs)
+                self.assertIn("approver key is loaded in ssh-agent", probs[0])
+
+    def test_a_dead_session_agent_fails_closed(self):
+        probs = self.session_approver(self, listed={self.SOCK: (2, b"", b"connection refused\n")}).key_problems()
+        self.assertEqual(len(probs), 1, probs)
+        self.assertIn("could not ask the approver-session agent at %s" % self.SOCK, probs[0])
+        self.assertIsNone(self.session_approver(self, listed={self.SOCK: False}).key_check()[1])
+
+    def test_the_launchd_socket_must_resolve_to_exactly_one_user_owned_socket(self):
+        import stat
+        second = "/private/tmp/com.apple.launchd.TEST0002/Listeners"
+        for why, paths, overrides, ok in (
+                ("none", [], {}, False),
+                ("two sockets", [self.LAUNCHD, second], {second: (stat.S_IFSOCK | 0o777, os.getuid()),
+                                                         os.path.dirname(second): (stat.S_IFDIR | 0o700, os.getuid())},
+                 False),
+                ("a decoy owned by another user is filtered", [self.LAUNCHD, second],
+                 {second: (stat.S_IFSOCK | 0o777, os.getuid() + 1),
+                  os.path.dirname(second): (stat.S_IFDIR | 0o700, os.getuid() + 1)}, True),
+                ("a decoy that is no socket is filtered", [self.LAUNCHD, second],
+                 {second: (stat.S_IFREG | 0o600, os.getuid()),
+                  os.path.dirname(second): (stat.S_IFDIR | 0o700, os.getuid())}, True)):
+            with self.subTest(why):
+                probs = self.session_approver(self, launchd=lambda p=paths: p, overrides=overrides).key_problems()
+                if ok: self.assertEqual(probs, [])
+                else:
+                    self.assertEqual(len(probs), 1, probs)
+                    self.assertIn("cannot resolve the launchd ssh-agent socket", probs[0])
+
+    def test_an_ssh_login_asks_the_launchd_agent_and_fails_closed_when_it_cannot(self):
+        ssh = {"SSH_CONNECTION": "100.101.102.103 50000 100.84.56.12 22", "SSH_TTY": "/dev/ttys004"}
+        self.assertEqual(self.session_approver(self, environ=dict(ssh)).key_problems(), [])
+        probs = self.session_approver(self, environ=dict(ssh), listed={self.LAUNCHD: True}).key_problems()
+        self.assertIn("approver key is loaded in ssh-agent", probs[0])
+        probs = self.session_approver(self, environ=dict(ssh), listed={self.LAUNCHD: (2, b"", b"no")}).key_problems()
+        self.assertIn("could not ask ssh-agent", probs[0])
+        probs = self.session_approver(self, environ=dict(ssh), launchd=lambda: []).key_problems()
+        self.assertIn("cannot resolve the launchd ssh-agent socket", probs[0])
+        forwarded = dict(ssh, SSH_AUTH_SOCK="/tmp/ssh-XXXX/agent.123")
+        probs = self.session_approver(self, environ=forwarded, listed={"/tmp/ssh-XXXX/agent.123": True}).key_problems()
+        self.assertIn("approver key is loaded in ssh-agent", probs[0])
+
+    def test_the_command_line_approver_always_resolves_the_launchd_agent(self):
+        ap = self.A.cli_approver()
+        self.assertIsNotNone(ap.launchd); self.assertIsNotNone(ap.ask_agent)
+        self.assertEqual(self.A.LAUNCHD_GLOB, "/private/tmp/com.apple.launchd.*/Listeners")
+
+
+class SessionStart(Keys):
+    """S1 D3: approver-session with a fake ssh-agent process, a fake ssh-add and a fake shell. The probe signature is
+    made with the throwaway key as the agent would; no real agent, socket or shell starts."""
+    def session(self, probe_ok=True, add_rc=0, environ=None):
+        import stat
+        st = {"sock": None, "added": False, "shell": None, "killed": False, "started": False}
+        class FakeAgent(object):
+            alive = True
+            def poll(s): return None if s.alive else 0
+            def kill(s): s.alive = False; st["killed"] = True
+            def wait(s, timeout=None): return 0
+        def start_agent(sock, lifetime):
+            st.update(sock=sock, lifetime=lifetime, started=True)
+            return FakeAgent()
+        def lstat(path):
+            if st["sock"] and os.path.basename(path) == "agent.sock" and \
+                    os.path.realpath(os.path.dirname(path)) == os.path.realpath(os.path.dirname(st["sock"])):
+                return os.stat_result((stat.S_IFSOCK | 0o600, 0, 0, 1, os.getuid(), 0, 0, 0, 0, 0))
+            return os.lstat(path)
+        keygen = T.keygen_runner(self.kdir, self.calls)
+        def run(argv, input=None, new_session=True, timeout=30, env=None):
+            if argv[0] == self.A.SSH_ADD:
+                st.update(added=add_rc == 0, add=(list(argv), new_session, timeout, env))
+                return add_rc, b"", b"" if add_rc == 0 else b"Bad passphrase\n"
+            if argv[1:3] == ["-Y", "sign"] and argv[argv.index("-f") + 1].endswith("approver.pub"):
+                if not probe_ok: return 1, b"", b"agent refused operation\n"
+                return keygen([argv[0], "-Y", "sign", "-n", self.A.NAMESPACE, "-f", self.key, argv[-1]],
+                              input=(T.TEST_PASSPHRASE + "\n").encode(), new_session=True)
+            return keygen(argv, input=input, new_session=new_session, timeout=timeout, env=env)
+        def ask(sock):
+            if st["sock"] and sock == st["sock"] and st["added"]: return 0, (self.pub + " approver\n").encode(), b""
+            return T.NO_IDENTITIES
+        def shell(env):
+            st["shell"] = dict(env)
+            return 0
+        ap = self.approver(environ=environ or dict(T.AGENT_ENV), run=run, ask_agent=ask, lstat=lstat, passphrase=None)
+        return ap, st, lambda: self.A.run_session(ap, start_agent=start_agent, shell=shell)
+
+    def test_the_session_starts_a_private_agent_a_marked_subshell_and_cleans_up(self):
+        ap, st, go = self.session()
+        self.assertEqual(go(), 0)
+        folder = os.path.dirname(st["sock"])
+        self.assertTrue(os.path.basename(folder).startswith("skill-master-approver-"))
+        self.assertEqual(os.path.dirname(os.path.realpath(folder)), os.path.realpath("/tmp"))
+        self.assertEqual(st["lifetime"], 28800)
+        argv, new_session, timeout, env = st["add"]
+        self.assertEqual((argv, new_session, env["SSH_AUTH_SOCK"]), ([self.A.SSH_ADD, "-t", "28800", self.key], False,
+                                                                     st["sock"]))
+        shell = st["shell"]
+        self.assertEqual((shell["SSH_AUTH_SOCK"], shell["SKILL_MASTER_APPROVER_SESSION"]), (st["sock"], folder))
+        self.assertTrue(shell["PS1"].startswith("[approver]"))
+        self.assertTrue(st["killed"]); self.assertFalse(os.path.exists(folder))
+        self.assertTrue(any("approver session ended" in x for x in self.shown), self.shown)
+
+    def test_a_probe_signature_that_fails_refuses_the_start_and_cleans_up(self):
+        ap, st, go = self.session(probe_ok=False)
+        with self.assertRaises(self.A.Refused) as cm: go()
+        self.assertIn("approver-session: signing failed", str(cm.exception))
+        self.assertIsNone(st["shell"]); self.assertTrue(st["killed"])
+        self.assertFalse(os.path.exists(os.path.dirname(st["sock"])))
+
+    def test_a_key_that_does_not_load_refuses_the_start(self):
+        ap, st, go = self.session(add_rc=1)
+        with self.assertRaises(self.A.Refused) as cm: go()
+        self.assertIn("ssh-add could not load the approver key", str(cm.exception))
+        self.assertIsNone(st["shell"]); self.assertFalse(os.path.exists(os.path.dirname(st["sock"])))
+
+    def test_presence_and_nesting_refuse_before_any_agent_starts(self):
+        for env, want in ((dict(T.AGENT_ENV, CLAUDECODE="1"), "approver-session needs a human at an interactive terminal"),
+                          (dict(T.AGENT_ENV, SKILL_MASTER_APPROVER_SESSION="/tmp/skill-master-approver-x"),
+                           "already inside an approver session")):
+            with self.subTest(want):
+                ap, st, go = self.session(environ=env)
+                with self.assertRaises(self.A.Refused) as cm: go()
+                self.assertIn(want, str(cm.exception))
+                self.assertFalse(st["started"])
+
+    def test_signing_inside_the_session_still_runs_presence_and_asks_the_challenge(self):
+        ap = SessionAgent.session_approver(self)
+        with mock.patch.object(self.A, "is_tty", lambda fd: fd != 0):
+            with self.assertRaises(self.A.Refused) as cm: ap.sign("approve", "eval_set", sentinel)
+        self.assertIn("needs a human at an interactive terminal", str(cm.exception))
+        ap.read_proc = self.A.table_reader({4242: (77, "Python", "/usr/bin/python3"),
+                                            77: (1, "claude.exe", "/opt/claude.exe"), 1: (0, "launchd", "/sbin/launchd")})
+        with self.assertRaises(self.A.Refused) as cm: ap.sign("approve", "eval_set", sentinel)
+        self.assertIn("agent process in the parent chain", str(cm.exception))
+        ap = SessionAgent.session_approver(self)
+        ap.read_line = lambda prompt: "WRONG1\n"
+        with self.assertRaises(self.A.Refused) as cm: ap.sign("approve", "eval_set", self.prepared())
+        self.assertEqual(str(cm.exception), "approve: challenge mismatch: nothing was signed")
+        self.assertFalse([c for c in self.calls if c[1:3] == ["-Y", "sign"]])
+
+
+class SessionNeverReachesAChild(unittest.TestCase):
+    """R25-1: no model child of a run, and no code such a child runs, gets the approver-session agent. The fake child is a
+    script in a temp folder started through live_exec, the one place a real CLI starts; no agent or socket exists."""
+    FOLDER = "/tmp/skill-master-approver-r25child"
+    SOCK = FOLDER + "/agent.sock"
+    SESSION = {"SSH_AUTH_SOCK": SOCK, "SSH_AGENT_PID": "4321", "SKILL_MASTER_APPROVER_SESSION": FOLDER,
+               "PS1": "[approver] %~ %# ", "PROMPT": "[approver] %~ %# "}
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="gate-child-"); self.addCleanup(shutil.rmtree, self.tmp, True)
+        pt = mock.patch.dict(os.environ, dict(self.SESSION, R25_PROBE="kept"))
+        pt.start(); self.addCleanup(pt.stop)
+
+    def assert_no_session(self, env, where):
+        """Failure messages name variables only: a child environment holds this machine's credentials."""
+        self.assertEqual(sorted(set(self.SESSION) & set(env)), [], where)
+        self.assertEqual(sorted(k for k, v in env.items() if self.FOLDER in v), [], where)
+        self.assertEqual(env.get("R25_PROBE"), "kept", where)
+
+    def test_every_child_environment_drops_the_session(self):
+        for where, env in (("scrub_env", se.scrub_env(os.environ)), ("claude_child_env", se.claude_child_env()),
+                           ("claude sandbox_env", se.ClaudeCodeEngine().sandbox_env(self.tmp))):
+            with self.subTest(where):
+                self.assert_no_session(env, where)
+
+    def test_a_fake_child_started_through_live_exec_cannot_see_the_socket(self):
+        child = os.path.join(self.tmp, "child.py")
+        write(child, "import json, os, sys\nsys.stdout.write(json.dumps(dict(os.environ)))\n")
+        for where, env in (("default env", None), ("an unscrubbed env passed in", dict(os.environ))):
+            with self.subTest(where), mock.patch.dict(se._LIVE, {"on": True, "gated": False, "ledger": None}):
+                rc, out, err = se.live_exec([sys.executable, "-B", child], self.tmp, 60, env=env)
+                self.assertEqual(rc, 0, "the fake child failed: " + err[-300:])
+                self.assertFalse(self.SOCK in out, "the fake child saw the session socket path (%s)" % where)
+                self.assert_no_session(json.loads(out), where)
+        self.assertEqual(os.environ["SSH_AUTH_SOCK"], self.SOCK, "the parent keeps the session for its own signing")
+
+
+class SshSessionRoot(Keys):
+    """S1 D5: an interactive TTY session rooted at sshd passes with no agent ancestor; every agent ancestor and every
+    unreadable process still refuses. Fake process tables only."""
+    SSH = {"SSH_CONNECTION": "100.101.102.103 50000 100.84.56.12 22", "SSH_TTY": "/dev/ttys004",
+           "SSH_AUTH_SOCK": "/tmp/gate-test-agent.sock"}
+    ROOT = {66: (55, "sshd-session", "/usr/libexec/sshd-session"), 55: (1, "sshd", "/usr/sbin/sshd"),
+            1: (0, "launchd", "/sbin/launchd")}
+
+    def presence(self, table, environ=None):
+        return self.approver(environ=environ or self.SSH, read_proc=self.A.table_reader(table)).presence_problems()
+
+    def test_an_interactive_session_rooted_at_sshd_passes(self):
+        table = {**self.ROOT, 4242: (77, "Python", "/usr/bin/python3"), 77: (66, "zsh", "/bin/zsh")}
+        self.assertEqual(self.presence(table), [])
+
+    def test_an_agent_ancestor_inside_an_ssh_session_refuses(self):
+        table = {**self.ROOT, 4242: (77, "Python", "/usr/bin/python3"), 77: (88, "zsh", "/bin/zsh"),
+                 88: (66, "claude.exe", "/opt/claude.exe")}
+        self.assertEqual(self.presence(table), ["agent process in the parent chain: claude.exe (pid 88)"])
+
+    def test_an_sshd_that_an_agent_started_refuses(self):
+        table = {4242: (77, "Python", "/usr/bin/python3"), 77: (66, "zsh", "/bin/zsh"),
+                 66: (55, "sshd", "/usr/sbin/sshd"), 55: (1, "codex", "/opt/homebrew/bin/codex"),
+                 1: (0, "launchd", "/sbin/launchd")}
+        self.assertEqual(self.presence(table), ["agent process in the parent chain: codex (pid 55)"])
+
+    def test_an_unreadable_sshd_fails_closed(self):
+        table = {4242: (77, "Python", "/usr/bin/python3"), 77: (66, "zsh", "/bin/zsh"),
+                 66: (55, "sshd-session", "/usr/libexec/sshd-session")}
+        probs = self.presence(table)
+        self.assertEqual(len(probs), 1, probs)
+        self.assertTrue(probs[0].startswith("ancestry check failed closed: cannot read pid 55"), probs)
+
+    def test_an_sshd_root_without_ttys_refuses(self):
+        table = {**self.ROOT, 4242: (66, "Python", "/usr/bin/python3")}
+        with mock.patch.object(self.A, "is_tty", lambda fd: False):
+            self.assertEqual(self.presence(table), ["stdin is not a TTY", "stdout is not a TTY", "stderr is not a TTY"])
+
+    def test_a_launchd_job_without_ttys_refuses(self):
+        table = {4242: (1, "Python", "/usr/bin/python3"), 1: (0, "launchd", "/sbin/launchd")}
+        with mock.patch.object(self.A, "is_tty", lambda fd: False):
+            self.assertEqual(len(self.presence(table, environ={})), 3)
 
 
 class FixedPaths(Keys):

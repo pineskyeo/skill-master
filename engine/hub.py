@@ -110,13 +110,24 @@ def load_templates(folder):
     return out
 
 
+def machine_waiver_html(view):
+    mw = view.get("machine_waiver")
+    rec = mw.get("record") if isinstance(mw, dict) else None
+    if not isinstance(rec, dict): return "<li>none</li>"
+    return ('<li data-machine-waiver="%s">machine waiver <code>%s</code> by %s, tools %s, expires %s: %s</li>'
+            % (esc(str(mw.get("sha256"))), esc(str(mw.get("sha256"))), esc(shown(rec.get("principal"), "principal")),
+               esc(",".join(str(t) for t in rec.get("tools") or [])), esc(str(rec.get("expires"))),
+               esc(shown(rec.get("reason"), "reason"))))
+
+
 def unit_page(view, labels, template):
     name = shown(view["name"], "name")
     items = "\n".join("<li>%s</li>" % badge(*b) for b in badges(view, labels))
     hashes = "\n".join('<li data-hash="%s"><code>%s</code> %s</li>' % (k, v, k) for k, v in sorted(view["hashes"].items()))
-    approvals = "\n".join("<li>%s by %s%s</li>" % (esc(a["gate"]), esc(shown(a["principal"], "principal")),
-                                                    ": " + esc(shown(a["reason"], "reason")) if a["reason"] else "")
-                          for a in view["approvals"]) or "<li>none</li>"
+    approvals = "\n".join(["<li>%s by %s%s</li>" % (esc(a["gate"]), esc(shown(a["principal"], "principal")),
+                                                     ": " + esc(shown(a["reason"], "reason")) if a["reason"] else "")
+                           for a in view["approvals"]] +
+                          ([machine_waiver_html(view)] if view.get("machine_waiver") else [])) or "<li>none</li>"
     blocks = []
     for tool in TOOLS:
         note, lines = snippet(view, tool, labels)
