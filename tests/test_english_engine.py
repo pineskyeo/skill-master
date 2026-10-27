@@ -1,9 +1,10 @@
-"""The engine files outside eva.py hold English text only, and translating them changed no behavior.
-The scan reads source files only: it never imports, runs or execs loop.py or claude_bash_gate.py, and calls no
+"""The engine files, README.md and every file under references/ hold English text only, and translating them changed no
+behavior. The scan reads source files only: it never imports, runs or execs loop.py or claude_bash_gate.py, and calls no
 subprocess, no claude/codex/opencode/hermes binary and no network.
-Contract: the meta-test reports non-English text (as eva.non_english_hits classifies it) in the five engine files that
-is written literally anywhere in a file, or that appears in the value of any Python string or bytes literal (adjacent
-literals joined as Python joins them, joined bytes read as UTF-8 with replacement) or in the full text of LOOP.md once
+Contract: the meta-test reports non-English text (as eva.non_english_hits classifies it) in the engine files, README.md
+and every file under references/ found at test time that is written literally anywhere in a file, or that appears in
+the value of any Python string or bytes literal (adjacent literals joined as Python joins them, joined bytes read as
+UTF-8 with replacement) or in the full text of each other file once
 these reader decodings are applied again and again until the text stops changing (at most DECODE_PASSES passes):
 backslash escapes (u with four hex digits, U with eight, N with a name, the JavaScript braced form), HTML character
 references with or without the semicolon as html.unescape reads them, and percent-encoded UTF-8 (runs of % plus two hex
@@ -11,15 +12,16 @@ digits, read as UTF-8 with replacement); after each pass every high surrogate fo
 one character, whatever spelled them. Out of the contract: text built by running code (for example chr,
 String.fromCharCode, atob, unescape, decodeURIComponent, base64, bytes.decode, a + join of literals) and CSS escapes.
 This file stays ASCII only: Hangul in the test data is written as escapes or chr() calls."""
-import ast, codecs, contextlib, html, io, os, re, subprocess, sys, tempfile, tokenize, unittest
+import ast, codecs, contextlib, html, io, os, pathlib, re, shutil, subprocess, sys, tempfile, tokenize, unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 import eva, skill_eval as se
 
-PY_FILES = ("skill_eval.py", "label_blind.py", "loop.py", "claude_bash_gate.py")
-MD_FILES = ("LOOP.md",)
+PY_FILES = ("eva.py", "skill_eval.py", "label_blind.py", "loop.py", "claude_bash_gate.py")
+MD_FILES = ("LOOP.md", "README.md")
+NEW_REFERENCES = ("references/engine-cli.md", "references/eval-set-format.md", "references/rules.md")
 GAPS_IN_A_STRING_GROUP = (tokenize.NL, tokenize.COMMENT)
 SLUG_PATTERN = 'r"[^0-9A-Za-z\\uAC00-\\uD7A3]+"'
 EVAL_DIR_PATTERN = 'r"^[0-9A-Za-z\\uAC00-\\uD7A3._-]+$"'
@@ -155,23 +157,36 @@ def utf_8_text(data, byte_lines):
 
 
 def file_findings(root, name):
-    path = os.path.join(root, name)
-    with open(path, encoding="utf-8") as f:
-        text = f.read()
+    path = os.path.join(root, *name.split("/"))
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except UnicodeDecodeError as e:
+        raise AssertionError("%s is not UTF-8 text, so the English scan cannot read it: %s" % (name, e))
     lines = char_lines(text, 1, text.count("\n") + 1)
     found = hits(text, lines)
     return found | (string_findings(name, path) if name.endswith(".py") else hits(*read(text, lines)))
 
 
+def scanned_files(root):
+    """The engine files, LOOP.md, README.md and every file under root/references, in any folder and of any name, at call
+    time."""
+    found = []
+    for dp, _, fn in os.walk(os.path.join(root, "references")):
+        found += [os.path.relpath(os.path.join(dp, n), root).replace(os.sep, "/") for n in fn]
+    return PY_FILES + MD_FILES + tuple(sorted(found))
+
+
 def engine_findings(root):
     return ["%s:%d %s" % (name, line, script)
-            for name in PY_FILES + MD_FILES for line, script in sorted(file_findings(root, name))]
+            for name in scanned_files(root) for line, script in sorted(file_findings(root, name))]
 
 
 def planted_findings(name, source):
     with tempfile.TemporaryDirectory() as d:
-        for each in PY_FILES + MD_FILES:
-            with open(os.path.join(d, each), "w", encoding="utf-8") as f:
+        for each in sorted(set(PY_FILES + MD_FILES + (name,))):
+            os.makedirs(os.path.dirname(os.path.join(d, *each.split("/"))), exist_ok=True)
+            with open(os.path.join(d, *each.split("/")), "w", encoding="utf-8") as f:
                 f.write(source if each == name else "")
         return engine_findings(d)
 
@@ -219,7 +234,8 @@ class TestEngineIsEnglish(unittest.TestCase):
         self.assertEqual(planted_findings("skill_eval.py", source), ["skill_eval.py:2 Hangul"])
 
     def test_a_hangul_comment_is_reported_in_each_engine_file(self):
-        for name in ("skill_eval.py", "label_blind.py", "loop.py", "claude_bash_gate.py", "LOOP.md"):
+        for name in ("eva.py", "skill_eval.py", "label_blind.py", "loop.py", "claude_bash_gate.py", "LOOP.md", "README.md",
+                     "references/any-new-guide.md"):
             with self.subTest(name=name):
                 comment = "<!-- %s -->" % H if name.endswith(".md") else "# " + H
                 self.assertEqual(planted_findings(name, "x = 1\n" + comment + "\n"), ["%s:2 Hangul" % name])
@@ -309,6 +325,236 @@ class TestEngineIsEnglish(unittest.TestCase):
     def test_a_legacy_reference_glued_to_three_percent_layers_decodes_within_the_pass_cap(self):
         source = 'x = 1\nPAGE = r"""<p>&copy%25255Cud55c</p>"""\n'
         self.assertEqual(planted_findings("label_blind.py", source), ["label_blind.py:2 Hangul"])
+
+
+def walked_references(root):
+    return tuple(sorted(p.relative_to(root).as_posix() for p in pathlib.Path(root, "references").rglob("*") if p.is_file()))
+
+
+def plant_tree(d, plants):
+    for each in PY_FILES + MD_FILES:
+        with open(os.path.join(d, each), "w", encoding="utf-8") as f:
+            f.write("")
+    for name, data in plants.items():
+        path = os.path.join(d, *name.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(data)
+
+
+class TestScanScope(unittest.TestCase):
+    def test_the_scan_covers_eva_the_readme_and_every_reference_found_now(self):
+        self.assertIn("eva.py", PY_FILES)
+        names = scanned_files(ROOT)
+        self.assertEqual(names, PY_FILES + ("LOOP.md", "README.md") + walked_references(ROOT))
+        for ref in NEW_REFERENCES:
+            self.assertIn(ref, names)
+
+    def test_hangul_in_any_file_under_references_is_reported_whatever_its_folder_name_or_case(self):
+        plants = {n: ("# T\n\n" + H + "\n").encode("utf-8") for n in (
+            "references/sub/x.md", "references/sub/deeper/page.html", "references/UPPER.MD", "references/notes.txt",
+            "references/data.json", "references/guide.markdown", "references/page.mdx", "references/NOTES")}
+        with tempfile.TemporaryDirectory() as d:
+            plant_tree(d, plants)
+            self.assertEqual(scanned_files(d), PY_FILES + MD_FILES + walked_references(d))
+            self.assertEqual(engine_findings(d), ["%s:3 Hangul" % n for n in sorted(plants)])
+
+    def test_a_file_under_references_that_is_not_utf_8_fails_by_name(self):
+        with tempfile.TemporaryDirectory() as d:
+            plant_tree(d, {"references/a.md": b"# A\n", "references/img/logo.png": b"\x89PNG\r\n\x1a\n\xff\xfe"})
+            with self.assertRaisesRegex(AssertionError, "references/img/logo.png"):
+                engine_findings(d)
+
+    def test_a_hangul_line_planted_in_a_copy_of_the_readme_is_the_only_finding(self):
+        with tempfile.TemporaryDirectory() as d:
+            for each in PY_FILES + ("LOOP.md",):
+                with open(os.path.join(d, each), "w", encoding="utf-8") as f:
+                    f.write("")
+            with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as f:
+                lines = f.read().split("\n")
+            with open(os.path.join(d, "README.md"), "w", encoding="utf-8") as f:
+                f.write("\n".join(lines[:2] + ["Planted: " + H] + lines[2:]))
+            self.assertEqual(engine_findings(d), ["README.md:3 Hangul"])
+
+    def test_a_reference_added_later_is_scanned_without_a_code_edit(self):
+        self.assertEqual(planted_findings("references/added-later.md", "# Guide\n\nSee " + H + ".\n"),
+                         ["references/added-later.md:3 Hangul"])
+
+
+FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+CODE_SPAN = re.compile(r"(`+)(?:(?!\1).)+?\1")
+INLINE_LINK = re.compile(r"\[[^\]\n]*\]\(\s*<?([^)\s>]+)>?(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^)]*\)))?\s*\)")
+REFERENCE_LINK = re.compile(r"^ {0,3}\[[^\]\n]+\]:\s*<?(\S+?)>?(?:\s|$)")
+HTML_LINK = re.compile(r"<[A-Za-z][^>]*?\s(?:href|src)\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'>]+))", re.I)
+URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+
+
+def doc_files(root):
+    refs = os.path.join(root, "references")
+    return ["README.md"] + sorted("references/" + n for n in os.listdir(refs) if n.endswith(".md"))
+
+
+def relative_links(text):
+    """(line, target) of every Markdown link and HTML href or src outside fenced code and code spans whose target is not
+    a URL or an in-page anchor; the target loses its #fragment."""
+    out, fence = [], None
+    for n, line in enumerate(text.split("\n"), 1):
+        m = FENCE.match(line)
+        if fence:
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence): fence = None
+            continue
+        if m:
+            fence = m.group(1); continue
+        line = CODE_SPAN.sub("", line)
+        targets = INLINE_LINK.findall(line) + REFERENCE_LINK.findall(line) + ["".join(t) for t in HTML_LINK.findall(line)]
+        out += [(n, t.split("#")[0]) for t in targets if not URL_SCHEME.match(t) and not t.startswith("#")]
+    return out
+
+
+def doc_links(root, name):
+    with open(os.path.join(root, *name.split("/")), encoding="utf-8") as f:
+        return relative_links(f.read())
+
+
+def resolves(root, base, target):
+    """True when target, relative to the folder base, names an existing path inside root with the exact case of every
+    component (this volume ignores case, a case-sensitive host does not). A root-relative target never resolves."""
+    if target.startswith("/"):
+        return False
+    rel = os.path.relpath(os.path.normpath(os.path.join(base, *target.split("/"))), root)
+    if rel == os.pardir or rel.startswith(os.pardir + os.sep):
+        return False
+    here = root
+    for part in [] if rel == os.curdir else rel.split(os.sep):
+        if not os.path.isdir(here) or part not in os.listdir(here):
+            return False
+        here = os.path.join(here, part)
+    return True
+
+
+def broken_links(root):
+    found = []
+    for name in doc_files(root):
+        base = os.path.dirname(os.path.join(root, *name.split("/")))
+        found += ["%s:%d %s" % (name, n, t) for n, t in doc_links(root, name) if not resolves(root, base, t)]
+    return found
+
+
+class TestDocLinks(unittest.TestCase):
+    def test_every_relative_link_in_the_readme_and_the_references_resolves(self):
+        self.assertEqual(broken_links(ROOT), [])
+        self.assertGreater(sum(len(doc_links(ROOT, n)) for n in doc_files(ROOT)), 10)
+
+    def test_the_readme_links_the_three_new_references(self):
+        targets = [t for _, t in doc_links(ROOT, "README.md")]
+        for ref in NEW_REFERENCES:
+            self.assertIn(ref, targets)
+
+    def test_a_planted_broken_link_is_reported_and_urls_anchors_and_code_are_not(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "references"))
+            with open(os.path.join(d, "LOOP.md"), "w", encoding="utf-8") as f:
+                f.write("# Loop\n")
+            with open(os.path.join(d, "README.md"), "w", encoding="utf-8") as f:
+                f.write("# R\n\n[ok](LOOP.md) [web](https://example.com/x.md) [top](#r) `[c](gone.md)`\n"
+                        "```\n[fenced](gone.md)\n```\n[gone](references/missing.md#part)\n")
+            with open(os.path.join(d, "references", "a.md"), "w", encoding="utf-8") as f:
+                f.write("# A\n\n[up](../LOOP.md) [loop](../LOOP.md#loop)\n[ref]: ../nowhere.md\n")
+            self.assertEqual(broken_links(d), ["README.md:7 references/missing.md", "references/a.md:4 ../nowhere.md"])
+
+    def test_a_case_only_match_an_escaping_or_root_relative_link_html_links_and_other_titles_are_checked(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = os.path.join(d, "repo")
+            os.makedirs(os.path.join(root, "references"))
+            for path, text in ((os.path.join(d, "outside.md"), "# Outside\n"), (os.path.join(root, "LOOP.md"), "# Loop\n"),
+                               (os.path.join(root, "references", "a.md"), "# A\n\n[up](../LOOP.md 'Loop')\n")):
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(text)
+            with open(os.path.join(root, "README.md"), "w", encoding="utf-8") as f:
+                f.write("# R\n\n[case](loop.md) [ok](LOOP.md)\n[out](../outside.md)\n[root](/LOOP.md)\n"
+                        "<a href=\"gone-a.md\">a</a> <img alt=\"x\" src='gone.png'> <a href=\"LOOP.md\">ok</a>\n"
+                        "[sq](gone-sq.md 'Title') [ok](LOOP.md 'T')\n[pt](gone-pt.md (Title)) [ok](LOOP.md (T))\n")
+            self.assertEqual(broken_links(root), ["README.md:3 loop.md", "README.md:4 ../outside.md", "README.md:5 /LOOP.md",
+                                                  "README.md:6 gone-a.md", "README.md:6 gone.png", "README.md:7 gone-sq.md",
+                                                  "README.md:8 gone-pt.md"])
+
+
+SENTENCE_BREAK = re.compile(r"(?<=\.)\s+(?=[A-Z`\[])")
+NO_RUN_CLAIM = re.compile(r"(?i)\bexecutes? nothing\b|\b(?:no|nothing)\b[^.]*\bCLI\b")
+UNQUALIFIED_NO_RUN = re.compile(r"(?i)\bexecutes? nothing\b|\bno\s+CLI\b")
+PLUGIN_LISTING = "check-builtin-plugins"
+
+
+def doc_sentences(root, name):
+    with open(os.path.join(root, *name.split("/")), encoding="utf-8") as f:
+        return [(n, s) for n, line in enumerate(f.read().split("\n"), 1) for s in SENTENCE_BREAK.split(line) if s.strip()]
+
+
+def no_run_claims(root, name):
+    """(line, sentence) of every sentence that bounds what runs by `--live` and says no CLI runs or nothing executes.
+    A sentence about the plugin listing is that bound's exception, not a claim."""
+    return [(n, s) for n, s in doc_sentences(root, name)
+            if "`--live`" in s and NO_RUN_CLAIM.search(s) and PLUGIN_LISTING not in s]
+
+
+def names_the_plugin_listing_exception(root, name):
+    return any(PLUGIN_LISTING in s and "`claude`" in s and "without `--live`" in s for _, s in doc_sentences(root, name))
+
+
+class TestLiveBoundaryDocs(unittest.TestCase):
+    def test_a_doc_that_bounds_cli_starts_by_live_names_the_plugin_listing_as_the_exception(self):
+        self.assertNotIn("live", vars(se.build_parser().parse_args([PLUGIN_LISTING])))
+        self.assertEqual(se.builtin_plugin_check_command()[0], "claude")
+        claimed = [n for n in doc_files(ROOT) if no_run_claims(ROOT, n)]
+        self.assertTrue({"README.md", "references/engine-cli.md"} <= set(claimed), claimed)
+        self.assertEqual([n for n in claimed if not names_the_plugin_listing_exception(ROOT, n)], [])
+
+    def test_a_no_run_claim_names_the_tool_clis_because_the_plan_starts_ssh_keygen(self):
+        self.assertEqual(["%s:%d" % (name, n) for name in doc_files(ROOT) for n, s in no_run_claims(ROOT, name)
+                          if UNQUALIFIED_NO_RUN.search(s)], [])
+
+
+EVA_SUBCOMMANDS = ("check", "check-all", "feedback", "index", "schema-check", "generate")
+FEEDBACK_HEADINGS = ["# Eva Feedback: DoEverything",
+                     "## Categories below the floor (each category needs a pass rate of 50% or more and at least one pass)",
+                     "## What to fix (most important first)"]
+
+
+def eva_output(argv):
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+        try:
+            rc = eva.main(argv)
+        except SystemExit as e:
+            rc = e.code
+    return rc, out.getvalue()
+
+
+class TestEvaPrintsEnglish(unittest.TestCase):
+    def test_the_help_of_eva_and_of_every_subcommand_has_no_non_english_line(self):
+        for argv in [["--help"]] + [[sub, "--help"] for sub in EVA_SUBCOMMANDS]:
+            with self.subTest(argv=argv):
+                rc, text = eva_output(argv)
+                self.assertEqual(rc, 0, text)
+                self.assertIn("usage: eva", text)
+                self.assertEqual(eva.non_english_hits(text), [])
+
+    def test_a_folder_without_a_unit_gets_an_english_fix(self):
+        with tempfile.TemporaryDirectory() as d:
+            rep = eva.check(d)
+        self.assertEqual([(c["id"], c["reason"], c["fix"]) for c in rep.checks if c["id"] == "frontmatter"],
+                         [("frontmatter", "no SKILL.md or AGENT.md", "Put a SKILL.md or an AGENT.md in the folder.")])
+
+    def test_feedback_on_a_copy_of_do_everything_writes_english_headings(self):
+        with tempfile.TemporaryDirectory() as d:
+            unit = os.path.join(d, "DoEverything")
+            shutil.copytree(os.path.join(ROOT, "bad", "skills", "DoEverything"), unit)
+            rc, _ = eva_output(["feedback", unit])
+            with open(os.path.join(unit, "FEEDBACK.md"), encoding="utf-8") as f:
+                headings = [l for l in f.read().splitlines() if l.startswith("#")]
+        self.assertEqual(rc, 1)
+        self.assertEqual(headings, FEEDBACK_HEADINGS)
+        self.assertEqual([h for h in headings if eva.non_english_hits(h)], [])
 
 
 KO = "\ud55c\uad6d\uc5b4 \ud14d\uc2a4\ud2b8"

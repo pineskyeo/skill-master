@@ -159,11 +159,12 @@ class TestLiveCommandQuoting(Base):
         self.assertNotIn('"%s"' % rr, live)  # not JSON quoting
 
 class TestDocs(unittest.TestCase):
-    def test_readme_documents_round7(self):
-        readme = read(os.path.join(T.ROOT, "README.md"))
-        for s in ("Round 7", "builder output is not a JSON object", "shlex.join", "Round 7부터 `env`의 `CLAUDE_CODE_OAUTH_TOKEN`도 거부"):
-            self.assertIn(s, readme, s)
-        self.assertNotIn("`CLAUDE_CODE_OAUTH_TOKEN`은 검사하지 않음", readme)
+    def test_docs_document_builder_output_and_settings_token(self):
+        docs = T.docs_text()
+        for s in ("builder output is not a JSON object", "shlex.join",
+                  "a `CLAUDE_CODE_OAUTH_TOKEN` entry in the `env` of any settings source"):
+            self.assertIn(s, docs, s)
+        self.assertNotIn("`CLAUDE_CODE_OAUTH_TOKEN` is not checked", docs)
 
 if __name__ == "__main__":
     unittest.main()

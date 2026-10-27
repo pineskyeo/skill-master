@@ -66,10 +66,10 @@ class TestBuilderIsError(Base):
         self.assertEqual(b.spent, 5.0)
 
 class TestDocs(unittest.TestCase):
-    def test_readme_documents_round9(self):
-        readme = read(os.path.join(T.ROOT, "README.md"))
-        for s in ("Round 9", "builder result is an error", "is_error"):
-            self.assertIn(s, readme, s)
+    def test_docs_document_builder_error_result(self):
+        docs = T.docs_text()
+        for s in ("builder result is an error", "is_error"):
+            self.assertIn(s, docs, s)
 
 if __name__ == "__main__":
     unittest.main()

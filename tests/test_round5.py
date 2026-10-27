@@ -416,12 +416,12 @@ class TestSkillSourcesBeforeLaunch(Base):
         self.assertIn("apiKeySource is 'apiKeyHelper'", plan_of(self.ws, n)["stopped"])
 
 class TestDocs(unittest.TestCase):
-    def test_readme_documents_round5(self):
-        readme = read(os.path.join(T.ROOT, "README.md"))
+    def test_docs_document_settings_sources_and_failed_calls(self):
+        docs = T.docs_text()
         for s in ("CLAUDE_CODE_USE_BEDROCK", "managed-settings.d", "com.anthropic.claudecode", "remote-settings.json",
                   "CLAUDE_CONFIG_DIR", "apiKeySource", "user-invocable: false", "max(reported, cap)",
                   "call failed after launch", "symlink"):
-            self.assertIn(s, readme, s)
+            self.assertIn(s, docs, s)
 
 if __name__ == "__main__":
     unittest.main()

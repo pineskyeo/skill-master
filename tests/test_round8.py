@@ -93,10 +93,10 @@ class TestBuilderNonResultObject(Base):
         self.assertAlmostEqual(b.spent, 7.25); self.assertAlmostEqual(entry["api_equivalent_usd"], 7.25)
 
 class TestDocs(unittest.TestCase):
-    def test_readme_documents_round8(self):
-        readme = read(os.path.join(T.ROOT, "README.md"))
-        for s in ("Round 8", "builder output is not a result object", "turn.completed", "turn.failed"):
-            self.assertIn(s, readme, s)
+    def test_docs_document_unfinished_streams(self):
+        docs = T.docs_text()
+        for s in ("builder output is not a result object", "turn.completed", "turn.failed"):
+            self.assertIn(s, docs, s)
 
 if __name__ == "__main__":
     unittest.main()

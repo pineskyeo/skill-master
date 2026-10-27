@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Eva (에바): SKILL.md skill evaluator (agent checks are slated to move to a separate "agent master").
+"""Eva: SKILL.md skill evaluator (agent checks are slated to move to a separate "agent master").
 stdlib only, Python 3.9+."""
 import argparse, codecs, collections, json, os, posixpath, re, shlex, shutil, sys, unicodedata
 from engine.loaders import (TomlError, _DQ_ESCAPES, _DQ_HEX, _TOML_BARE_KEY_RE, _TOML_ESCAPES, _TOML_FLOAT_RE, _TOML_INT_RE,
@@ -26,26 +26,9 @@ from engine.primitives.script_denylist import (ENGLISH_MAX_SHOWN, LINK_CYCLE, LI
 PASS_THRESHOLD = 0.8
 CATEGORY_FLOOR = 0.5  # every category with applicable checks needs >=1 pass and pass rate >= this
 NAME_MAX = 64
-EVAL_LAYERS = ("static", "llm", "human")  # optional evals[].layer: how the case is graded
-EVAL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")  # optional evals[].name: one safe path component (H)
 RESERVED_NAME_WORDS = ("anthropic", "claude")  # Claude skill authoring best practices: name "cannot contain"
-DESCRIPTION_MAX = 1024  # spec + best practices: description "Max 1024 characters"
-# Thresholds the moved rows read are rule operands (rules/skill-*.rules.json); these names read them from the default
-# bundle for the callers that still use eva.<name>. DESCRIPTION_MAX, NAME_MAX and RESERVED_NAME_WORDS stay literals for
-# the A3 parity oracle and name_errors; tests/test_differential.py pins them to the operands.
-OPERANDS = {"SKILL_MAX_BYTES": ("size-limit", "max_bytes"), "SKILL_MAX_LINES": ("size-limit", "lines_below"),
-            "SKILL_FIELDS": ("frontmatter-fields", "fields"), "HOST_SKILL_FIELDS": ("frontmatter-fields", "host_fields"),
-            "COMPATIBILITY_MAX": ("compatibility-length", "max"), "REF_TOC_LINES": ("reference-toc", "toc_lines"),
-            "MIN_EVALS": ("evals-count", "min"), "DESCRIPTION_MIN": ("description-min-length", "min")}
 
 
-def __getattr__(name):
-    if name not in OPERANDS:
-        raise AttributeError("module 'eva' has no attribute '%s'" % name)
-    rid, key = OPERANDS[name]
-    rule = next(r for r in rule_runner.default_bundle().rules if r.id == rid)
-    value = rule.node[key]
-    return tuple(value) if isinstance(value, list) else value
 # ---------- description heuristics (engine/primitives/description_heuristics.py, rules/data/description.json) ----------
 desc_when_clause = description_heuristics.when_clause
 desc_person_words = description_heuristics.person_words
@@ -160,54 +143,8 @@ def _str_field(meta, key):
     return v.strip() if isinstance(v, str) else ""
 
 # ---------- English-only rule (owner decision 2026-10-19; design and exceptions: notes/english-rule-plan.md) ----------
-# The stdlib has no Unicode script property, so the script of a character is read from its Unicode name. The test fails
-# closed: a letter, mark or number whose name does not start with an English-compatible word is flagged, and so is a code
-# point this Python's Unicode database does not assign (Python 3.9 has Unicode 13.0), so a script or emoji added by a
-# newer Unicode version fails instead of passing. Greek stays allowed for math and unit notation. The scanner detects
-# scripts, not languages: German prose in Latin letters passes.
-NON_ENGLISH_SCRIPT_WORDS = frozenset("""HANGUL CJK KANGXI HIRAGANA KATAKANA KANA BOPOMOFO IDEOGRAPH IDEOGRAPHIC KOREAN
-CYRILLIC ARABIC HEBREW SYRIAC THAANA NKO SAMARITAN MANDAIC THAI LAO DEVANAGARI BENGALI GURMUKHI GUJARATI ORIYA TAMIL
-TELUGU KANNADA MALAYALAM SINHALA TIBETAN MYANMAR KHMER MONGOLIAN ARMENIAN GEORGIAN ETHIOPIC CHEROKEE CANADIAN COPTIC
-YI LISU VAI BAMUM OGHAM RUNIC GLAGOLITIC TIFINAGH TAGALOG HANUNOO BUHID TAGBANWA LIMBU TAI BUGINESE BALINESE SUNDANESE
-BATAK LEPCHA OL SYLOTI PHAGS PA SAURASHTRA KAYAH REJANG JAVANESE CHAM MEETEI LINEAR AEGEAN PHAISTOS LYCIAN CARIAN GOTHIC
-UGARITIC DESERET SHAVIAN OSMANYA OSAGE ELBASAN CAUCASIAN CYPRIOT IMPERIAL PALMYRENE NABATAEAN HATRAN PHOENICIAN LYDIAN
-MEROITIC KHAROSHTHI MANICHAEAN AVESTAN INSCRIPTIONAL PSALTER HANIFI YEZIDI SOGDIAN CHORASMIAN ELYMAIC BRAHMI KAITHI
-SORA CHAKMA MAHAJANI SHARADA KHOJKI MULTANI KHUDAWADI GRANTHA NEWA TIRHUTA SIDDHAM MODI TAKRI AHOM DOGRA WARANG DIVES
-NANDINAGARI ZANABAZAR SOYOMBO PAU BHAIKSUKI MARCHEN MASARAM GUNJALA MAKASAR CUNEIFORM EGYPTIAN ANATOLIAN MRO BASSA
-PAHAWH MEDEFAIDRIN MIAO TANGUT NUSHU KHITAN HENTAIGANA DUPLOYAN SIGNWRITING NYIAKENG WANCHO MENDE ADLAM INDIC OTTOMAN
-HANGZHOU MASU""".split())
-ENGLISH_COMPATIBLE_FIRST_WORDS = frozenset("""LATIN GREEK COMBINING MODIFIER CARON FEMININE MASCULINE MICRO SUPERSCRIPT SUBSCRIPT
-VULGAR FRACTION DOUBLE-STRUCK EULER SCRIPT BLACK-LETTER PLANCK OHM KELVIN ANGSTROM TURNED ALEF BET GIMEL DALET INFORMATION
-ROMAN SMALL CIRCLED PARENTHESIZED NEGATIVE DOUBLE DINGBAT DIGIT NUMBER FULLWIDTH VARIATION MUSICAL TALLY SEGMENTED
-VIETNAMESE MATHEMATICAL""".split())
-# squared katakana words and era names have no script word in their Unicode names
-_NON_ENGLISH_RANGES = ((0x3300, 0x3357, "Katakana"), (0x337B, 0x337F, "CJK"), (0x32FF, 0x32FF, "CJK"))
-ENGLISH_FIX = ("Rewrite the text in English (owner rule: all skill and agent content is English only). Task input data "
-               "that must stay non-English belongs in evals/files/, which is not scanned.")
 ENGLISH_BUILDER_RULE = ("Write all skill content in English only (every file a run installs, plus evals/evals.json and "
                         "evals/trigger_evals.json); the loop stops if any non-English text appears.")
-# FEEDBACK.md and FEEDBACK.json are what `eva.py feedback` and loop.py write into the unit.
-SKILL_IGNORE = ("evals", "__pycache__", "*-workspace", ".git", "FEEDBACK.md", "FEEDBACK.json")
-SKILL_TOOL_FILES = ("agents/openai.yaml",)
-SKIP_DIRS = ("__pycache__", ".git")
-# Run-output matchers (review, not FAIL): only the fields that are matched against what a run produced. Key paths end-match,
-# list indexes are ignored. Everything else under "check" (path, fixture, tool, type, ...) is configuration and stays FAIL.
-OUTPUT_MATCHER_KEYS = {"evals": (("check", "pattern"), ("check", "input_regex"), ("check", "rows")),
-                       "scenarios": (("must_include",),)}
-
-# Binary assets are skipped, never read as text. Text that decodes (UTF-8 or UTF-16 with BOM) is always scanned, whatever its
-# extension or first bytes say. Data that does not decode is binary only when its leading bytes match a known format
-# (BINARY_SIGNATURES) or its extension is a known binary format (BINARY_EXTENSIONS); otherwise it fails: it cannot be verified.
-BINARY_SIGNATURES = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a", b"%PDF-", b"PK\x03\x04", b"PK\x05\x06",
-                     b"\x1f\x8b", b"BZh", b"\xfd7zXZ\x00", b"7z\xbc\xaf\x27\x1c", b"II*\x00", b"MM\x00*", b"wOFF", b"wOF2",
-                     b"OTTO", b"\x00\x01\x00\x00", b"true", b"ID3", b"OggS", b"fLaC", b"\x7fELF", b"\xca\xfe\xba\xbe",
-                     b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"SQLite format 3\x00", b"\x00asm", b"\x00\x00\x01\x00")
-BINARY_EXTENSIONS = frozenset(""".png .jpg .jpeg .gif .webp .bmp .ico .icns .tif .tiff .heic .avif .pdf .zip .gz .tgz .bz2 .xz .7z
-.jar .woff .woff2 .ttf .otf .eot .mp3 .mp4 .m4a .wav .ogg .flac .mov .webm .avi .sqlite .sqlite3 .db .xlsx .xls .docx .doc
-.pptx .ppt .pyc .so .dylib .dll .exe .class .wasm .bin .npy .parquet""".split())
-
-
-
 
 
 ENGLISH_RULES = "english-only.rules.json"
@@ -232,56 +169,6 @@ def english_scan(path, bundle=None):
     of bundle (default: the default bundle), so the skill_eval gates and the rows share one source."""
     return script_denylist.scan_unit(path, detect_kind(path), _english_groups(bundle))
 
-def _legacy_english_scan(path):
-    """Full English-only scan of the skill or agent folder at path (kind from detect_kind)."""
-    kind = detect_kind(path)
-    s = EnglishScan(kind)
-    if kind == "skill":
-        text, _ = read_text(os.path.join(path, "SKILL.md"))
-        s.add("english-skill-md", "SKILL.md (frontmatter and body)",
-              english_text_findings(text, "SKILL.md", frontmatter=True) if text is not None else [],
-              1 if text is not None else None)
-        files, bf = _tree_view(unit_tree(path))
-        nb, skipped = 0, 0
-        for rel in files:
-            if rel == "SKILL.md" or rel in SKILL_TOOL_FILES: continue
-            name_hits = non_english_hits(rel)
-            if name_hits: bf.append("%s (file name) [%s]" % (rel, "/".join(sorted({h[2] for h in name_hits}))))
-            f, st = _scan_file(path, rel, decode=_decode_mode(rel))
-            bf += f; nb += st == "scanned"; skipped += st == "binary"
-        s.add("english-bundled-files", "installed files other than SKILL.md and agents/openai.yaml (%d binary skipped)"
-              % skipped, bf, nb or None)
-        ev, rv, n = _json_group(path, ("evals/evals.json", "evals/trigger_evals.json"), "evals")
-        s.add("english-evals", "evals/evals.json, evals/trigger_evals.json", ev, n or None)
-        s.review += rv
-        tf, nt = [], 0
-        for rel in SKILL_TOOL_FILES:
-            f, st = _scan_file(path, rel, decode=_decode_mode(rel))
-            tf += f; nt += st == "scanned"
-        s.add("english-tool-files", "agents/openai.yaml", tf, nt or None)
-    elif kind == "agent":
-        text, _ = read_text(os.path.join(path, "AGENT.md"))
-        s.add("english-agent-md", "AGENT.md (frontmatter and body)",
-              english_text_findings(text, "AGENT.md", frontmatter=True) if text is not None else [],
-              1 if text is not None else None)
-        tree = unit_tree(path, _skip_dirs)
-        files, links = _tree_view(tree, "scenarios")
-        ev, rv, n = _json_group(path, [x for x in files if x.count("/") == 1 and x.endswith(".json")], "scenarios")
-        ev = links + ev
-        for rel in files:  # file names reach the model too: every file under scenarios/
-            name_hits = non_english_hits(rel)
-            if name_hits: ev.append("%s (file name) [%s]" % (rel, "/".join(sorted({h[2] for h in name_hits}))))
-        s.add("english-scenarios", "scenarios/ (JSON contents and file names)", ev, n or None)
-        s.review += rv
-        files, wf = _tree_view(tree, "wrappers")
-        nw, skipped = 0, 0
-        for rel in files:
-            name_hits = non_english_hits(rel)
-            if name_hits: wf.append("%s (file name) [%s]" % (rel, "/".join(sorted({h[2] for h in name_hits}))))
-            f, st = _scan_file(path, rel, frontmatter=rel.endswith(".md"), decode=_decode_mode(rel))
-            wf += f; nw += st == "scanned"; skipped += st == "binary"
-        s.add("english-wrappers", "wrappers/ (%d binary skipped)" % skipped, wf, nw or None)
-    return s
 
 def english_violations(path):
     """FAIL-level English-only findings of a skill/agent folder (strings 'file:line (where) [script]: "excerpt"').
@@ -296,10 +183,6 @@ def english_eval_problems(skill_dir):
         _, v, _, r = script_denylist.group_scan(skill_dir, spec)
     return v, r
 
-def _legacy_english_eval_problems(skill_dir):
-    """(violations, review) for evals/evals.json and evals/trigger_evals.json only; skill_eval validate uses it."""
-    v, r, _ = _json_group(skill_dir, ("evals/evals.json", "evals/trigger_evals.json"), "evals")
-    return v, r
 
 def review_items(path):
     """Findings that need a recorded human decision before anything is spent: the needs-review rows of the English-only
@@ -308,7 +191,7 @@ def review_items(path):
     r = Report(path, detect_kind(path) or "unknown")
     s = english_scan(path)
     if s.review:
-        add_english_checks(r, path, s)
+        rule_runner.default_bundle().apply(r, only=(ENGLISH_RULES,))
     add_parity_checks(r, path)
     return ["%s: %s" % (c["id"], c["reason"]) for c in r.needs_review]
 
@@ -323,8 +206,8 @@ REVIEW_SOURCES = {"skill": ("evals/evals.json", "evals/trigger_evals.json", "age
 def review_sources(path):
     """Relative paths of the files whose bytes a recorded review_items decision also covers: a finding shows an excerpt
     only, so an edit outside it must still void the decision. For an agent: the unit_tree files under each folder entry,
-    plus the wrapper file of each wrapper folder entry that agent_wrapper_states reads, whenever it is a file inside the
-    agent folder, even through a link that the walk does not follow."""
+    plus the wrapper file of each wrapper folder entry that parity_primitive.wrapper_states reads, whenever it is a file
+    inside the agent folder, even through a link that the walk does not follow."""
     kind = detect_kind(path)
     if kind != "agent": return list(REVIEW_SOURCES.get(kind, ()))
     files, out = unit_tree(path, _skip_dirs).files, []
@@ -338,32 +221,6 @@ def review_sources(path):
     return list(dict.fromkeys(out))
 
 
-def add_english_checks(r, path, scan=None, bundle=None):
-    """Adds the English-only rows (category 'language') to report r from rules/english-only.rules.json of bundle
-    (default: the default bundle). scan is accepted for older callers; the rules scan the unit themselves."""
-    _family_bundle(bundle, ENGLISH_RULES).apply(r, only=(ENGLISH_RULES,))
-
-def _legacy_add_english_checks(r, path, scan=None):
-    """Adds the English-only rows (category 'language') to report r: FAIL groups plus the matcher review item."""
-    s = scan or english_scan(path)
-    for cid, label, findings, n in s.groups:
-        if n is None and not findings:
-            r.na(cid, "language", "nothing to scan in %s" % label, must=True)
-        else:
-            r.add(cid, "language", not findings,
-                  "%s has only English-script text" % label if not findings else
-                  "%d finding(s) with non-English text in %s: %s" % (len(findings), label, _show_findings(findings)),
-                  ENGLISH_FIX, must=True)
-    if s.review:
-        r.review("english-output-matchers", "language",
-                 "run-output matchers (%s) contain non-English text: %s" % (
-                     ", ".join(".".join(m) for m in OUTPUT_MATCHER_KEYS["evals" if s.kind == "skill" else "scenarios"]),
-                     _show_findings(s.review)),
-                 "Confirm that the task really requires non-English output. Matchers are exempt from FAIL because run "
-                 "output may be Korean; if it is not required, rewrite the matcher in English or with \\u escapes.")
-    else:
-        r.na("english-output-matchers", "language", "no non-English text in run-output matchers")
-
 # ---------- Multi-tool parity rule (owner decision 2026-10-19 18:43 KST; design: notes/multi-tool-parity-plan.md) ----------
 # Every skill and agent must be created for all four tools together. Formats per ~/workspace/pstack-trial/runs/engrule/
 # design.md sections 2-3; nothing here was re-verified against a primary source (UNVERIFIED items: plan section 8).
@@ -371,20 +228,6 @@ def _legacy_add_english_checks(r, path, scan=None):
 # wrappers/<tool>/ holds one thin file per tool.
 TOOLS = ("claude", "codex", "opencode", "hermes")
 TOOL_LABELS = {"claude": "Claude Code", "codex": "Codex CLI", "opencode": "OpenCode", "hermes": "Hermes Agent"}
-PORTABLE_NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")  # OpenCode skill name rule; house rule for agent file stems
-OPENAI_YAML = "agents/openai.yaml"
-OPENCODE_AUTOINVOKE_KEY = "opencode/autoinvoke"
-OPENCODE_MODES = ("primary", "subagent", "all")
-PERMISSION_ACTIONS = ("allow", "ask", "deny")
-# The Codex doc says sandbox_mode in a custom agent file does not override the parent session, so a Codex wrapper restricts
-# nothing this package can read (UNVERIFIED on codex-cli 0.162.1, notes/multi-tool-parity-plan.md section 2.4).
-CODEX_UNRESTRICTABLE = ("write", "shell", "web_fetch", "web_search", "delegate", "skill")
-# Five of the eight custom-agent keys that design.md 2.2 records. sandbox_mode and mcp_servers have no effect in an agent
-# file (agent-master-skills.md 3.4), and the strict flat reader rejects the dotted skills.config until A3.
-CODEX_AGENT_REQUIRED_KEYS = ("name", "description", "developer_instructions")
-CODEX_AGENT_OPTIONAL_KEYS = ("model", "model_reasoning_effort")
-# The OpenCode permission key list ends in "..." (targets/opencode.json), so a key not recorded keeps an UNVERIFIED default.
-OPENCODE_PERMISSION_KEYS_COMPLETE = False
 PARITY_BUILDER_RULE = (
     "Keep the skill loadable by all four tools together (Claude Code, Codex CLI, OpenCode, Hermes Agent): SKILL.md is the "
     "single shared source. The name must match ^[a-z0-9]+(-[a-z0-9]+)*$ and the folder name; every metadata value must be "
@@ -392,15 +235,6 @@ PARITY_BUILDER_RULE = (
     "metadata 'opencode/autoinvoke: \"false\"' and agents/openai.yaml 'policy: allow_implicit_invocation: false' are "
     "also set; keep agents/openai.yaml valid if it exists. The loop stops if the parity check fails.")
 
-def _norm_ws(s):
-    return " ".join(str(s).split())
-
-def _tool_names(v):
-    """Tool names of a wrapper 'tools' value: a list, or a comma-separated string. None when it is neither."""
-    if isinstance(v, str): v = v.split(",")
-    if not isinstance(v, list): return None
-    out = [x.strip() for x in v if isinstance(x, str) and x.strip()]
-    return out if out and len(out) == len(v) else None
 
 PARITY_ROW_TOOLS = {
     "parity-skill-claude": ("claude",), "parity-skill-codex": ("codex",), "parity-skill-opencode": ("opencode",),
@@ -410,8 +244,6 @@ PARITY_ROW_TOOLS = {
     "parity-wrapper-hermes": ("hermes",), "parity-permissions-claude": ("claude",), "parity-permissions-codex": ("codex",),
     "parity-permissions-opencode": ("opencode",), "parity-permissions-hermes": ("hermes",)}
 
-def _tag(tools, text):
-    return "[%s] %s" % ("/".join(tools), text)
 
 def _frontmatter_of(fp):
     """(raw, meta, error): meta is None when the file is missing, unreadable or its frontmatter does not parse."""
@@ -420,319 +252,27 @@ def _frontmatter_of(fp):
     meta, _, ferr = parse_frontmatter_ex(raw)
     return raw, meta, ferr
 
-CODEX_VERIFIED_FIELDS = ("policy.allow_implicit_invocation",)  # the only agents/openai.yaml field verified (design 2.2)
-
-def _leaf_paths(node, prefix=""):
-    """Dotted paths of every leaf of a parsed mapping ('interface.display_name'); an empty mapping is a leaf."""
-    if isinstance(node, dict) and node:
-        return [x for k, v in node.items() for x in _leaf_paths(v, "%s%s." % (prefix, k))]
-    return [prefix[:-1]] if prefix else []
 
 def codex_policy(path):
     """(problems, allow_implicit_invocation, unverified) for agents/openai.yaml, from targets/codex.json (see
     engine/primitives/parity.py codex_policy). A missing file is not a problem."""
     return parity_primitive.codex_policy(path, parity_primitive.target("codex"))
 
-def _legacy_codex_policy(path):
-    """(problems, allow_implicit_invocation, unverified) for agents/openai.yaml. allow is True/False when the file declares
-    policy.allow_implicit_invocation as an unquoted boolean, else None. unverified: every other field of the file as a
-    dotted path. Only policy.allow_implicit_invocation is a verified Codex field (design 2.2); the rest of the Codex
-    schema is UNVERIFIED, so the file is never reported as loadable while it holds other fields (the codex row becomes
-    needs-review). A missing file is not a problem."""
-    fp = os.path.join(path, *OPENAI_YAML.split("/"))
-    if not os.path.lexists(fp): return [], None, []
-    raw, err = read_text(fp)
-    if raw is None: return ["%s: %s" % (OPENAI_YAML, err)], None, []
-    if any(ln.rstrip() == "---" for ln in raw.splitlines()):
-        return ["%s: YAML document markers ('---') are not supported" % OPENAI_YAML], None, []
-    wrapped = "---\n%s\n---\n" % raw.strip("\n")
-    meta, _, ferr = parse_frontmatter_ex(wrapped)
-    if meta is None:
-        ferr = re.sub(r"frontmatter line (\d+)", lambda m: "line %d" % (int(m.group(1)) - 1), ferr or "")
-        return ["%s cannot be parsed by the strict YAML reader: %s" % (OPENAI_YAML, ferr)], None, []
-    unverified = [x for x in _leaf_paths(meta) if x not in CODEX_VERIFIED_FIELDS]
-    if "policy" not in meta: return [], None, unverified
-    pol = meta["policy"]
-    if not isinstance(pol, dict): return ["%s: policy must be a mapping" % OPENAI_YAML], None, unverified
-    if "allow_implicit_invocation" not in pol: return [], None, unverified
-    v = pol["allow_implicit_invocation"]
-    if "policy.allow_implicit_invocation" not in set(yaml_typed_keys(wrapped)) or str(v).lower() not in ("true", "false"):
-        return ["%s: policy.allow_implicit_invocation must be an unquoted boolean true/false, got %r" % (OPENAI_YAML, v)], None, unverified
-    return [], str(v).lower() == "true", unverified
-
-def _skill_core(meta):
-    return ["%s: non-empty string required" % k for k in ("name", "description") if not _nonempty_str(meta.get(k))]
-
-def add_parity_checks_skill(r, path, bundle=None, dedupe=True):
-    """Adds the skill parity rows (category 'parity', required) to report r from rules/parity-skill.rules.json.
-    dedupe False keeps the folder cause that name-matches-folder reports in check (A3 D2)."""
-    _family_bundle(bundle, PARITY_SKILL_RULES).apply(r, only=(PARITY_SKILL_RULES,), dedupe=dedupe)
-
-def _legacy_add_parity_checks_skill(r, path):
-    """Adds the skill parity rows (category 'parity', required) to report r."""
-    raw, meta, err = _frontmatter_of(os.path.join(path, "SKILL.md"))
-    typed = set(yaml_typed_keys(raw)) if raw is not None and meta else set()
-    fix = "See notes/multi-tool-parity-plan.md section 2.1. "
-    def row(cid, tools, problems, ok_text, hint):
-        r.add(cid, "parity", not problems, _tag(tools, ok_text if not problems else "; ".join(problems)),
-              fix + hint, must=True)
-    bad = ["SKILL.md frontmatter unusable: %s" % err] if meta is None else []
-    meta = meta or {}
-    name = meta.get("name") if isinstance(meta.get("name"), str) else ""
-    desc = meta.get("description") if isinstance(meta.get("description"), str) else ""
-    p = bad + (_skill_core(meta) if not bad else [])
-    if not p:
-        reserved = [w for w in RESERVED_NAME_WORDS if w in name.lower()]
-        if reserved: p.append("name contains reserved word(s) %s" % reserved)
-        if len(name) > NAME_MAX: p.append("name exceeds %d characters" % NAME_MAX)
-        if len(desc) > DESCRIPTION_MAX: p.append("description exceeds %d characters" % DESCRIPTION_MAX)
-        if any(c in name + desc for c in "<>"): p.append("name or description contains '<' or '>'")
-    row("parity-skill-claude", ("claude",), p, "SKILL.md satisfies the Claude Code rules (fields, reserved words, limits)",
-        "Fix SKILL.md name/description for Claude Code.")
-    pol_problems, allow, unverified = codex_policy(path)
-    p = bad + (_skill_core(meta) if not bad else []) + pol_problems
-    if not p and unverified:
-        r.review("parity-skill-codex", "parity",
-                 "[codex] %s declares fields this package cannot verify: %s (only %s is verified); Codex loadability is unconfirmed"
-                 % (OPENAI_YAML, ", ".join(unverified), ", ".join(CODEX_VERIFIED_FIELDS)),
-                 "A human confirms the fields against the Codex documentation, or remove them from %s." % OPENAI_YAML)
-    else:
-        row("parity-skill-codex", ("codex",), p,
-            "SKILL.md satisfies the Codex CLI rules (%s)" % ("%s: only the verified field %s" % (OPENAI_YAML, ", ".join(CODEX_VERIFIED_FIELDS))
-                if os.path.lexists(os.path.join(path, "agents", "openai.yaml")) else "no agents/openai.yaml"),
-            "Fix SKILL.md or agents/openai.yaml (policy.allow_implicit_invocation must be an unquoted boolean).")
-    p = list(bad)
-    if not bad:
-        p += _skill_core(meta)
-        if name and not PORTABLE_NAME_RE.match(name):
-            p.append("name %r must match %s" % (name, PORTABLE_NAME_RE.pattern))
-        folder = os.path.basename(os.path.realpath(path))
-        if name and name != folder: p.append("name %r must equal the folder name %r exactly" % (name, folder))
-        md = meta.get("metadata")
-        if isinstance(md, dict):
-            for k, v in md.items():
-                if not isinstance(v, str): p.append("metadata.%s must be a string, got %s" % (k, type(v).__name__))
-                elif "metadata." + k in typed: p.append("metadata.%s: YAML loads %r as a non-string; quote it" % (k, v))
-            av = md.get(OPENCODE_AUTOINVOKE_KEY)
-            if av is not None and av not in ("true", "false"):
-                p.append('metadata.%s must be the string "true" or "false", got %r' % (OPENCODE_AUTOINVOKE_KEY, av))
-        elif md is not None:
-            p.append("metadata must be a mapping of string keys to string values")
-    row("parity-skill-opencode", ("opencode",), p, "SKILL.md satisfies the OpenCode rules (name regex, folder name, string metadata)",
-        "Rename the skill folder and name to lowercase-hyphen form, quote every metadata value.")
-    p = list(bad)
-    if not bad:
-        p += _skill_core(meta)
-        md = meta.get("metadata")
-        if isinstance(md, dict) and "hermes" in md and not isinstance(md["hermes"], str):
-            p.append("metadata.hermes must not be a mapping or list in the portable package (OpenCode needs string metadata)")
-    if raw is not None and re.search(r"(?m)^[ \t]+hermes:[ \t]*(?:$|[{\[])", raw.split("\n---", 1)[0]):
-        p.append("metadata.hermes mapping/list is not allowed in the portable package (OpenCode needs string metadata "
-                 "values); Hermes uses the plain agentskills.io fields")
-    row("parity-skill-hermes", ("hermes",), sorted(set(p)),
-        "SKILL.md satisfies the Hermes Agent baseline (agentskills.io fields, no metadata.hermes mapping)",
-        "Remove metadata.hermes; Hermes-specific keys are unsupported until a string-safe form is verified.")
-    disabled = "disable-model-invocation" in meta and str(meta["disable-model-invocation"]).strip().lower() == "true"
-    if not disabled:
-        r.na("parity-invocation-control", "parity", "[claude/codex/opencode] disable-model-invocation is not used (absent or false)", must=True)
-        r.na("parity-invocation-hermes", "parity", "[hermes] disable-model-invocation is not used (absent or false)")
-        return
-    md = meta.get("metadata") if isinstance(meta.get("metadata"), dict) else {}
-    miss = []
-    if md.get(OPENCODE_AUTOINVOKE_KEY) != "false":
-        miss.append("[opencode] metadata '%s: \"false\"' (OpenCode ignores disable-model-invocation)" % OPENCODE_AUTOINVOKE_KEY)
-    if allow is not False:
-        miss.append("[codex] %s with policy.allow_implicit_invocation: false" % OPENAI_YAML)
-    r.add("parity-invocation-control", "parity", not miss,
-          _tag(("claude", "codex", "opencode"), "disable-model-invocation: true has the equivalent controls for Codex and OpenCode"
-               if not miss else "disable-model-invocation: true is only honored by Claude Code; missing: %s" % "; ".join(miss)),
-          fix + "Declare the equivalent controls or drop disable-model-invocation.", must=True)
-    r.review("parity-invocation-hermes", "parity",
-             "[hermes] disable-model-invocation: true has no verified Hermes equivalent (design 2.4); Hermes may auto-select this skill",
-             "A human confirms that auto-selection by Hermes is acceptable, or the skill stops relying on invocation control.")
 
 def _wrapper_rel(tool, name):
     return {"claude": "wrappers/claude/%s.md" % name, "codex": "wrappers/codex/%s.toml" % name,
             "opencode": "wrappers/opencode/%s.md" % name, "hermes": "wrappers/hermes/SOUL.md"}[tool]
 
-def _wrapper_common(meta_name, meta_desc, name, desc, body):
-    p = []
-    if meta_name is not None and meta_name != name: p.append("name %r differs from AGENT.md name %r" % (meta_name, name))
-    if _norm_ws(meta_desc or "") != desc: p.append("description differs from AGENT.md")
-    if body is not None and not body.strip(): p.append("prompt body is empty")
-    return p
-
-def agent_wrapper_states(path):
-    """{tool: {"rel", "problems", "caps", "names"}} for the four wrappers of an agent folder, from targets/*.json (see
-    engine/primitives/parity.py wrapper_states). caps: capability set the wrapper grants (None when it cannot be
-    determined, and always for Codex and Hermes). problems: why the wrapper itself is unusable."""
-    return parity_primitive.wrapper_states(path, parity_primitive.targets())
-
-def _legacy_agent_wrapper_states(path):
-    """{tool: {"rel", "problems", "caps"}} for the four wrappers of an agent folder. caps: capability set the wrapper
-    grants (None when it cannot be determined, and always for Codex and Hermes). problems: why the wrapper itself is unusable."""
-    raw, meta, _ = _frontmatter_of(os.path.join(path, "AGENT.md"))
-    meta = meta or {}
-    name, desc = _str_field(meta, "name"), _norm_ws(_str_field(meta, "description"))
-    root, out = os.path.realpath(path), {}
-    outside = lambda fp: not _within(root, os.path.realpath(fp))
-    for tool in TOOLS:
-        rel = _wrapper_rel(tool, name or "<name>")
-        st = out[tool] = {"rel": rel, "problems": [], "caps": None, "names": None}
-        p, fp = st["problems"], os.path.join(path, *rel.split("/"))
-        if not name:
-            p.append("AGENT.md has no usable name"); continue
-        if not os.path.isfile(fp):
-            p.append("missing wrapper file %s" % rel); continue
-        if outside(fp):
-            p.append(WRAPPER_OUT % rel); continue
-        if tool in ("claude", "opencode"):
-            _, m, err = _frontmatter_of(fp)
-            if m is None:
-                p.append("%s: frontmatter unusable: %s" % (rel, err)); continue
-            body = parse_frontmatter_ex(read_text(fp)[0])[1]
-            if tool == "claude":
-                for k in ("name", "description"):
-                    if not _nonempty_str(m.get(k)): p.append("%s: %s: non-empty string required" % (rel, k))
-                p += ["%s: %s" % (rel, x) for x in _wrapper_common(m.get("name") if _nonempty_str(m.get("name")) else None,
-                                                                    m.get("description"), name, desc, body)]
-                names = _tool_names(m.get("tools"))
-                if names is None: p.append("%s: tools: a non-empty list or comma-separated string is required" % rel)
-                else:
-                    caps, bad = capabilities(names)
-                    if bad: p.append("%s: tools %s are not in the capability table" % (rel, bad))
-                    else: st["caps"], st["names"] = caps, tool_keys(names)
-                if "model" in m and not _nonempty_str(m["model"]): p.append("%s: model must be a non-empty string" % rel)
-            else:
-                if not _nonempty_str(m.get("description")): p.append("%s: description: non-empty string required" % rel)
-                p += ["%s: %s" % (rel, x) for x in _wrapper_common(m["name"] if "name" in m and _nonempty_str(m.get("name")) else None,
-                                                                    m.get("description"), name, desc, body)]
-                if "name" in m and not _nonempty_str(m["name"]): p.append("%s: name must be a non-empty string" % rel)
-                if "mode" in m and m["mode"] not in OPENCODE_MODES: p.append("%s: mode must be one of %s" % (rel, "/".join(OPENCODE_MODES)))
-                if "model" in m and not _nonempty_str(m["model"]): p.append("%s: model must be a non-empty string" % rel)
-                perm = m.get("permission")
-                if not isinstance(perm, dict):
-                    p.append("%s: permission: a mapping that sets every recorded OpenCode permission key is required" % rel)
-                else:
-                    for k, cap in OPENCODE_PERMISSION_GRANTS.items():
-                        if k not in perm: p.append("%s: permission.%s must be set explicitly" % (rel, k))
-                        elif perm[k] not in PERMISSION_ACTIONS:
-                            p.append("%s: permission.%s must be one of %s" % (rel, k, "/".join(PERMISSION_ACTIONS)))
-                        elif cap is None and perm[k] != "deny":
-                            p.append("%s: permission.%s must be deny, because no capability class covers it" % (rel, k))
-                    unknown = sorted(k for k in perm if k not in OPENCODE_PERMISSION_GRANTS)
-                    if unknown: p.append("%s: permission keys %s are not in the recorded OpenCode permission key list" % (rel, unknown))
-                    if not any(x.startswith(rel + ": permission") for x in p):
-                        st["caps"] = {cap for k, cap in OPENCODE_PERMISSION_GRANTS.items() if cap and perm[k] != "deny"}
-        elif tool == "codex":
-            raw_t, err = read_text(fp)
-            if raw_t is None:
-                p.append(err); continue
-            try:
-                t = parse_flat_toml(raw_t)
-            except TomlError as e:
-                p.append("%s cannot be parsed by the strict flat-TOML reader: %s" % (rel, e)); continue
-            for k in CODEX_AGENT_REQUIRED_KEYS:
-                if not _nonempty_str(t.get(k)): p.append("%s: %s: non-empty string required" % (rel, k))
-            p += ["%s: %s" % (rel, x) for x in _wrapper_common(t.get("name") if _nonempty_str(t.get("name")) else None,
-                                                                t.get("description"), name, desc, None)]
-            for k in CODEX_AGENT_OPTIONAL_KEYS:
-                if k in t and not _nonempty_str(t[k]): p.append("%s: %s must be a non-empty string" % (rel, k))
-            if "sandbox_mode" in t:
-                p.append("%s: sandbox_mode in a Codex custom agent file does not override the parent session; remove it" % rel)
-            known = CODEX_AGENT_REQUIRED_KEYS + CODEX_AGENT_OPTIONAL_KEYS
-            unknown = sorted(set(t) - set(known) - {"sandbox_mode"})
-            if unknown: p.append("%s: keys %s are not in the recorded Codex custom-agent key list (%s)" % (rel, unknown, ", ".join(known)))
-        else:
-            text, err = read_text(fp)
-            if text is None:
-                p.append(err); continue
-            if not text.strip(): p.append("%s is empty" % rel)
-            else:
-                if not re.search(r"(?<![\w-])%s(?![\w-])" % re.escape(name), text): p.append("%s does not state the agent name %r" % (rel, name))
-                if desc and desc not in _norm_ws(text): p.append("%s does not contain the AGENT.md description verbatim" % rel)
-            cfg = os.path.join(path, "wrappers", "hermes", "config.yaml")
-            if os.path.lexists(cfg):
-                ctext, cerr = (None, WRAPPER_OUT % "wrappers/hermes/config.yaml") if outside(cfg) else read_text(cfg)
-                if ctext is None: p.append(cerr)
-                elif not ctext.strip(): p.append("wrappers/hermes/config.yaml is empty (remove it or fill it)")
-    return out
-
-def add_parity_checks_agent(r, path, bundle=None):
-    """Adds the agent parity rows (category 'parity', required) to report r from rules/parity-agent.rules.json."""
-    _family_bundle(bundle, PARITY_AGENT_RULES).apply(r, only=(PARITY_AGENT_RULES,))
-
-def _legacy_add_parity_checks_agent(r, path):
-    """Adds the agent parity rows (category 'parity', required) to report r."""
-    _, meta, _ = _frontmatter_of(os.path.join(path, "AGENT.md"))
-    meta = meta or {}
-    name = _str_field(meta, "name")
-    fix = "See notes/multi-tool-parity-plan.md section 2.4. "
-    ok = bool(PORTABLE_NAME_RE.match(name))
-    r.add("parity-agent-name", "parity", ok, _tag(TOOLS, "agent name %r is a portable file stem (%s)" % (name, PORTABLE_NAME_RE.pattern)
-          if ok else "agent name %r must match %s (it is the wrapper file name)" % (name, PORTABLE_NAME_RE.pattern)),
-          fix + "Rename the agent to lowercase letters, digits and single hyphens.", must=True)
-    states = agent_wrapper_states(path)
-    for tool in TOOLS:
-        st = states[tool]
-        r.add("parity-wrapper-" + tool, "parity", not st["problems"],
-              _tag((tool,), "%s is present, parseable and consistent with AGENT.md" % st["rel"] if not st["problems"]
-                   else "; ".join(st["problems"])),
-              fix + "Create or repair %s." % st["rel"], must=True)
-    tools = [str(t) for t in as_list(meta.get("tools"))]
-    want, unmapped = capabilities(tools)
-    for tool in ("claude", "codex", "opencode"):
-        st = states[tool]
-        cid = "parity-permissions-" + tool
-        if unmapped:
-            r.add(cid, "parity", False, _tag((tool,), "AGENT.md tools %s are not in the capability table; permissions cannot be compared" % unmapped),
-                  fix + "Use mapped tool names or extend CAPABILITY_BY_TOOL in eva.py.", must=True)
-        elif tool == "codex":
-            loose = [c for c in CODEX_UNRESTRICTABLE if c not in want]
-            if st["problems"]:
-                r.na(cid, "parity", _tag((tool,), "wrapper is not usable (see parity-wrapper-codex)"), must=True)
-            elif loose:
-                r.review(cid, "parity", _tag((tool,), "Codex cannot restrict %s per agent; the agent runs with the parent "
-                                                      "session's sandbox" % ", ".join(loose)),
-                         fix + "Run the agent on Codex only from a session whose sandbox fits it, and record that decision "
-                         "with `skill_eval.py approve --gate rule_review`.")
-            else:
-                r.add(cid, "parity", True, _tag((tool,), "AGENT.md tools need %s, so the agent needs no restriction that Codex "
-                                                "cannot apply per agent" % ", ".join(CODEX_UNRESTRICTABLE)), must=True)
-        elif st["caps"] is None:
-            r.na(cid, "parity", _tag((tool,), "wrapper permissions not readable (see parity-wrapper-%s)" % tool), must=True)
-        elif tool == "claude":
-            have, need = sorted(st["names"]), sorted(tool_keys(tools))
-            r.add(cid, "parity", have == need,
-                  _tag((tool,), "wrapper tools %s match the AGENT.md tools by name" % have if have == need else
-                       "wrapper tools %s differ from the AGENT.md tools %s by name (missing %s, extra %s)" % (
-                           have, need, sorted(set(need) - set(have)), sorted(set(have) - set(need)))),
-                  fix + "List the same tools in the wrapper as in AGENT.md (aliases: TOOL_ALIASES in eva.py).", must=True)
-        else:
-            have, need = sorted(st["caps"]), sorted(want)
-            classes = " (compared by capability class, because OpenCode permission keys are not tool names)"
-            if have != need:
-                r.add(cid, "parity", False, _tag((tool,), "wrapper grants %s, AGENT.md tools need %s%s" % (have, need, classes)),
-                      fix + "Align the wrapper permissions with the AGENT.md tools.", must=True)
-            elif not OPENCODE_PERMISSION_KEYS_COMPLETE:
-                r.review(cid, "parity", _tag((tool,), "wrapper permissions grant %s, as the AGENT.md tools need, but the OpenCode "
-                                                      "permission key list is not verified complete; an unlisted key keeps its "
-                                                      "UNVERIFIED default" % have),
-                         fix + "Check that no OpenCode permission key outside the recorded list matters for this agent, and "
-                         "record that decision with `skill_eval.py approve --gate rule_review`.")
-            else:
-                r.add(cid, "parity", True, _tag((tool,), "wrapper permissions %s match the AGENT.md tools%s" % (have, classes)),
-                      must=True)
-    r.add("parity-permissions-hermes", "parity", False,
-          _tag(("hermes",), "AGENT.md tools cannot be checked against Hermes: no verified per-agent tool-permission format "
-               "exists (UNVERIFIED, design 2.4); failing closed, so Hermes is never reported as consistent"),
-          fix + "Until a Hermes permission format is verified and implemented in add_parity_checks_agent (eva.py) this row "
-          "fails for every agent by design; see the README section on multi-tool parity.", must=True)
 
 def add_parity_checks(r, path, bundle=None, dedupe=True):
+    """Adds the parity rows (category 'parity', required) of the skill or agent at path to report r from
+    rules/parity-skill.rules.json or rules/parity-agent.rules.json of bundle (default: the default bundle). For a skill,
+    dedupe False keeps the folder cause that name-matches-folder reports in check (A3 D2)."""
     kind = detect_kind(path)
-    if kind == "skill": add_parity_checks_skill(r, path, bundle, dedupe)
-    elif kind == "agent": add_parity_checks_agent(r, path, bundle)
+    if kind == "skill":
+        _family_bundle(bundle, PARITY_SKILL_RULES).apply(r, only=(PARITY_SKILL_RULES,), dedupe=dedupe)
+    elif kind == "agent":
+        _family_bundle(bundle, PARITY_AGENT_RULES).apply(r, only=(PARITY_AGENT_RULES,))
 
 def parity_report(path):
     """A Report holding only the parity rows of the skill or agent folder at path (never raises). The rows keep every
@@ -956,55 +496,12 @@ def _cut(doc, depth):
             parent[key] = v
     return top[0]
 
-# skill-creator quick_validate loads with yaml.safe_load and rejects these when not str. skills-ref (strictyaml)
-# reads every scalar as a string, so other fields (metadata values included) are not forced to be quoted.
-PYYAML_STR_FIELDS = ("name", "description", "compatibility")
 
 def _field_type_errors(meta, typed):
     """Spec types per schemas/skill-frontmatter.schema.json (rule field-types). typed: keys whose unquoted value
     YAML 1.1 (PyYAML) would load as bool/null/number/date (yaml_typed_keys)."""
     return shape_schema("skill-frontmatter.schema.json").problems(meta, rule="field-types", typed_keys=typed)
 
-def _legacy_field_type_errors(meta, typed):
-    """Spec types: name/description/license/compatibility/allowed-tools are strings, metadata maps string->string.
-    typed: keys whose unquoted value YAML 1.1 (PyYAML) would load as bool/null/number/date (yaml_typed_keys)."""
-    e = []
-    for k in ("name", "description", "license", "compatibility", "allowed-tools"):
-        if k not in meta: continue
-        if not isinstance(meta[k], str) or not meta[k].strip():
-            e.append("%s: non-empty string required, got %s" % (k, "empty" if meta[k] in (None, "") else type(meta[k]).__name__))
-        elif k in typed and k in PYYAML_STR_FIELDS:
-            e.append("%s: PyYAML (skill-creator quick_validate) loads '%s' as non-string; quote it" % (k, meta[k]))
-    if "metadata" in meta:
-        md = meta["metadata"]
-        if not isinstance(md, dict):
-            e.append("metadata: mapping of string keys to string values required, got %s" %
-                     ("empty" if md in (None, "") else type(md).__name__))
-        else:
-            for k, v in md.items():
-                if not isinstance(v, str):
-                    e.append("metadata.%s: string value required, got %s" % (k, type(v).__name__))
-    if "argument-hint" in meta:
-        if not _nonempty_str(meta["argument-hint"]):
-            e.append("argument-hint: non-empty string required")
-        elif "argument-hint" in typed:  # raw scalar: unquoted true/no/on/~/null/42/3.5 is not a YAML string
-            e.append("argument-hint: YAML loads unquoted '%s' as non-string; quote it" % meta["argument-hint"])
-    if "disable-model-invocation" in meta:
-        v = meta["disable-model-invocation"]
-        if not (isinstance(v, str) and v.lower() in ("true", "false") and "disable-model-invocation" in typed):
-            e.append("disable-model-invocation: unquoted boolean true/false required, got %r" % (v,))
-    return e
-
-def _assertion_list(v):
-    """Non-empty list; each item a non-empty string (skill-creator) or, as a house extension used by skill_eval.py,
-    an object {"text": str, "layer": static|llm|human, "check": object (optional)}. skill_eval validates checks."""
-    if not (isinstance(v, list) and v): return False
-    for x in v:
-        if _nonempty_str(x): continue
-        if not (isinstance(x, dict) and _nonempty_str(x.get("text")) and x.get("layer") in EVAL_LAYERS
-                and isinstance(x.get("check", {}), dict)):
-            return False
-    return True
 
 def evals_errors(path, name):
     """Validate evals/evals.json against schemas/evals.schema.json (rule evals-valid). Returns (n_cases, errors).
@@ -1026,59 +523,6 @@ def evals_errors(path, name):
     items = data.get("evals") if isinstance(data, dict) else None
     return (len(items) if isinstance(items, list) and items else 0), e
 
-def _legacy_evals_errors(path, name):
-    """Validate evals/evals.json against the skill-creator / agentskills.io format. Returns (n_cases, errors).
-    Format: {"skill_name": <frontmatter name>, "evals": [{"id": int (unique), "prompt": str, "expected_output": str,
-    "files": [str] (optional, relative to skill root, must exist), "assertions"|"expectations": [str|object] (optional),
-    "layer": "static"|"llm"|"human" (optional; exact lowercase, no layer is required to be present)}]}"""
-    fp = os.path.join(path, "evals", "evals.json")
-    if not os.path.isfile(fp):
-        return 0, ["missing evals/evals.json"]
-    raw, err = read_text(fp)
-    if err: return 0, [err]
-    try:
-        data = json.loads(raw)
-    except ValueError as ex:
-        return 0, ["invalid JSON: %s" % ex]
-    if not isinstance(data, dict):
-        return 0, ['top level must be an object {"skill_name": ..., "evals": [...]}, got %s' % type(data).__name__]
-    e = []
-    if data.get("skill_name") != name:
-        e.append("skill_name %r must equal frontmatter name %r" % (data.get("skill_name"), name))
-    items = data.get("evals")
-    if not (isinstance(items, list) and items):
-        return 0, e + ["evals: non-empty list required"]
-    ids = []
-    for i, it in enumerate(items):
-        if not isinstance(it, dict):
-            e.append("evals[%d]: object required" % i); continue
-        if not (isinstance(it.get("id"), int) and not isinstance(it.get("id"), bool)):
-            e.append("evals[%d].id: integer required" % i)
-        else:
-            ids.append(it["id"])
-        for k in ("prompt", "expected_output"):
-            if not _nonempty_str(it.get(k)):
-                e.append("evals[%d].%s: non-empty string required" % (i, k))
-        if "files" in it:
-            fs = it["files"]
-            if not (isinstance(fs, list) and all(_nonempty_str(f) for f in fs)):
-                e.append("evals[%d].files: list of paths required" % i)
-            else:
-                for f in fs:
-                    prob = _ref_problem(f)
-                    if prob: e.append("evals[%d].files %s: %s" % (i, f, prob))
-                    elif not os.path.isfile(os.path.join(path, f)): e.append("evals[%d].files %s: not found" % (i, f))
-        for k in ("assertions", "expectations"):
-            if k in it and not _assertion_list(it[k]):
-                e.append("evals[%d].%s: non-empty list of strings or {\"text\", \"layer\"} objects required" % (i, k))
-        if "name" in it and not (isinstance(it["name"], str) and EVAL_NAME_RE.match(it["name"]) and ".." not in it["name"]):
-            e.append("evals[%d].name: %r must match %s without '..' (it becomes a directory name)"
-                     % (i, it["name"], EVAL_NAME_RE.pattern))
-        if "layer" in it and it["layer"] not in EVAL_LAYERS:
-            e.append("evals[%d].layer: must be one of %s (lowercase), got %r" % (i, "|".join(EVAL_LAYERS), it["layer"]))
-    dup = sorted({x for x in ids if ids.count(x) > 1})
-    if dup: e.append("duplicate ids %s" % dup)
-    return len(items), e
 
 # The rule files whose rows check_skill and check_agent add: every one replaces built-in rows, so each is taken from the
 # bundle in use when it holds the file, else from the default bundle (brief A4 D2).
@@ -1235,13 +679,6 @@ rule_runner.install_host_ops({
     "host_scenarios": _host_scenarios})
 
 # ---------- agents (slated to move to the separate "agent master"; kept here until then) ----------
-def _nonempty_str(v):
-    return isinstance(v, str) and bool(v.strip())
-
-def _str_list(v):
-    """Non-empty list of non-empty strings."""
-    return isinstance(v, list) and bool(v) and all(_nonempty_str(x) for x in v)
-
 def _strs(v):
     """String items of v if it is a list, else [] (safe access for malformed input)."""
     return [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
@@ -1250,26 +687,6 @@ def scenario_errors(s):
     """Shape errors of one scenario per schemas/scenario.schema.json."""
     return shape_schema("scenario.schema.json").problems(s)
 
-def _legacy_scenario_errors(s):
-    """Shape errors of one scenario. Required: id, turns, expected_tools, must_include, expected_outcome."""
-    if not isinstance(s, dict):
-        return ["scenario must be a JSON object, got %s" % type(s).__name__]
-    e = []
-    if not _nonempty_str(s.get("id")):
-        e.append("id: non-empty string required")
-    t = s.get("turns")
-    if not (isinstance(t, list) and t and all(isinstance(x, dict) and _nonempty_str(x.get("user")) for x in t)):
-        e.append('turns: non-empty list of {"user": "<text>"} required')
-    for k in ("expected_tools", "must_include"):
-        if not _str_list(s.get(k)):
-            e.append("%s: non-empty list of strings required" % k)
-    for k, required in (("expected_outcome", True), ("success_criteria", False)):
-        if k not in s and not required:
-            continue
-        v = s.get(k)
-        if not (_nonempty_str(v) or _str_list(v)):
-            e.append("%s: non-empty string or list of strings required" % k)
-    return e
 
 def load_scenarios(path):
     """Returns [(filename, data or None, errors)]; data is None when the JSON does not parse
@@ -1309,7 +726,7 @@ def check(path, bundle=None):
     elif kind == "agent": r = check_agent(path, bundle)
     else:
         r = Report(path, "unknown")
-        r.add("frontmatter", "structure", False, "no SKILL.md or AGENT.md", "폴더에 SKILL.md 또는 AGENT.md를 넣으세요.")
+        r.add("frontmatter", "structure", False, "no SKILL.md or AGENT.md", "Put a SKILL.md or an AGENT.md in the folder.")
     bundle.apply(r, skip=FAMILY_FILES)
     _merge_bundle_rows(r)
     return r
@@ -1406,48 +823,6 @@ def load_transcript(path):
     return {"scenario": t["scenario"], "final": t["final"], "workspace": t.get("workspace"),
             "calls": calls, "results": results}, []
 
-def _legacy_load_transcript(path):
-    """Parse + validate a transcript. Returns (run, errors); run is None when errors.
-    Format: {"scenario": str, "final": str, "workspace": str (optional),
-             "tool_calls": [ "<tool>" | {"tool": str, "input": str|object (optional), "result": str (optional)} ],
-             "tool_results": [str, ...] (optional)}
-    run = {"scenario", "final", "workspace", "calls": [{"tool", "input", "result"}], "results": [str]}"""
-    try:
-        with open(path, encoding="utf-8") as f:
-            t = json.load(f)
-    except (OSError, ValueError) as e:
-        return None, ["cannot load transcript JSON: %s" % e]
-    if not isinstance(t, dict):
-        return None, ["transcript must be a JSON object, got %s" % type(t).__name__]
-    e = []
-    if not _nonempty_str(t.get("scenario")): e.append("scenario: non-empty string required")
-    if not isinstance(t.get("final"), str): e.append("final: string required")
-    if "workspace" in t and not _nonempty_str(t["workspace"]): e.append("workspace: non-empty string required")
-    calls = []
-    tc = t.get("tool_calls")
-    if not isinstance(tc, list):
-        e.append("tool_calls: list required")
-        tc = []
-    for i, c in enumerate(tc):
-        if isinstance(c, str) and c.strip():
-            calls.append({"tool": c, "input": None, "result": None})
-        elif isinstance(c, dict) and _nonempty_str(c.get("tool")):
-            if "result" in c and not isinstance(c["result"], str):
-                e.append("tool_calls[%d].result: string required" % i)
-            unknown = sorted(set(c) - {"tool", "input", "result"})
-            if unknown:
-                e.append("tool_calls[%d]: unknown fields %s" % (i, unknown))
-            calls.append({"tool": c["tool"], "input": c.get("input"), "result": c.get("result")})
-        else:
-            e.append('tool_calls[%d]: tool name string or {"tool": str, "input", "result"} object required' % i)
-    tr = t.get("tool_results", [])
-    if not (isinstance(tr, list) and all(isinstance(x, str) for x in tr)):
-        e.append("tool_results: list of strings required"); tr = []
-    if e:
-        return None, e
-    results = [c["result"] for c in calls if c["result"]] + list(tr)
-    return {"scenario": t["scenario"], "final": t["final"], "workspace": t.get("workspace"),
-            "calls": calls, "results": results}, []
 
 def grade_transcript(agent_path, transcript_path):
     """Grade one run transcript against the AGENT.md v2 declaration and the scenario v2 (see load_transcript for the

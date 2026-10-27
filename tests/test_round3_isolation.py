@@ -350,14 +350,14 @@ class TestIsolation(Base):
             with self.assertRaises(se.EvalError, msg=args): se.ENGINES[eng](extra_args=args)
 
 class TestDocs(unittest.TestCase):
-    def test_readme_documents_isolation_and_round3(self):
-        readme = read(os.path.join(T.ROOT, "README.md"))
+    def test_docs_document_isolation(self):
+        docs = T.docs_text()
         for s in ("### Eval isolation", "--setting-sources project,local", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "--builder-prompt",
                   "https://code.claude.com/docs/en/authentication", "https://learn.chatgpt.com/docs/build-skills",
-                  "추정", "golden/skills/csv-cleaner"):
-            self.assertIn(s, readme)
+                  "UNVERIFIED", "golden/skills/csv-cleaner"):
+            self.assertIn(s, docs)
         for gone in ("pinesky-skills/", "status-brief", "data-correlation", "skills-doctor"):
-            self.assertNotIn(gone, readme)
+            self.assertNotIn(gone, docs)
 
 class TestEvaDiscovery(unittest.TestCase):
     def test_check_all_follows_symlinked_skills_and_skips_dangling(self):

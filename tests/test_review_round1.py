@@ -56,6 +56,9 @@ class TestScriptCoverage(unittest.TestCase):
 
     def test_every_assigned_letter_mark_or_number_is_flagged_unless_its_name_is_english_compatible(self):
         """Fail closed: a script this list has never heard of (also one a newer Unicode adds) is flagged, not passed."""
+        with open(E.p("rules", "data", "scripts.json"), encoding="utf-8") as f:
+            data = json.load(f)
+        compatible, scripts = set(data["english_compatible_first_words"]), set(data["non_english_script_words"])
         checked = flagged = 0
         for cp in range(0x80, 0x110000):
             ch = chr(cp); name = unicodedata.name(ch, "")
@@ -63,9 +66,9 @@ class TestScriptCoverage(unittest.TestCase):
             checked += 1
             first = name.split(" ")[0]
             got = eva.non_english_script(ch)
-            if first in eva.ENGLISH_COMPATIBLE_FIRST_WORDS:
+            if first in compatible:
                 words = set(name.replace("-", " ").split())
-                if not words & eva.NON_ENGLISH_SCRIPT_WORDS: self.assertIsNone(got, name)
+                if not words & scripts: self.assertIsNone(got, name)
             else:
                 self.assertIsNotNone(got, name); flagged += 1
         self.assertGreater(checked, 100000); self.assertGreater(flagged, 100000)

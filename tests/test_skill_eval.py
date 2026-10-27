@@ -227,6 +227,12 @@ FAKE_CLAUDE_STATUS = {"loggedIn": True, "authMethod": "claude.ai", "configDirect
 def read(path):
     with open(path, encoding="utf-8") as f: return f.read()
 
+def docs_text(root=ROOT):
+    """README.md plus every references/*.md, the documentation that replaced the old README sections."""
+    refs = os.path.join(root, "references")
+    names = sorted(n for n in os.listdir(refs) if n.endswith(".md"))
+    return "\n".join(read(p) for p in [os.path.join(root, "README.md")] + [os.path.join(refs, n) for n in names])
+
 def write(path, text):
     with open(path, "w", encoding="utf-8") as f: f.write(text)
 
@@ -908,8 +914,8 @@ class TestCLI(Base):
         self.assertEqual(rc, 2)
 
 class TestDocs(unittest.TestCase):
-    def test_readme_documents_harness(self):
-        readme = read(os.path.join(ROOT, "README.md"))
-        for s in ("## 스킬 평가 하네스 (skill_eval.py)", "### skill-creator 대비 차이(deviation)", "trigger_evals.json",
+    def test_docs_document_harness(self):
+        docs = docs_text()
+        for s in ("## The eval harness (skill_eval.py)", "## Deviations from skill-creator", "trigger_evals.json",
                   "--live", "--budget-usd", "human_review.json", "comparison.md", "approvals.json"):
-            self.assertIn(s, readme)
+            self.assertIn(s, docs)

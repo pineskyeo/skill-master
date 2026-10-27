@@ -39,9 +39,9 @@ class TestCodexAuthCopyRisk(unittest.TestCase):
         self.assertNotIn("its content is\n        never printed or logged", src)
         self.assertIn("CAN read it", se.CodexEngine.sandbox_env.__doc__)
         self.assertIn("readable by the agent under test", se.CodexEngine().auth_record()["method"])
-        readme = read(os.path.join(T.ROOT, "README.md"))
-        self.assertIn("에이전트가 읽을 수 있습니다", readme)
-        self.assertIn("첫 실제 실행에서 Codex는 제외", readme)
+        docs = T.docs_text()
+        self.assertIn("readable by the agent under test", docs)
+        self.assertIn("the default `--strict-budget` refuses every `--live` run that selects Codex", docs)
 
 class TestStrictBudgetDefault(Base):
     """2) --strict-budget is the default: Codex --live runs are refused unless --no-strict-budget (risky)."""
@@ -283,8 +283,9 @@ class TestStyleLabHostField(unittest.TestCase):
     """7) disable-model-invocation is on the checker allowlist; style-lab keeps it set."""
     STYLE_LAB = "/Users/pinesky/workspace/style-lab/skills/style-lab/SKILL.md"
     def test_allowlist(self):
-        self.assertIn("disable-model-invocation", eva.HOST_SKILL_FIELDS)
-        self.assertNotIn("disable-model-invocation", eva.SKILL_FIELDS)  # host allowance, not the spec
+        rule = next(r for r in eva.rule_runner.default_bundle().rules if r.id == "frontmatter-fields")
+        self.assertIn("disable-model-invocation", rule.node["host_fields"])
+        self.assertNotIn("disable-model-invocation", rule.node["fields"])  # host allowance, not the spec
 
     def test_style_lab_frontmatter_shape_passes_field_checks(self):
         import tempfile
@@ -306,12 +307,12 @@ class TestStyleLabHostField(unittest.TestCase):
         self.assertEqual((st["frontmatter-fields"], st["field-types"]), ("pass", "pass"))
 
 class TestDocs(unittest.TestCase):
-    def test_readme_documents_round6(self):
-        readme = read(os.path.join(T.ROOT, "README.md"))
-        for s in ("Round 6", "--no-strict-budget", "--dry-run", "Keychain", "user-invocable: false",
-                  "에이전트가 읽을 수 있습니다", "max(reported, cap)"):
-            self.assertIn(s, readme, s)
-        self.assertNotIn("셸에서 export하라고 안내", readme)
+    def test_docs_document_strict_budget_and_keychain(self):
+        docs = T.docs_text()
+        for s in ("--no-strict-budget", "--dry-run", "Keychain", "user-invocable: false",
+                  "readable by the agent under test", "max(reported, cap)"):
+            self.assertIn(s, docs, s)
+        self.assertNotIn("export CLAUDE_CODE_OAUTH_TOKEN", docs)
 
 if __name__ == "__main__":
     unittest.main()

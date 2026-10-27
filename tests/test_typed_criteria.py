@@ -801,8 +801,8 @@ class TestCriterionTextIsEnglish(Tmp):
 class TestAddedFilesAreAscii(unittest.TestCase):
     def test_every_file_b1_adds_is_ascii_english(self):
         files = ["schemas/agent-frontmatter.schema.json", "schemas/scenario.schema.json", "engine/primitives/transcript.py",
-                 "rules/data/capabilities.json", "tests/test_typed_criteria.py", "tests/differential/legacy_transcript.py",
-                 "rules/agent-structure.rules.json", "rules/parity-agent.rules.json", "tests/differential/intentional.json"]
+                 "rules/data/capabilities.json", "tests/test_typed_criteria.py", "rules/agent-structure.rules.json",
+                 "rules/parity-agent.rules.json"]
         for top in ("tests/fixtures/agents/code-reviewer-v2", "tests/fixtures/agents/research-assistant-v2",
                     "tests/rules/agent-frontmatter-v2"):
             for dp, dn, fn in os.walk(os.path.join(ROOT, *top.split("/"))):

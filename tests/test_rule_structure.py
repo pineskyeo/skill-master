@@ -1,6 +1,6 @@
 """Unit A4: the structure, description, reference and agent rows come from rules/skill-structure.rules.json,
 rules/skill-description.rules.json, rules/agent-structure.rules.json, rules/data/description.json and three engine
-primitives (plan.md:717-761). New behavior only; tests/test_differential.py proves the rows equal the A3 head."""
+primitives (plan.md:717-761). New behavior only; tests/test_policy_schemas.py pins the variant rows at the P7 commit."""
 import ast, contextlib, inspect, io, json, os, re, shutil, subprocess, sys, tempfile, unittest
 from unittest import mock
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -196,7 +196,7 @@ class TestCheckFunctions(Tmp):
 
     def test_the_r_add_count_drops_by_the_37_moved_rows(self):
         with open(os.path.join(ROOT, "eva.py"), encoding="utf-8") as f:
-            self.assertEqual(sum(1 for ln in f if re.search(r"r\.add\(", ln)), 58 - 37)
+            self.assertEqual(sum(1 for ln in f if re.search(r"r\.add\(", ln)), 58 - 37 - 11)  # A6 deleted 11 in the legacy bodies
 
     def test_a_non_default_bundle_never_shrinks_the_family_rows(self):
         u = self.skill()
@@ -515,18 +515,11 @@ class TestPublicNames(unittest.TestCase):
         doc = load(os.path.join(ROOT, "rules", fname))
         return next(r for r in doc["rules"] if r["id"] == rid)["check"][key]
 
-    def test_the_thresholds_callers_read_come_from_the_rule_operands(self):
-        s = "skill-structure.rules.json"
-        self.assertEqual(eva.REF_TOC_LINES, self.operand(s, "reference-toc", "toc_lines"))
-        self.assertEqual(eva.MIN_EVALS, self.operand(s, "evals-count", "min"))
-        self.assertEqual(eva.SKILL_FIELDS, tuple(self.operand(s, "frontmatter-fields", "fields")))
-        self.assertEqual(eva.HOST_SKILL_FIELDS, tuple(self.operand(s, "frontmatter-fields", "host_fields")))
-        self.assertEqual(eva.SKILL_MAX_BYTES, self.operand(s, "size-limit", "max_bytes"))
-        self.assertEqual(eva.SKILL_MAX_LINES, self.operand(s, "size-limit", "lines_below"))
-        self.assertEqual(eva.COMPATIBILITY_MAX, self.operand(s, "compatibility-length", "max"))
-        d = "skill-description.rules.json"
-        self.assertEqual(eva.DESCRIPTION_MIN, self.operand(d, "description-min-length", "min"))
-        self.assertEqual(eva.DESCRIPTION_MAX, self.operand(d, "description-length", "max"))
+    def test_the_thresholds_live_only_in_the_rule_operands(self):
+        for name in ("REF_TOC_LINES", "MIN_EVALS", "SKILL_FIELDS", "HOST_SKILL_FIELDS", "SKILL_MAX_BYTES", "SKILL_MAX_LINES",
+                     "COMPATIBILITY_MAX", "DESCRIPTION_MIN", "DESCRIPTION_MAX", "OPERANDS"):
+            self.assertFalse(hasattr(eva, name), name)
+        self.assertEqual(self.operand("skill-description.rules.json", "description-length", "max"), 1024)
         with self.assertRaises(AttributeError):
             eva.NO_SUCH_NAME
 

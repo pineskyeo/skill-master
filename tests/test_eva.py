@@ -5,6 +5,11 @@ import eva
 from engine.primitives import transcript as TP
 
 def p(*a): return os.path.join(ROOT, *a)
+def docs_text():
+    from test_skill_eval import docs_text as docs
+    return docs(ROOT)
+def rule_operand(rid, key):
+    return next(r for r in eva.rule_runner.default_bundle().rules if r.id == rid).node[key]
 def wjson(path, obj):
     with open(path, "w", encoding="utf-8") as f: json.dump(obj, f)
 def rjson(path):
@@ -534,24 +539,23 @@ class TestNoAnswerLookup(TmpMixin, unittest.TestCase):
 
 class TestDocs(unittest.TestCase):
     def test_principle_and_integrity_check_documented(self):
-        readme = open(p("README.md"), encoding="utf-8").read()
-        self.assertIn("## 원칙: 정석으로 (우회하지 않고)", readme)
-        self.assertIn("부정행위를 막자는 말이 아닙니다", readme)
+        docs = docs_text()
+        self.assertIn("## Principles", docs)
         for url in ("https://agentskills.io/specification", "https://agentskills.io/skill-creation/evaluating-skills.md",
                     "https://agentskills.io/skill-creation/optimizing-descriptions.md",
                     "https://raw.githubusercontent.com/anthropics/skills/main/skills/skill-creator/SKILL.md",
                     "https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices",
                     "https://developers.openai.com/api/docs/guides/evaluation-best-practices"):
-            self.assertIn(url, readme)
-        self.assertIn("정답 조회 무결성 검사 (`no-answer-lookup`", readme)
-        self.assertNotIn("no-bypass", readme)
-        self.assertIn("agent master", readme); self.assertIn("업계 표준 대비 아직 없는 스킬 기능", readme)
+            self.assertIn(url, docs)
+        self.assertIn("`no-answer-lookup`: no tool call reaches outside the workspace", docs)
+        self.assertNotIn("no-bypass", docs)
+        self.assertIn("## Not implemented", docs)
         loop = open(p("LOOP.md"), encoding="utf-8").read()
         self.assertIn("tool_results", loop); self.assertIn("no-answer-lookup", loop); self.assertNotIn("no-bypass", loop)
     def test_every_skill_check_documented(self):
-        readme = open(p("README.md"), encoding="utf-8").read()
+        docs = docs_text()
         for c in eva.check(p("golden/skills/pdf-summarizer")).checks:
-            self.assertIn("`%s`" % c["id"], readme, c["id"])
+            self.assertIn("`%s`" % c["id"], docs, c["id"])
 
 GOOD_FM = ("---\nname: {name}\ndescription: Counts words in one text file. Use when the user wants a word count.\n"
            "{extra}---\n# Word Count\n## Inputs\n- text_path\n## Outputs\n- word_count\n## Example\nInput: `a.txt` -> Output: `42`\n{body}")
@@ -694,7 +698,7 @@ class TestSkillSpecReferences(SkillMixin, unittest.TestCase):
         self.assertFalse(self.status(r, "refs-path-depth"))
         self.assertTrue(self.status(r, "refs-one-level"))
     def test_reference_toc(self):
-        long_body = "\n".join("line %d" % i for i in range(eva.REF_TOC_LINES))
+        long_body = "\n".join("line %d" % i for i in range(rule_operand("reference-toc", "toc_lines")))
         self.assertIsNone(self.status(self.skill(body="See [g](references/g.md).\n",
                                                  files={"references/g.md": "# G\n" + "x\n" * 50}), "reference-toc"))
         r = self.skill(body="See [g](references/g.md).\n", files={"references/g.md": "# G\n## Setup\n" + long_body})
@@ -742,7 +746,7 @@ class TestSkillEvals(SkillMixin, unittest.TestCase):
     def test_goldens_have_real_evals(self):
         for d in ("csv-cleaner", "korean-proofreader", "pdf-summarizer"):
             n, err = eva.evals_errors(p("golden/skills", d), d)
-            self.assertEqual(err, [], d); self.assertGreaterEqual(n, eva.MIN_EVALS, d)
+            self.assertEqual(err, [], d); self.assertGreaterEqual(n, rule_operand("evals-count", "min"), d)
 
 class TestCitedLinesExist(TmpMixin, unittest.TestCase):
     """P1: a file:line citation counts only if that line appears in a captured, line-numbered tool result."""
@@ -833,10 +837,10 @@ class TestNeedsReview(TmpMixin, unittest.TestCase):
         self.assertEqual(next(c for c in d["checks"] if c["id"] == "criteria-needs-review")["status"], "needs-review")
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(eva.main(["check", RA, "--transcript", p("transcripts/research-followup.json")]), 1)
-    def test_readme_documents_review(self):
-        readme = open(p("README.md"), encoding="utf-8").read()
-        for s in ("needs-review", "REVIEW", "종료코드 3"):
-            self.assertIn(s, readme)
+    def test_docs_document_review(self):
+        docs = docs_text()
+        for s in ("needs-review", "REVIEW", "3 for REVIEW"):
+            self.assertIn(s, docs)
 
 class TestPlainTextRefs(SkillMixin, unittest.TestCase):
     """P3: fenced code excluded first; links, inline code and plain-text bundled-dir paths are references."""
@@ -1110,10 +1114,9 @@ class TestRound3Misc(SkillMixin, unittest.TestCase):
             self.assertTrue(os.path.isfile(os.path.join(p("transcripts/fixtures/drill-repo"), f)), f)
 
 class TestDocsHouseRules(unittest.TestCase):
-    """Round 3 (d): README marks house rules (H) including refs-exist and the evals rule."""
+    """The rule table in references/rules.md marks house rules (H) including refs-exist and the evals rule."""
     def row(self, cid):
-        readme = open(p("README.md"), encoding="utf-8").read()
-        rows = [ln for ln in readme.splitlines() if ln.startswith("| `%s`" % cid)]
+        rows = [ln for ln in docs_text().splitlines() if ln.startswith("| `%s`" % cid)]
         self.assertEqual(len(rows), 1, cid)
         return [x.strip() for x in rows[0].strip("|").split("|")]
     def test_house_rules_marked(self):
@@ -1123,9 +1126,22 @@ class TestDocsHouseRules(unittest.TestCase):
     def test_spec_rules_not_marked_house(self):
         for cid in ("refs-one-level", "description-length", "description-pov"):
             self.assertNotIn("H", [s.strip() for s in self.row(cid)[-1].split(",")], cid)
+    def test_every_rule_has_one_row_with_its_marker_and_kinds(self):
+        marks = {"fail": "[required]", "review": "[needs-review]", "soft": ""}
+        rules = {}
+        for r in eva.rule_runner.default_bundle().rules:
+            e = rules.setdefault(r.id, {"kinds": set(), "marks": set()})
+            e["kinds"].update(r.applies_to); e["marks"].add(marks[r.severity])
+        self.assertGreater(len(rules), 60)
+        for cid, e in sorted(rules.items()):
+            with self.subTest(rule=cid):
+                cells = self.row(cid)
+                self.assertEqual(len(e["marks"]), 1)
+                self.assertEqual(cells[0], ("`%s` %s" % (cid, e["marks"].pop())).strip())
+                self.assertEqual({k.strip() for k in cells[1].split(",")}, e["kinds"])
     def test_must_markers(self):
         for cid in ("description-length", "description-when", "description-pov", "refs-exist"):
-            self.assertIn("[필수]", self.row(cid)[0], cid)
+            self.assertIn("[required]", self.row(cid)[0], cid)
         for c in eva.check(p("golden/skills/pdf-summarizer")).checks:
             if c["id"] in ("description-length", "description-when", "description-pov"):
                 self.assertTrue(c["must"], c["id"])
@@ -1508,10 +1524,9 @@ class TestRound7HostFields(SkillMixin, unittest.TestCase):
             r = self.skill(extra=extra)
             self.assertFalse(self.status(r, "field-types"), extra)
             self.assertTrue(self.status(r, "frontmatter-fields"), extra)
-    def test_readme_marks_host_allowance(self):
-        readme = open(p("README.md"), encoding="utf-8").read()
-        row = next(ln for ln in readme.splitlines() if ln.startswith("| `frontmatter-fields`"))
-        self.assertIn("argument-hint", row); self.assertIn("disable-model-invocation", row); self.assertIn("호스트", row)
+    def test_docs_mark_host_allowance(self):
+        row = next(ln for ln in docs_text().splitlines() if ln.startswith("| `frontmatter-fields`"))
+        self.assertIn("argument-hint", row); self.assertIn("disable-model-invocation", row); self.assertIn("host field", row)
 
 class TestRound7RepoRootRefs(TmpMixin, unittest.TestCase):
     """refs-exist: a ref found only from the enclosing git repo root is needs-review, never a silent pass."""

@@ -3,7 +3,7 @@ script_denylist primitive and its data, the english-ruleset repository rule, row
 contract of lanes 2 and 3, the deep-JSON fix (D9), the naming dedupe of lane 7, and the runner extensions (D4). Every unit,
 bundle and repository copy lives in a temp folder; nothing runs a model or a tool binary. ASCII only: non-English text is
 built from escapes."""
-import ast, contextlib, hashlib, inspect, io, json, os, re, shutil, subprocess, sys, tempfile, unittest
+import ast, contextlib, hashlib, inspect, io, json, os, re, shutil, subprocess, sys, tempfile, types, unittest
 from unittest import mock
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -14,6 +14,42 @@ import test_multi_tool_parity as P
 import test_codex_permissions as C
 
 TOOLS = ("claude", "codex", "opencode", "hermes")
+# The eva.py constants that the legacy parity and English bodies read, at the P7 commit 53edf4c. A6 deleted them with
+# those bodies; the targets and rules/data/scripts.json now hold the values, and these pins keep the data from drifting.
+P7 = types.SimpleNamespace(
+    DESCRIPTION_MAX=1024, OPENAI_YAML="agents/openai.yaml", CODEX_VERIFIED_FIELDS=("policy.allow_implicit_invocation",),
+    CODEX_AGENT_REQUIRED_KEYS=("name", "description", "developer_instructions"),
+    CODEX_AGENT_OPTIONAL_KEYS=("model", "model_reasoning_effort"),
+    CODEX_UNRESTRICTABLE=("write", "shell", "web_fetch", "web_search", "delegate", "skill"),
+    PORTABLE_NAME_PATTERN=r"^[a-z0-9]+(-[a-z0-9]+)*$", OPENCODE_AUTOINVOKE_KEY="opencode/autoinvoke",
+    OPENCODE_MODES=("primary", "subagent", "all"), PERMISSION_ACTIONS=("allow", "ask", "deny"),
+    OPENCODE_PERMISSION_KEYS_COMPLETE=False,
+    NON_ENGLISH_SCRIPT_WORDS=frozenset("""
+        ADLAM AEGEAN AHOM ANATOLIAN ARABIC ARMENIAN AVESTAN BALINESE BAMUM BASSA BATAK BENGALI BHAIKSUKI BOPOMOFO BRAHMI
+        BUGINESE BUHID CANADIAN CARIAN CAUCASIAN CHAKMA CHAM CHEROKEE CHORASMIAN CJK COPTIC CUNEIFORM CYPRIOT CYRILLIC
+        DESERET DEVANAGARI DIVES DOGRA DUPLOYAN EGYPTIAN ELBASAN ELYMAIC ETHIOPIC GEORGIAN GLAGOLITIC GOTHIC GRANTHA
+        GUJARATI GUNJALA GURMUKHI HANGUL HANGZHOU HANIFI HANUNOO HATRAN HEBREW HENTAIGANA HIRAGANA IDEOGRAPH IDEOGRAPHIC
+        IMPERIAL INDIC INSCRIPTIONAL JAVANESE KAITHI KANA KANGXI KANNADA KATAKANA KAYAH KHAROSHTHI KHITAN KHMER KHOJKI
+        KHUDAWADI KOREAN LAO LEPCHA LIMBU LINEAR LISU LYCIAN LYDIAN MAHAJANI MAKASAR MALAYALAM MANDAIC MANICHAEAN MARCHEN
+        MASARAM MASU MEDEFAIDRIN MEETEI MENDE MEROITIC MIAO MODI MONGOLIAN MRO MULTANI MYANMAR NABATAEAN NANDINAGARI NEWA
+        NKO NUSHU NYIAKENG OGHAM OL ORIYA OSAGE OSMANYA OTTOMAN PA PAHAWH PALMYRENE PAU PHAGS PHAISTOS PHOENICIAN PSALTER
+        REJANG RUNIC SAMARITAN SAURASHTRA SHARADA SHAVIAN SIDDHAM SIGNWRITING SINHALA SOGDIAN SORA SOYOMBO SUNDANESE
+        SYLOTI SYRIAC TAGALOG TAGBANWA TAI TAKRI TAMIL TANGUT TELUGU THAANA THAI TIBETAN TIFINAGH TIRHUTA UGARITIC VAI
+        WANCHO WARANG YEZIDI YI ZANABAZAR""".split()),
+    ENGLISH_COMPATIBLE_FIRST_WORDS=frozenset("""
+        ALEF ANGSTROM BET BLACK-LETTER CARON CIRCLED COMBINING DALET DIGIT DINGBAT DOUBLE DOUBLE-STRUCK EULER FEMININE
+        FRACTION FULLWIDTH GIMEL GREEK INFORMATION KELVIN LATIN MASCULINE MATHEMATICAL MICRO MODIFIER MUSICAL NEGATIVE
+        NUMBER OHM PARENTHESIZED PLANCK ROMAN SCRIPT SEGMENTED SMALL SUBSCRIPT SUPERSCRIPT TALLY TURNED VARIATION
+        VIETNAMESE VULGAR""".split()),
+    NON_ENGLISH_RANGES=((0x3300, 0x3357, "Katakana"), (0x337B, 0x337F, "CJK"), (0x32FF, 0x32FF, "CJK")),
+    BINARY_SIGNATURES=(b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a", b"%PDF-", b"PK\x03\x04",
+                       b"PK\x05\x06", b"\x1f\x8b", b"BZh", b"\xfd7zXZ\x00", b"7z\xbc\xaf\x27\x1c", b"II*\x00",
+                       b"MM\x00*", b"wOFF", b"wOF2", b"OTTO", b"\x00\x01\x00\x00", b"true", b"ID3", b"OggS", b"fLaC",
+                       b"\x7fELF", b"\xca\xfe\xba\xbe", b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe",
+                       b"SQLite format 3\x00", b"\x00asm", b"\x00\x00\x01\x00"),
+    BINARY_EXTENSIONS=frozenset(""".png .jpg .jpeg .gif .webp .bmp .ico .icns .tif .tiff .heic .avif .pdf .zip .gz .tgz
+        .bz2 .xz .7z .jar .woff .woff2 .ttf .otf .eot .mp3 .mp4 .m4a .wav .ogg .flac .mov .webm .avi .sqlite .sqlite3 .db
+        .xlsx .xls .docx .doc .pptx .ppt .pyc .so .dylib .dll .exe .class .wasm .bin .npy .parquet""".split()))
 KO = "\ud55c\uad6d\uc5b4"
 GREEK = "\u03b1\u03b2\u03b3"
 CODEX_REL = "wrappers/codex/code-scout.toml"
@@ -131,7 +167,7 @@ def doc_pins(docs):
     return out
 
 
-# The A4 eva.OPENCODE_PERMISSION_GRANTS (now kept by tests/differential for the legacy bodies) with glob, grep and list
+# The A4 eva.OPENCODE_PERMISSION_GRANTS (deleted with the legacy bodies in A6) with glob, grep and list
 # granting search (unit B1 D6).
 B1_OPENCODE_GRANTS = {"read": "read", "edit": "write", "glob": "search", "grep": "search", "list": "search", "bash": "shell",
                       "task": "delegate", "external_directory": None, "webfetch": "web_fetch", "websearch": "web_search",
@@ -167,7 +203,7 @@ def target_pins():
          "cited at eva.py HOST_SKILL_FIELDS; no dated record in the repository or the plan inputs"),
         ("https://code.claude.com/docs/en/sub-agents", "sub-agent model and effort fields", None, B2_NOTE_G30)]), **{
         "skill.reserved_words": (list(eva.RESERVED_NAME_WORDS), None), "skill.name_max": (eva.NAME_MAX, None),
-        "skill.description_max": (eva.DESCRIPTION_MAX, None), "skill.forbidden_chars": ("<>", 'for c in "<>"'),
+        "skill.description_max": (P7.DESCRIPTION_MAX, None), "skill.forbidden_chars": ("<>", 'for c in "<>"'),
         "skill.ok": (ok_claude, ok_claude), "invocation.key": ("disable-model-invocation", '"disable-model-invocation" in meta'),
         "invocation.honored": (True, "is only honored by Claude Code"),
         "wrapper.path": ("wrappers/claude/{name}.md", '"claude": "wrappers/claude/%s.md"'),
@@ -185,15 +221,15 @@ def target_pins():
         ("https://developers.openai.com/codex/subagents", "Codex custom agents", "2026-10-19", NOTE9),
         ("https://developers.openai.com/codex/skills", "skills and agents/openai.yaml", None,
          "inputs/design.md section 2.2 lists it with no date")]), **{
-        "skill.tool_file": (eva.OPENAI_YAML, None), "skill.verified_fields": (list(eva.CODEX_VERIFIED_FIELDS), None),
-        "invocation.tool_file": (eva.OPENAI_YAML, None),
+        "skill.tool_file": (P7.OPENAI_YAML, None), "skill.verified_fields": (list(P7.CODEX_VERIFIED_FIELDS), None),
+        "invocation.tool_file": (P7.OPENAI_YAML, None),
         "invocation.field": ("policy.allow_implicit_invocation", "with policy.allow_implicit_invocation: false"),
         "invocation.value": (False, "if allow is not False:"),
         "wrapper.path": ("wrappers/codex/{name}.toml", '"codex": "wrappers/codex/%s.toml"'),
         "wrapper.format": ("toml", "t = parse_flat_toml(raw_t)"),
-        "wrapper.required": (list(eva.CODEX_AGENT_REQUIRED_KEYS), None),
-        "wrapper.fields.%s.kind" % eva.CODEX_AGENT_OPTIONAL_KEYS[0]: ("string", None),
-        "wrapper.fields.%s.kind" % eva.CODEX_AGENT_OPTIONAL_KEYS[1]: ("string", None),
+        "wrapper.required": (list(P7.CODEX_AGENT_REQUIRED_KEYS), None),
+        "wrapper.fields.%s.kind" % P7.CODEX_AGENT_OPTIONAL_KEYS[0]: ("string", None),
+        "wrapper.fields.%s.kind" % P7.CODEX_AGENT_OPTIONAL_KEYS[1]: ("string", None),
         "wrapper.fields.features.shell_tool.kind": ("boolean", None),
         "wrapper.forbidden.sandbox_mode": (C.REMOVE, C.REMOVE),
         "wrapper.unknown_keys": ("fail", "are not in the recorded Codex custom-agent key list"),
@@ -202,31 +238,31 @@ def target_pins():
         "permissions.derive.shell.verified": (False, None),
         "permissions.derive.shell.evidence": ("<plan>/prototypes/codex-sandbox/shell-tool.txt does not exist: the C2 probe "
                                               "never ran (A3 how D1)", None),
-        "permissions.unrestrictable": (list(eva.CODEX_UNRESTRICTABLE), None), "permissions.fixed": (None, None),
+        "permissions.unrestrictable": (list(P7.CODEX_UNRESTRICTABLE), None), "permissions.fixed": (None, None),
         "models.judgment.model": ("gpt-6-sol", None), "models.judgment.model_reasoning_effort": ("high", None),
         "render.header": (B2_HEADER, None), "render.body": (B2_BODY, None)})
     opencode = dict(common["opencode"], **doc_pins([
         ("https://opencode.ai/docs/agents/", "OpenCode agents and permissions", "2026-10-19", NOTE9),
         ("https://opencode.ai/docs/skills/", "skills name and metadata rules", None,
          "inputs/design.md section 2.3 lists it with no date")]), **{
-        "skill.name_pattern": (eva.PORTABLE_NAME_RE.pattern, None), "skill.folder": ("exact", "if name and name != folder:"),
-        "skill.metadata": ("strings", "must be a string, got %s"), "skill.autoinvoke_key": (eva.OPENCODE_AUTOINVOKE_KEY, None),
+        "skill.name_pattern": (P7.PORTABLE_NAME_PATTERN, None), "skill.folder": ("exact", "if name and name != folder:"),
+        "skill.metadata": ("strings", "must be a string, got %s"), "skill.autoinvoke_key": (P7.OPENCODE_AUTOINVOKE_KEY, None),
         "skill.autoinvoke_values": (["true", "false"], 'av not in ("true", "false")'), "skill.ok": (ok_opencode, ok_opencode),
-        "invocation.metadata_key": (eva.OPENCODE_AUTOINVOKE_KEY, None),
+        "invocation.metadata_key": (P7.OPENCODE_AUTOINVOKE_KEY, None),
         "invocation.value": ("false", "md.get(OPENCODE_AUTOINVOKE_KEY) != \"false\""),
         "wrapper.path": ("wrappers/opencode/{name}.md", '"opencode": "wrappers/opencode/%s.md"'),
         "wrapper.format": ("frontmatter", 'if tool in ("claude", "opencode"):'),
         "wrapper.required": (["description"], '"%s: description: non-empty string required"'),
         "wrapper.fields.name.kind": ("string", '"%s: name must be a non-empty string"'),
         "wrapper.fields.mode.kind": ("enum", 'm["mode"] not in OPENCODE_MODES'),
-        "wrapper.fields.mode.values": (list(eva.OPENCODE_MODES), None),
+        "wrapper.fields.mode.values": (list(P7.OPENCODE_MODES), None),
         "wrapper.fields.model.kind": ("string", '"%s: model must be a non-empty string"'),
         "wrapper.fields.permission.kind": ("permission", 'perm = m.get("permission")'),
         "wrapper.forbidden": ({}, None), "wrapper.unknown_keys": ("allow", None), "wrapper.extra_files": ([], None),
         "permissions.compare": ("classes", "compared by capability class"),
-        "permissions.actions": (list(eva.PERMISSION_ACTIONS), None),
+        "permissions.actions": (list(P7.PERMISSION_ACTIONS), None),
         "permissions.granting": (["allow", "ask"], 'perm[k] != "deny"'), "permissions.derive": ({}, None),
-        "permissions.unrestrictable": ([], None), "permissions.complete": (eva.OPENCODE_PERMISSION_KEYS_COMPLETE, None),
+        "permissions.unrestrictable": ([], None), "permissions.complete": (P7.OPENCODE_PERMISSION_KEYS_COMPLETE, None),
         "permissions.fixed": (None, None), "permissions.wildcard": ("*", None), "permissions.pattern_keys": (["bash"], None),
         "models.judgment.model": (None, None), "render.header": (B2_HEADER, None), "render.body": (B2_BODY, None),
         "render.mode": ("subagent", None), "render.bash_deny": (B2_BASH_DENY, None)})
@@ -284,7 +320,7 @@ class TestTargets(Tmp):
     def test_claude_values(self):
         t = self.target("claude")
         self.assertEqual(t["skill"]["reserved_words"], list(eva.RESERVED_NAME_WORDS))
-        self.assertEqual((t["skill"]["name_max"], t["skill"]["description_max"]), (eva.NAME_MAX, eva.DESCRIPTION_MAX))
+        self.assertEqual((t["skill"]["name_max"], t["skill"]["description_max"]), (eva.NAME_MAX, P7.DESCRIPTION_MAX))
         self.assertEqual(t["skill"]["forbidden_chars"], "<>")
         self.assertEqual(t["wrapper"]["required"], ["name", "description"])
         self.assertEqual(list(t["wrapper"]["fields"]), ["tools", "model", "effort"])
@@ -292,29 +328,29 @@ class TestTargets(Tmp):
 
     def test_codex_values(self):
         t = self.target("codex")
-        self.assertEqual(t["skill"]["tool_file"], eva.OPENAI_YAML)
-        self.assertEqual(t["skill"]["verified_fields"], list(eva.CODEX_VERIFIED_FIELDS))
-        self.assertEqual(t["wrapper"]["required"], list(eva.CODEX_AGENT_REQUIRED_KEYS))
+        self.assertEqual(t["skill"]["tool_file"], P7.OPENAI_YAML)
+        self.assertEqual(t["skill"]["verified_fields"], list(P7.CODEX_VERIFIED_FIELDS))
+        self.assertEqual(t["wrapper"]["required"], list(P7.CODEX_AGENT_REQUIRED_KEYS))
         strings = [k for k, f in t["wrapper"]["fields"].items() if f["kind"] == "string"]
-        self.assertEqual(strings, list(eva.CODEX_AGENT_OPTIONAL_KEYS))
+        self.assertEqual(strings, list(P7.CODEX_AGENT_OPTIONAL_KEYS))
         self.assertEqual(t["wrapper"]["fields"]["features.shell_tool"], {"kind": "boolean"})
         self.assertEqual(list(t["wrapper"]["forbidden"]), ["sandbox_mode"])
         self.assertEqual(t["wrapper"]["forbidden"]["sandbox_mode"], C.REMOVE)
         self.assertEqual(t["wrapper"]["unknown_keys"], "fail")
-        self.assertEqual(t["permissions"]["unrestrictable"], list(eva.CODEX_UNRESTRICTABLE))
+        self.assertEqual(t["permissions"]["unrestrictable"], list(P7.CODEX_UNRESTRICTABLE))
         self.assertIn("shell", t["permissions"]["unrestrictable"])
         self.assertEqual(t["permissions"]["derive"]["shell"]["verified"], False)
         self.assertEqual(t["permissions"]["compare"], "none")
 
     def test_opencode_values(self):
         t = self.target("opencode")
-        self.assertEqual(t["skill"]["name_pattern"], eva.PORTABLE_NAME_RE.pattern)
-        self.assertEqual(t["skill"]["autoinvoke_key"], eva.OPENCODE_AUTOINVOKE_KEY)
-        self.assertEqual(t["wrapper"]["fields"]["mode"]["values"], list(eva.OPENCODE_MODES))
+        self.assertEqual(t["skill"]["name_pattern"], P7.PORTABLE_NAME_PATTERN)
+        self.assertEqual(t["skill"]["autoinvoke_key"], P7.OPENCODE_AUTOINVOKE_KEY)
+        self.assertEqual(t["wrapper"]["fields"]["mode"]["values"], list(P7.OPENCODE_MODES))
         self.assertEqual(list(t["wrapper"]["fields"]), ["name", "mode", "model", "permission"])
         self.assertEqual(list(t["permissions"]["grants"].items()), list(B1_OPENCODE_GRANTS.items()))
-        self.assertEqual(t["permissions"]["actions"], list(eva.PERMISSION_ACTIONS))
-        self.assertEqual(t["permissions"]["complete"], eva.OPENCODE_PERMISSION_KEYS_COMPLETE)
+        self.assertEqual(t["permissions"]["actions"], list(P7.PERMISSION_ACTIONS))
+        self.assertEqual(t["permissions"]["complete"], P7.OPENCODE_PERMISSION_KEYS_COMPLETE)
         self.assertIs(t["permissions"]["complete"], False)
 
     def test_hermes_values(self):
@@ -370,10 +406,7 @@ class TestTargets(Tmp):
             if rule.id in eva.PARITY_ROW_TOOLS:
                 self.assertEqual(tuple(rule.protects), eva.PARITY_ROW_TOOLS[rule.id], rule.id)
 
-    def test_every_target_field_is_pinned_to_its_legacy_source(self):
-        import test_differential as D
-        src = D.legacy_source("add_parity_checks_skill", "agent_wrapper_states", "add_parity_checks_agent",
-                              "codex_policy") + inspect.getsource(eva._wrapper_rel)
+    def test_every_target_field_is_pinned_to_its_p7_value(self):
         pins = target_pins()
         for tool in TOOLS:
             got = dict(leaves({k: v for k, v in self.target(tool).items() if k != "$comment"}))
@@ -381,8 +414,6 @@ class TestTargets(Tmp):
             for path, (want, snippet) in pins[tool].items():
                 with self.subTest((tool, path)):
                     self.assertEqual((type(got[path]), got[path]), (type(want), want))
-                    if snippet:
-                        self.assertIn(snippet, src)
         for url, line in RECORDED_DOCS.items():
             self.assertIn(url, line)
             self.assertIn("VERIFIED 2026-10-19", line)
@@ -501,15 +532,15 @@ class TestScriptData(Tmp):
 
     def test_every_value_equals_the_a2_constants(self):
         d = self.data()
-        self.assertEqual(set(d["non_english_script_words"]), set(eva.NON_ENGLISH_SCRIPT_WORDS))
-        self.assertEqual(len(d["non_english_script_words"]), len(eva.NON_ENGLISH_SCRIPT_WORDS))
-        self.assertEqual(set(d["english_compatible_first_words"]), set(eva.ENGLISH_COMPATIBLE_FIRST_WORDS))
-        self.assertEqual(len(d["english_compatible_first_words"]), len(eva.ENGLISH_COMPATIBLE_FIRST_WORDS))
+        self.assertEqual(set(d["non_english_script_words"]), set(P7.NON_ENGLISH_SCRIPT_WORDS))
+        self.assertEqual(len(d["non_english_script_words"]), len(P7.NON_ENGLISH_SCRIPT_WORDS))
+        self.assertEqual(set(d["english_compatible_first_words"]), set(P7.ENGLISH_COMPATIBLE_FIRST_WORDS))
+        self.assertEqual(len(d["english_compatible_first_words"]), len(P7.ENGLISH_COMPATIBLE_FIRST_WORDS))
         self.assertEqual([(int(r["first"], 16), int(r["last"], 16), r["label"]) for r in d["non_english_ranges"]],
-                         list(eva._NON_ENGLISH_RANGES))
-        self.assertEqual([bytes.fromhex(x) for x in d["binary_signatures"]], list(eva.BINARY_SIGNATURES))
-        self.assertEqual(set(d["binary_extensions"]), set(eva.BINARY_EXTENSIONS))
-        self.assertEqual(len(d["binary_extensions"]), len(eva.BINARY_EXTENSIONS))
+                         list(P7.NON_ENGLISH_RANGES))
+        self.assertEqual([bytes.fromhex(x) for x in d["binary_signatures"]], list(P7.BINARY_SIGNATURES))
+        self.assertEqual(set(d["binary_extensions"]), set(P7.BINARY_EXTENSIONS))
+        self.assertEqual(len(d["binary_extensions"]), len(P7.BINARY_EXTENSIONS))
 
     def test_the_scanner_reads_the_data_file_not_code(self):
         SD = denylist()
@@ -660,33 +691,6 @@ class TestProvenance(Tmp):
                        if r.file in A3_RULE_FILES and r.source.get("verified") is None)
         self.assertEqual(nulls, ["name-reserved"])
 
-    def test_text_output_and_reasons_are_unchanged_by_the_key(self):
-        import test_differential as D
-        units = [os.path.join(ROOT, "golden", "skills", "csv-cleaner"), os.path.join(ROOT, "golden", "agents", "code-reviewer"),
-                 self.agent(), self.skill()]
-        for unit in units:
-            with self.subTest(unit):
-                with D.legacy():
-                    old = eva.check(unit, D.EMPTY_BUNDLE)
-                new = D.without_b2_rows(eva.check(unit))
-                agent = new.kind == "agent"
-                kept = lambda rid: not agent or not rid.startswith(B1_AGENT_ROWS)
-                rows = [c for c in new.checks if c["id"].startswith(RULE_ROW_PREFIXES)]
-                self.assertTrue(rows and all("rule" in c for c in rows))
-                self.assertFalse(any("rule" in c for c in old.checks))
-                self.assertEqual({c["id"]: c["reason"] for c in rows if kept(c["id"])},
-                                 {c["id"]: c["reason"] for c in old.checks
-                                  if c["id"].startswith(RULE_ROW_PREFIXES) and kept(c["id"])})
-
-                def lines(r):
-                    out = quiet(eva.print_report, r)[1].splitlines()
-                    if not agent:
-                        return sorted(out)
-                    return sorted(ln for ln in out if ln.startswith("  ") and not ln.startswith("  category below floor")
-                                  and kept(ln.split()[1]))
-                # row order in the text output is out of scope (check-row-text); every line must stay
-                self.assertEqual(lines(new), lines(old))
-
 
 class TestEnglishOperands(unittest.TestCase):
     def groups(self):
@@ -694,28 +698,18 @@ class TestEnglishOperands(unittest.TestCase):
                 if r.file == "english-only.rules.json" and r.check.group is not None}
 
     def test_every_group_operand_equals_the_code_constant_it_duplicates(self):
-        import test_differential as D
         SD, g = denylist(), self.groups()
-        legacy = D.legacy_source("english_scan")
-        self.assertEqual(g["english-bundled-files"]["ignore"], {"patterns": list(eva.SKILL_IGNORE)})
-        self.assertEqual(eva.SKILL_IGNORE, SD.SKILL_IGNORE)
-        self.assertEqual(g["english-bundled-files"]["exclude"], ["SKILL.md"] + list(eva.SKILL_TOOL_FILES))
+        self.assertEqual(g["english-bundled-files"]["ignore"], {"patterns": list(SD.SKILL_IGNORE)})
+        self.assertEqual(g["english-bundled-files"]["exclude"], ["SKILL.md"] + list(SD.SKILL_TOOL_FILES))
         self.assertEqual((g["english-bundled-files"]["top"], g["english-bundled-files"]["frontmatter_md"]), ("", False))
-        self.assertIn('if rel == "SKILL.md" or rel in SKILL_TOOL_FILES: continue', legacy)
-        self.assertEqual(g["english-tool-files"]["files"], list(eva.SKILL_TOOL_FILES))
-        self.assertEqual(eva.SKILL_TOOL_FILES, SD.SKILL_TOOL_FILES)
+        self.assertEqual(g["english-tool-files"]["files"], list(SD.SKILL_TOOL_FILES))
         self.assertEqual(g["english-evals"]["files"], ["evals/evals.json", "evals/trigger_evals.json"])
-        self.assertIn('_json_group(path, ("evals/evals.json", "evals/trigger_evals.json"), "evals")', legacy)
-        self.assertEqual(eva.OUTPUT_MATCHER_KEYS, SD.OUTPUT_MATCHER_KEYS)
-        self.assertEqual([tuple(m) for m in g["english-evals"]["matchers"]], list(eva.OUTPUT_MATCHER_KEYS["evals"]))
-        self.assertEqual([tuple(m) for m in g["english-scenarios"]["matchers"]], list(eva.OUTPUT_MATCHER_KEYS["scenarios"]))
-        self.assertEqual(eva.SKIP_DIRS, SD.SKIP_DIRS)
+        self.assertEqual([tuple(m) for m in g["english-evals"]["matchers"]], list(SD.OUTPUT_MATCHER_KEYS["evals"]))
+        self.assertEqual([tuple(m) for m in g["english-scenarios"]["matchers"]], list(SD.OUTPUT_MATCHER_KEYS["scenarios"]))
         for rid, top, md in (("english-scenarios", "scenarios", None), ("english-wrappers", "wrappers", True)):
-            self.assertEqual(g[rid]["ignore"], {"dirs": list(eva.SKIP_DIRS)}, rid)
+            self.assertEqual(g[rid]["ignore"], {"dirs": list(SD.SKIP_DIRS)}, rid)
             self.assertEqual(g[rid]["top"], top, rid)
-            self.assertIn('_tree_view(tree, "%s")' % top, legacy)
         self.assertEqual((g["english-wrappers"]["exclude"], g["english-wrappers"]["frontmatter_md"]), ([], True))
-        self.assertIn('frontmatter=rel.endswith(".md")', legacy)
         self.assertEqual((g["english-skill-md"]["file"], g["english-agent-md"]["file"]), ("SKILL.md", "AGENT.md"))
         self.assertEqual(g["english-ruleset"]["folders"], ["rules"] + list(RR.HASHED_TREES) + ["policy"])
 
@@ -723,7 +717,7 @@ class TestEnglishOperands(unittest.TestCase):
         g = self.groups()["english-bundled-files"]
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d)
-        for name in eva.SKILL_IGNORE:
+        for name in denylist().SKILL_IGNORE:
             write(os.path.join(d, name.replace("*", "x"), "a.md") if "." not in name or name.startswith(".") else
                   os.path.join(d, name), KO + "\n")
         write(os.path.join(d, "SKILL.md"), "---\nname: x\n---\nx\n")
@@ -743,7 +737,7 @@ class TestCodexFeatures(Tmp):
         self.assertEqual(c["status"], "needs-review")
         self.assertEqual(c["reason"], "needs-review: [codex] " + C.READ_ONLY)
         self.assertIn("shell", c["reason"])
-        self.assertEqual(eva.agent_wrapper_states(d)["codex"]["problems"], [])
+        self.assertEqual(parity().wrapper_states(d, parity().targets())["codex"]["problems"], [])
 
     def test_lane3_the_key_removed_gives_the_same_review(self):
         d = self.agent(codex=self.wrapper(""))
@@ -1089,7 +1083,7 @@ class TestAsciiFiles(unittest.TestCase):
         files += [os.path.join(ROOT, "engine", "primitives", n) for n in ("parity.py", "script_denylist.py")]
         files += [os.path.join(ROOT, "engine", "rule_runner.py")]
         files += [os.path.join(ROOT, "tests", n) for n in ("test_rule_targets.py", "test_rule_fixtures.py",
-                                                         "test_differential.py", "test_rule_runner.py")]
+                                                         "test_rule_runner.py")]
         ids = [r.id for r in RR.default_bundle().rules if r.file in A3_RULE_FILES]
         for rid in ids:
             for dp, dn, fn in os.walk(os.path.join(ROOT, "tests", "rules", rid)):
@@ -1100,9 +1094,7 @@ class TestAsciiFiles(unittest.TestCase):
                 self.assertTrue(f.read().isascii(), fp)
         # eva.py and engine/loaders.py held non-ASCII text before A3; the definitions A3 adds there are ASCII
         for fname, names in (("eva.py", ("_family_bundle", "_english_groups", "english_scan", "english_eval_problems",
-                                         "add_english_checks", "codex_policy", "add_parity_checks_skill",
-                                         "agent_wrapper_states", "add_parity_checks_agent", "add_parity_checks",
-                                         "check")),
+                                         "codex_policy", "add_parity_checks", "check")),
                              (os.path.join("engine", "loaders.py"), ("_TableTomlReader", "parse_toml"))):
             with open(os.path.join(ROOT, fname), encoding="utf-8") as f:
                 src = f.read()

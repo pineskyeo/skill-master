@@ -261,12 +261,12 @@ class TestApiEquivalentCost(Base):
         self.assertIn("API-equivalent total $", out)
 
 class TestDocs(unittest.TestCase):
-    def test_readme_documents_subscription_auth_and_cost(self):
-        readme = read(os.path.join(T.ROOT, "README.md"))
-        for s in ("Subscription auth", "CLAUDE_CODE_OAUTH_TOKEN", "claude setup-token", "tmux", "auth_mode",
+    def test_docs_document_subscription_auth_and_cost(self):
+        docs = T.docs_text()
+        for s in ("### Subscription auth", "CLAUDE_CODE_OAUTH_TOKEN", "claude setup-token", "tmux", "auth_mode",
                   "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CODEX_API_KEY", "ANTHROPIC_AUTH_TOKEN", "API-equivalent",
                   "### Cost", "cost.json", "0400"):
-            self.assertIn(s, readme, s)
+            self.assertIn(s, docs, s)
 
 if __name__ == "__main__":
     unittest.main()

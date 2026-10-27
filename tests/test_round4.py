@@ -300,11 +300,11 @@ class TestCodexSoftBudget(Base):
         self.assertTrue(fc.calls); self.assertTrue(fx.calls)
 
 class TestDocs(unittest.TestCase):
-    def test_readme_documents_round4(self):
-        readme = read(os.path.join(T.ROOT, "README.md"))
+    def test_docs_document_budget_and_auth_checks(self):
+        docs = T.docs_text()
         for s in ("--strict-budget", "soft limit", "settings.local.json", "managed-settings.json", "loggedIn: true",
                   "plugins", "tokens_x_price"):
-            self.assertIn(s, readme, s)
+            self.assertIn(s, docs, s)
 
 if __name__ == "__main__":
     unittest.main()

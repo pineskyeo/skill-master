@@ -11,7 +11,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from test_skill_eval import se
+from test_skill_eval import docs_text, se
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
 SKILL = os.path.join(ROOT, "golden", "skills", "csv-cleaner")
@@ -204,12 +204,11 @@ class TestRound17(unittest.TestCase):
         self.assertEqual(json.loads(self.gate_without_command("Monitor", {"source": "websocket"}))
                          ["hookSpecificOutput"]["permissionDecision"], "deny")
 
-    def test_readme_describes_command_tool_policy(self):
-        with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as f:
-            readme = f.read()
-        self.assertIn('PreToolUse`/`*` 훅', readme)
-        self.assertIn('--disallowedTools Monitor PowerShell', readme)
-        self.assertIn('Read, Glob, Grep, Skill, TodoWrite', readme)
+    def test_docs_describe_command_tool_policy(self):
+        docs = docs_text()
+        self.assertIn('`PreToolUse`/`*` hook', docs)
+        self.assertIn('--disallowedTools Monitor PowerShell', docs)
+        self.assertIn('Read, Glob, Grep, Skill, TodoWrite', docs)
 
     def test_gate_rejects_symlinks_existing_output_and_changed_script(self):
         src = os.path.join(self.work, "evals", "files", "empty_header_spaces.csv")

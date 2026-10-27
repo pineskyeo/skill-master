@@ -3,14 +3,15 @@
 
 File formats follow Anthropic skill-creator (references/schemas.md, scripts/aggregate_benchmark.py,
 scripts/run_eval.py) and agentskills.io (evaluating-skills, optimizing-descriptions); deviations are listed
-in the README.md section on the skill-eval harness. Python 3.9 standard library only.
+in references/eval-set-format.md ("Deviations from skill-creator"). Python 3.9 standard library only.
 
 Safety: no model or CLI is ever executed unless the command line has --live AND a finite --budget-usd, the approval
 gates pass, the cost estimate fits the budget, and a person signs the start at a terminal (engine/approvals.py,
 references/approval-gates.md). Without --live every command is a dry run: it prints the
 plan and the estimated cost. Engines and graders take an injectable exec_fn so tests run fully mocked.
-Auth is subscription only (Claude Code claude.ai OAuth, Codex ChatGPT login; README "Subscription auth"): API-key
-variables are refused and scrubbed from every child, and costs are API-equivalent (usage x API prices), not spend.
+Auth under the personal-mac profile is subscription only (Claude Code claude.ai OAuth, Codex ChatGPT login;
+references/engine-cli.md "Subscription auth"): API-key variables are refused and scrubbed from every child, and costs
+are API-equivalent (usage x API prices), not spend. The company profile is in references/auth-and-cost.md.
 
 Usage: python3 skill_eval.py <validate|estimate|plan|run|grade|calibrate|report|approve|register|snapshot|loop> <skill> ...
        python3 skill_eval.py <approver-check|check-builtin-plugins>
@@ -223,7 +224,8 @@ NO_STRICT_WARNING = ("--no-strict-budget: %s runs with a SOFT budget limit (one 
 def budget_enforcement(engine_cls_or_obj):
     return "per_call_cap" if engine_cls_or_obj.has_call_cap else "soft_limit"
 # Extra CLI args that would change the priced model or the per-call cap (exact flag or flag=value).
-# Also flags that would add skill/plugin/config sources back into an isolated run (README "Eval isolation").
+# Also flags that would add skill/plugin/config sources back into an isolated run (references/engine-cli.md "Eval
+# isolation").
 FORBIDDEN_EXTRA_ARGS = {"claude": ("--model", "--fallback-model", "--max-budget-usd", "--settings", "--setting-sources",
                                    "--plugin-dir", "--plugin-url", "--add-dir", "--mcp-config", "--effort",
                                    "--allowedTools", "--allowed-tools", "--dangerously-skip-permissions",
@@ -316,82 +318,6 @@ def slug(text, n=40):
     return s[:n].strip("-")
 
 # ---------- eval set ----------
-def _rel_path_ok(p):
-    return isinstance(p, str) and bool(p) and not os.path.isabs(p) and ".." not in p.replace("\\", "/").split("/")
-
-def _has_lone_surrogate(s):
-    return any("\ud800" <= c <= "\udfff" for c in s)
-
-def _csv_rows_problems(where, chk):
-    e = ["%s.check.%s: not a csv_rows key (allowed: %s)" % (
-            where, k.encode("ascii", "backslashreplace").decode("ascii"), ", ".join(CSV_ROWS_KEYS))
-         for k in chk if k not in CSV_ROWS_KEYS]
-    if not _rel_path_ok(chk.get("path")): e.append("%s.check.path: relative path required" % where)
-    elif _has_lone_surrogate(chk["path"]): e.append("%s.check.path: lone surrogate (U+D800..U+DFFF) not allowed" % where)
-    rows = chk.get("rows")
-    rows_ok = isinstance(rows, list) and all(
-        isinstance(r, list) and all(isinstance(c, str) for c in r) for r in rows) and (
-        bool(rows) or chk.get("unique") is True)
-    if "rows" in chk and not rows_ok:
-        e.append("%s.check.rows: non-empty list of lists of strings required (an empty inner list matches a blank "
-                 "line; an empty outer list is allowed only with unique: true)" % where)
-    elif rows_ok and any(_has_lone_surrogate(c) for r in rows for c in r):
-        e.append("%s.check.rows: lone surrogate (U+D800..U+DFFF) not allowed in a cell" % where)
-    bounds = {}
-    for k in ("min", "max"):
-        if k in chk:
-            if isinstance(chk[k], int) and not isinstance(chk[k], bool) and chk[k] >= 0: bounds[k] = chk[k]
-            else: e.append("%s.check.%s: integer >= 0 required" % (where, k))
-    if ("min" in chk or "max" in chk) and "rows" not in chk:
-        e.append("%s.check.rows: required when min/max are given" % where)
-    if "max" in bounds and "min" not in chk and bounds["max"] < 1:
-        e.append("%s.check.max: below the default min 1; set min: 0 too (row must be absent)" % where)
-    elif "min" in bounds and "max" in bounds and bounds["min"] > bounds["max"]:
-        e.append("%s.check.max: must be >= min" % where)
-    if rows_ok and rows and bounds.get("min") == 0 and "max" not in chk:
-        e.append("%s.check.min: 0 without max asserts nothing about the listed rows; set max or a min >= 1" % where)
-    if rows_ok and not rows and ("min" in chk or "max" in chk):
-        e.append("%s.check.rows: min/max need a non-empty rows list (an empty list checks only unique)" % where)
-    if chk.get("normalize", "none") not in ("none", "strip"):
-        e.append("%s.check.normalize: none|strip" % where)
-    if "unique" in chk and not isinstance(chk["unique"], bool): e.append("%s.check.unique: true|false required" % where)
-    if not rows_ok and "rows" not in chk and chk.get("unique") is not True:
-        e.append("%s.check: needs a non-empty rows list or unique: true (otherwise it asserts nothing)" % where)
-    return e
-
-def _check_problems(where, chk):
-    if not isinstance(chk, dict) or chk.get("type") not in STATIC_TYPES:
-        return ["%s.check.type: one of %s required" % (where, "|".join(STATIC_TYPES))]
-    t, e = chk["type"], []
-    if t in ("regex", "not_regex"):
-        if not isinstance(chk.get("pattern"), str) or not chk["pattern"]:
-            e.append("%s.check.pattern: non-empty string required" % where)
-        else:
-            try: re.compile(chk["pattern"])
-            except re.error as ex: e.append("%s.check.pattern: %s" % (where, ex))
-        if chk.get("target", "final") not in ("final", "transcript"):
-            e.append("%s.check.target: final|transcript" % where)
-    elif t == "tool_call":
-        if not isinstance(chk.get("tool"), str) or not chk["tool"]:
-            e.append("%s.check.tool: non-empty string required" % where)
-        for k in ("min", "max"):
-            if k in chk and not (isinstance(chk[k], int) and not isinstance(chk[k], bool) and chk[k] >= 0):
-                e.append("%s.check.%s: integer >= 0 required" % (where, k))
-        if "input_regex" in chk:
-            try: re.compile(chk["input_regex"])
-            except (re.error, TypeError) as ex: e.append("%s.check.input_regex: %s" % (where, ex))
-    elif t == "skill_triggered":
-        if not isinstance(chk.get("expected"), bool): e.append("%s.check.expected: true|false required" % where)
-    elif t == "csv_rows":
-        e += _csv_rows_problems(where, chk)
-    elif t in ("file_exists", "file_equals_fixture", "csv_cleaned"):
-        for key in (("path",) if t == "file_exists" else ("path", "fixture")):
-            if not _rel_path_ok(chk.get(key)): e.append("%s.check.%s: relative path required" % (where, key))
-        if t == "csv_cleaned" and (not isinstance(chk.get("data_rows"), int) or isinstance(chk.get("data_rows"), bool)
-                                    or chk["data_rows"] < 0):
-            e.append("%s.check.data_rows: integer >= 0 required" % where)
-    return e
-
 def check_object_problems(where, chk):
     """Problems of one static check object per schemas/evals.schema.json#/$defs/check."""
     import eva
@@ -457,64 +383,6 @@ def load_eval_set(skill_dir):
     return {"skill_name": name, "skill_dir": skill_dir, "description": meta.get("description") or "",
             "claude_python_script": claude_script, "cases": cases, "triggers": triggers}, problems
 
-def _legacy_load_eval_set(skill_dir):
-    """Returns (spec, problems). spec: skill_name, skill_dir, description, cases[], triggers[] (or None if missing)."""
-    skill_dir = os.path.realpath(skill_dir)
-    import eva  # frontmatter parser and the static evals-valid rules
-    problems = []
-    text, err = eva.read_text(os.path.join(skill_dir, "SKILL.md"))
-    meta = (eva.parse_frontmatter(text)[0] if not err else None) or {}
-    name = meta.get("name") if isinstance(meta.get("name"), str) else os.path.basename(skill_dir)
-    if not safe_name(name):  # it becomes the install folder <work>/<skills_rel>/<name> and the workspace name
-        problems.append("SKILL.md name: %r must match %s without '..' (one path component)" % (name, SAFE_NAME_RE.pattern))
-    _, errs = eva.evals_errors(skill_dir, name)
-    problems += ["evals.json: " + x for x in errs]
-    data = rjson(os.path.join(skill_dir, "evals", "evals.json"), {}) if not errs else {}
-    claude_script = data.get("claude_python_script")
-    if claude_script is not None:
-        if (not isinstance(claude_script, str) or not re.fullmatch(r"scripts/[A-Za-z0-9_./-]+\.py", claude_script)
-                or ".." in claude_script.split("/") or not os.path.isfile(os.path.join(skill_dir, claude_script))):
-            problems.append("evals.json.claude_python_script: existing relative scripts/*.py path required")
-            claude_script = None
-    cases = []
-    for c in (data.get("evals") or []):
-        default_layer = c.get("layer") or "llm"
-        items = []
-        raw = c.get("assertions") or c.get("expectations") or []
-        for i, a in enumerate(raw):
-            where = "evals[id=%s].assertions[%d]" % (c["id"], i)
-            it = {"id": "%s.%d" % (c["id"], i), "text": a, "layer": default_layer, "check": None} if isinstance(a, str) \
-                else {"id": "%s.%d" % (c["id"], i), "text": a["text"], "layer": a["layer"], "check": a.get("check")}
-            if it["layer"] == "static":
-                if it["check"] is None:
-                    problems.append("%s: static layer needs a machine check object {\"text\", \"layer\": \"static\", "
-                                    "\"check\": {\"type\": ...}} (%r)" % (where, it["text"]))
-                else:
-                    problems += _check_problems(where, it["check"])
-                    if isinstance(it["check"], dict) and it["check"].get("type") in ("file_equals_fixture", "csv_cleaned"):
-                        fixture = it["check"].get("fixture")
-                        if isinstance(fixture, str) and fixture not in (c.get("files") or []):
-                            problems.append("%s.check.fixture: must be one of this case's files" % where)
-            items.append(it)
-        pressure = c.get("pressure")
-        if pressure is not None and not (isinstance(pressure, dict) and isinstance(pressure.get("kinds"), list)
-                                         and pressure["kinds"] and all(isinstance(k, str) and k for k in pressure["kinds"])
-                                         and isinstance(pressure.get("context", ""), str)):
-            problems.append("evals[id=%s].pressure: {\"kinds\": [str, ...], \"context\": str} required" % c.get("id"))
-            pressure = None
-        if "name" in c and not safe_name(c["name"]):
-            problems.append("evals[id=%s].name: %r must match %s without '..' (one path component)"
-                            % (c["id"], c["name"], SAFE_NAME_RE.pattern))
-        name_ = c["name"] if safe_name(c.get("name")) else (slug(c["prompt"]) or str(c["id"]))
-        cases.append({"id": c["id"], "name": name_, "prompt": c["prompt"],
-                      "expected_output": c["expected_output"], "files": c.get("files") or [], "items": items,
-                      "pressure": pressure})
-    triggers, tp = load_triggers(skill_dir)
-    problems += tp
-    problems += ["english-only rule: " + x for x in eva.english_violations(skill_dir)]
-    problems += ["multi-tool parity rule: " + x for x in eva.parity_violations(skill_dir)]
-    return {"skill_name": name, "skill_dir": skill_dir, "description": meta.get("description") or "",
-            "claude_python_script": claude_script, "cases": cases, "triggers": triggers}, problems
 
 def load_triggers(skill_dir):
     """evals/trigger_evals.json: skill-creator eval-set format [{"query": str, "should_trigger": bool}], shape per
@@ -536,29 +404,6 @@ def load_triggers(skill_dir):
     pos = sum(q["should_trigger"] for q in out)
     return out, shape.problems(data, pos=pos, neg=len(out) - pos)
 
-def _legacy_load_triggers(skill_dir):
-    """evals/trigger_evals.json: skill-creator eval-set format [{"query": str, "should_trigger": bool}]."""
-    fp = os.path.join(skill_dir, "evals", "trigger_evals.json")
-    if not os.path.isfile(fp):
-        return None, ["trigger_evals.json: missing evals/trigger_evals.json (%d should-trigger + %d should-not queries)"
-                      % (TRIGGER_POS, TRIGGER_NEG)]
-    try:
-        data = rjson(fp)
-    except ValueError as ex:
-        return None, ["trigger_evals.json: invalid JSON: %s" % ex]
-    if not isinstance(data, list):
-        return None, ["trigger_evals.json: top level must be a list"]
-    e, out, seen = [], [], set()
-    for i, q in enumerate(data):
-        if not (isinstance(q, dict) and isinstance(q.get("query"), str) and q["query"].strip()
-                and isinstance(q.get("should_trigger"), bool)):
-            e.append("trigger_evals.json[%d]: {\"query\": str, \"should_trigger\": bool} required" % i); continue
-        if q["query"] in seen: e.append("trigger_evals.json[%d]: duplicate query" % i)
-        seen.add(q["query"]); out.append({"query": q["query"], "should_trigger": q["should_trigger"]})
-    pos = sum(q["should_trigger"] for q in out); neg = len(out) - pos
-    if (pos, neg) != (TRIGGER_POS, TRIGGER_NEG):
-        e.append("trigger_evals.json: need %d should-trigger + %d should-not, got %d + %d" % (TRIGGER_POS, TRIGGER_NEG, pos, neg))
-    return out, e
 
 def full_prompt(case):
     p = case.get("pressure")
@@ -592,7 +437,7 @@ def live_exec(cmd, cwd, timeout, env=None):
                        stdin=subprocess.DEVNULL)  # codex exec waits for stdin when it is an open pipe/terminal
     return p.returncode, p.stdout, p.stderr
 
-# ---------- subscription auth (README "Eval isolation" > "Subscription auth") ----------
+# ---------- subscription auth (references/engine-cli.md "Subscription auth") ----------
 # Variables that switch Claude Code / Codex to API-key (per-token) billing. Their presence blocks --live (preflight)
 # and they are removed from every child environment anyway. Values are never read, printed or logged.
 API_KEY_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY",
@@ -758,7 +603,7 @@ def listed_child_env(cmd):
     env.update(LISTED_KEY_SCRUB_ENV.get(engine, {}))
     return env
 
-# Account switching (2026-10-16, README "Subscription auth", account auto-switch). skill_eval itself still never passes a
+# Account switching (2026-10-16, references/engine-cli.md "Subscription auth"). skill_eval itself still never passes a
 # token (IGNORED_AUTH_ENV above is scrubbed first). Every `claude` child gets an explicit caller marker; the ~/bin/claude
 # account shim (claude-accts v5) then may, only on a usage-limit error from acct0, retry once on ~/.claude-acctN with
 # that account's Keychain token, which the shim alone injects (and CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 so the eval
@@ -1343,8 +1188,8 @@ class Engine:
     def label(self):
         return "%s(%s%s)" % (self.name, self.model or "CLI default", ", effort %s" % self.effort if self.effort else "")
     def install_skill(self, workdir, skill_dir, name):
-        """Copy exactly the eva.unit_tree files of the skill, so the run holds what the English scan read (eva.SKILL_IGNORE
-        is left out, evals/ among them: the eval set must not leak into the run). A link that leaves the folder, dangles
+        """Copy exactly the eva.unit_tree files of the skill, so the run holds what the English scan read (SKILL_IGNORE of
+        engine/primitives/script_denylist.py is left out, evals/ among them: the eval set must not leak into the run). A link that leaves the folder, dangles
         or resolves in a loop of links, and a cycle, refuse the install. The name (SKILL.md frontmatter) must be one safe
         path component and the destination must stay inside the skills folder of the sandbox."""
         import eva
@@ -1366,7 +1211,7 @@ class Engine:
     def parse(self, stdout): raise NotImplementedError
     def triggered(self, result, skill_name): raise NotImplementedError
     def sandbox_env(self, root):
-        """Environment for one isolated run whose sandbox folder is root (see README "Eval isolation")."""
+        """Environment for one isolated run whose sandbox folder is root (references/engine-cli.md "Eval isolation")."""
         return scrub_env(os.environ)
     def remove_credentials(self, root):
         """Deletes and verifies the removal of any credential copy in the sandbox; None or an error string."""
@@ -1724,7 +1569,7 @@ def runs_coverage(planned, runs):
 def coverage_line(cov):
     return ", ".join("%s=%s" % (t, c["status"]) for t, c in cov.items())
 
-# ---------- per-run isolation (README "Eval isolation") ----------
+# ---------- per-run isolation (references/engine-cli.md "Eval isolation") ----------
 def ancestors(path):
     out, d = [], os.path.realpath(path)
     while True:
@@ -1812,8 +1657,8 @@ def claude_shared_skill_notes(cfg):
 
 def escaping_links(root, tree=None):
     """Paths (relative to root, forward slashes) of symlinks a copy of root would follow out of root, or that dangle:
-    the outside links and the dangling files of eva.unit_tree (tree, when the caller already has it). eva.SKILL_IGNORE
-    entries are not copied, so they are not checked."""
+    the outside links and the dangling files of eva.unit_tree (tree, when the caller already has it). The
+    SKILL_IGNORE entries of engine/primitives/script_denylist.py are not copied, so they are not checked."""
     import eva
     tree = tree or eva.unit_tree(root)
     return sorted(set(tree.outside) | {r for r in tree.files if not os.path.exists(os.path.join(root, *r.split("/")))})
@@ -2572,8 +2417,8 @@ def approve_show(gate, spec, ws, rules):
     return shown + ["ruleset_sha256 " + rules]
 
 def preflight(spec, engines, run_root=None, home=None):
-    """Read-only, blocks --live (fail closed). Runs execute in per-run sandboxes under run_root (README "Eval
-    isolation"); this checks what the sandboxes cannot hide:
+    """Read-only, blocks --live (fail closed). Runs execute in per-run sandboxes under run_root (references/engine-cli.md
+    "Eval isolation"); this checks what the sandboxes cannot hide:
     - any .claude/skills (claude) or .agents/skills (codex) folder with skills in run_root or its ancestors
       (project skills are discovered from the cwd upward);
     - claude: a same-named copy in ~/.claude/skills (incl. synced/) or a plugin. --setting-sources project,local
@@ -5815,7 +5660,8 @@ def build_parser():
         if n == "calibrate": s.add_argument("--golden", required=True)
         if n == "loop":
             s.add_argument("--builder", help=argparse.SUPPRESS)  # removed: an arbitrary shell command is not metered
-            s.add_argument("--builder-prompt", help="file with instructions for the metered Claude builder (see README)")
+            s.add_argument("--builder-prompt", help="file with instructions for the metered Claude builder (see "
+                           "references/engine-cli.md)")
             s.add_argument("--builder-model", default=DEFAULT_BUILDER_MODEL)
             s.add_argument("--max-iterations", type=int, default=MAX_AUTO_ITERATIONS)
             s.add_argument("--golden")

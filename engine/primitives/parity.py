@@ -398,7 +398,8 @@ def _text_wrapper(st, tgt, path, fp, rel, name, desc, outside):
 
 
 def wrapper_states(path, tg):
-    """{tool: {"rel", "problems", "caps"}} for the four wrappers of an agent folder (eva.agent_wrapper_states)."""
+    """{tool: {"rel", "problems", "caps"}} for the four wrappers of an agent folder (agent_rows, behind the
+    parity_wrapper and parity_permissions ops)."""
     raw, meta, _ = _frontmatter_of(os.path.join(path, "AGENT.md"))
     meta = meta or {}
     name, desc = _str_field(meta, "name"), _norm_ws(_str_field(meta, "description"))

@@ -25,6 +25,10 @@ CASE6_ONCE = {"type": "csv_rows", "path": "customers_clean.csv", "normalize": "n
               "rows": [["kim@example.com", "Kim", "Seoul"], ["park@example.com", "Park", "Incheon"]]}
 
 
+def has_lone_surrogate(s):
+    return any("\ud800" <= c <= "\udfff" for c in s)
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -264,7 +268,7 @@ class TestValidation(unittest.TestCase):
         chk = {"type": "csv_rows", "path": "o.csv", "rows": [["1", "2"]]}
         chk.update(over)
         for k in [k for k, v in chk.items() if v is KeyError]: del chk[k]
-        return se._check_problems("w", chk)
+        return se.check_object_problems("w", chk)
 
     def test_type_is_registered(self):
         self.assertIn("csv_rows", se.STATIC_TYPES)
@@ -275,7 +279,7 @@ class TestValidation(unittest.TestCase):
         self.assertEqual(self.problems(min=0, max=0, normalize="strip", unique=False), [])
         self.assertEqual(self.problems(min=2, max=2), [])
         for chk in (CASE1, CASE6_KEPT, CASE6_ONCE):
-            self.assertEqual(se._check_problems("w", chk), [])
+            self.assertEqual(se.check_object_problems("w", chk), [])
 
     def test_asserts_nothing(self):
         for over in ({"rows": KeyError}, {"rows": KeyError, "unique": False}):
@@ -365,25 +369,25 @@ class TestValidation(unittest.TestCase):
     def test_lone_surrogate_in_path_from_escaped_json_is_rejected(self):
         chk = json.loads('{"type": "csv_rows", "path": "o\\ud800.csv", "rows": [["1", "2"]]}')
         self.assertEqual(chk["path"], "o\ud800.csv")
-        ps = se._check_problems("w", chk)
+        ps = se.check_object_problems("w", chk)
         self.assertEqual(len(ps), 1, ps)
         self.assertTrue(ps[0].startswith("w.check.path:") and "surrogate" in ps[0], ps)
 
     def test_lone_surrogate_in_a_cell_from_escaped_json_is_rejected(self):
         for text in ('[["1", "x\\udfffy"]]', '[["ok"], ["\\ud800"]]'):
             chk = {"type": "csv_rows", "path": "o.csv", "rows": json.loads(text)}
-            ps = se._check_problems("w", chk)
+            ps = se.check_object_problems("w", chk)
             self.assertEqual(len(ps), 1, (text, ps))
             self.assertTrue(ps[0].startswith("w.check.rows:") and "surrogate" in ps[0], ps)
 
     def test_lone_surrogate_in_a_cell_is_rejected_with_unique_true_too(self):
         chk = {"type": "csv_rows", "path": "o.csv", "rows": json.loads('[["\\ud800"]]'), "unique": True}
-        self.assertTrue(any("surrogate" in p for p in se._check_problems("w", chk)))
+        self.assertTrue(any("surrogate" in p for p in se.check_object_problems("w", chk)))
 
     def test_a_valid_surrogate_pair_escape_is_one_astral_character_and_accepted(self):
         chk = {"type": "csv_rows", "path": json.loads('"o\\ud83d\\ude00.csv"'),
                "rows": json.loads('[["\\ud83d\\ude00"]]')}
-        self.assertEqual(se._check_problems("w", chk), [])
+        self.assertEqual(se.check_object_problems("w", chk), [])
 
     def test_lone_surrogate_surfaces_through_load_eval_set_from_escaped_json_text(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -413,19 +417,19 @@ class TestValidation(unittest.TestCase):
         for escaped in ("\\ud800", "x\\udfffy", "\\ud83d"):
             chk = json.loads('{"type": "csv_rows", "path": "o.csv", "rows": [["1"]], "%s": 1}' % escaped)
             bad = [k for k in chk if k not in se.CSV_ROWS_KEYS][0]
-            self.assertTrue(se._has_lone_surrogate(bad))
-            ps = se._csv_rows_problems("w", chk)
+            self.assertTrue(has_lone_surrogate(bad))
+            ps = se.check_object_problems("w", chk)
             self.assertEqual(len(ps), 1, ps)
             self.assertIn("not a csv_rows key", ps[0])
             ps[0].encode("utf-8")
-            self.assertFalse(se._has_lone_surrogate(ps[0]))
+            self.assertFalse(has_lone_surrogate(ps[0]))
             with tempfile.TemporaryDirectory() as tmp:
                 _, problems = se.load_eval_set(self._skill_with_unknown_key(tmp, escaped))
             self.assertTrue(any("not a csv_rows key" in p for p in problems), problems)
             for p in problems: p.encode("utf-8")
 
     def test_non_ascii_unknown_key_is_reported_without_raising(self):
-        ps = se._csv_rows_problems("w", {"type": "csv_rows", "path": "o.csv", "rows": [["1"]], "열": 1})
+        ps = se.check_object_problems("w", {"type": "csv_rows", "path": "o.csv", "rows": [["1"]], "열": 1})
         self.assertEqual(len(ps), 1, ps)
         ps[0].encode("ascii")
 
