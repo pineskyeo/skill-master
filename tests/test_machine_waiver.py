@@ -1,11 +1,12 @@
-"""S1 method 3: one signed machine waiver at $HOME/.config/skill-master/machine-waiver.json binds this Mac's id, tools
-from machine_waivable only, an expiry 90 days after signing and a typed reason. A verifying record for this machine
-clears a coverage_required tool that did not run; another machine, an expired, revoked, tampered or unsigned record,
-or a record that lists a tool outside machine_waivable clears nothing. Registration binds the waiver's hash.
+"""S1 method 3: one machine waiver at $HOME/.config/skill-master/machine-waiver.json binds this Mac's id, tools from
+machine_waivable only, an expiry 90 days after it was recorded and a reason. Since unit N1 it is an unsigned recorded
+record; a waiver signed before N1 still verifies against the signers file. A valid record for this machine clears a
+coverage_required tool that did not run; another machine, an expired, revoked, malformed or legacy record without a
+method, or a record that lists a tool outside machine_waivable clears nothing. Registration binds the waiver's hash.
 
-Every case runs with the temp HOME of tests/test_skill_eval.py Base and signs with its throwaway test key; the machine
-id probe is a fake (skill_eval.MACHINE) and subprocess is patched for the whole module. ASCII only."""
-import calendar, json, os, pwd, re, subprocess, sys, time, unittest
+Every case runs with the temp HOME of tests/test_skill_eval.py Base and the test approver, which starts no process;
+the machine id probe is a fake (skill_eval.MACHINE) and subprocess is patched for the whole module. ASCII only."""
+import calendar, json, os, pwd, subprocess, sys, time, unittest
 from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_skill_eval as T
@@ -111,7 +112,6 @@ class TestClearsNothing(Waiver):
 
     def test_a_revoked_file(self):
         rec = self.sign()
-        T.install_test_approver(self, read_line=lambda p: re.search(r"type ([A-Z0-9]{6}) to revoke", p).group(1) + "\n")
         se.revoke_machine_waiver()
         self.assertFalse(os.path.exists(self.path))
         lines = [json.loads(x) for x in T.read(self.log).splitlines()]
@@ -119,34 +119,57 @@ class TestClearsNothing(Waiver):
         self.assertEqual(lines[1]["sha256"], A.machine_waiver_sha256(rec))
         self.assert_clears_nothing("missing")
 
-    def test_a_tampered_record(self):
-        for field, value in (("reason", REASON + "!"), ("expires", "2099-01-01T00:00:00Z"), ("machine_id", OTHER),
-                             ("tools", ["hermes"])):
+    def test_a_malformed_record(self):
+        for field, value in (("reason", "x\ty"), ("expires", "2099-01-01T00:00:00Z"), ("tools", ["hermes", "opencode"]),
+                             ("recorded_by", "a b"), ("principal", T.TEST_PRINCIPAL), ("signature", "s"), ("format", 2)):
             with self.subTest(field):
                 rec = self.sign()
                 wjson(self.path, dict(rec, **{field: value}))
-                if field == "machine_id": self.machine = OTHER
                 self.assertEqual(self.state()["status"], "invalid", field)
-                self.machine = THIS
         self.assert_clears_nothing("invalid")
 
-    def test_an_unsigned_record(self):
+    def test_a_record_moved_to_another_machine_clears_nothing(self):
         rec = self.sign()
-        wjson(self.path, {k: v for k, v in rec.items() if k not in ("signature", "method")})
+        wjson(self.path, dict(rec, machine_id=OTHER))
+        self.assert_clears_nothing("other-machine")
+
+    def test_a_legacy_record_without_method(self):
+        rec = self.sign()
+        wjson(self.path, {k: v for k, v in rec.items() if k != "method"})
         self.assert_clears_nothing("unsigned")
+
+    def signed(self, tools=("opencode", "hermes"), at=None, key=None):
+        """A machine waiver signed before N1 with the throwaway key."""
+        at = at or A.now_iso()
+        expires = A.iso_at(A.iso_seconds(at) + 86400)
+        data = A.machine_waiver_payload(THIS, list(tools), expires, REASON, at)
+        return {"format": 1, "method": "ssh-sig", "machine_id": THIS, "tools": list(tools), "expires": expires,
+                "reason": REASON, "principal": T.TEST_PRINCIPAL, "at": at,
+                "signature": T.sign_bytes(key or T.shared_keys()["key"], data)}
+
+    def test_a_signed_waiver_from_before_n1_still_verifies(self):
+        rec = self.signed()
+        wjson(self.path, rec)
+        self.assertEqual(self.state()["status"], "invalid", "no signers file: an old signed waiver does not count")
+        T.install_test_approver(self, signers=T.shared_keys()["signers"], run=T.keygen_runner(T.shared_keys()["dir"]))
+        st = self.state()
+        self.assertEqual((st["status"], st["principal"], st["tools"]), ("approved", T.TEST_PRINCIPAL, ["opencode", "hermes"]))
+        n, (bench, gate) = self.covered()
+        self.assertEqual(CG.missing_tools(gate), [])
+        wjson(self.path, dict(rec, reason=REASON + "!"))
+        self.assertEqual(self.state()["status"], "invalid")
 
     def test_a_record_that_lists_codex(self):
         with self.assertRaises(A.Refused) as cm: self.sign(("opencode", "codex"))
-        self.assertIn("codex", str(cm.exception)); self.assertIn("nothing was signed", str(cm.exception))
+        self.assertIn("codex", str(cm.exception)); self.assertIn("nothing was recorded", str(cm.exception))
         self.assertFalse(os.path.exists(self.path))
-        k = T.shared_keys()
-        at = A.now_iso()
-        expires = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 86400))
-        data = A.machine_waiver_payload(THIS, ["codex", "opencode"], expires, REASON, at)
-        sig = A.sign_payload(T.keygen_runner(k["dir"]), k["key"], data, passphrase=T.TEST_PASSPHRASE)
-        wjson(self.path, {"format": 1, "method": "ssh-sig", "machine_id": THIS, "tools": ["codex", "opencode"],
-                          "expires": expires, "reason": REASON, "principal": T.TEST_PRINCIPAL, "at": at,
-                          "signature": sig})
+        T.install_test_approver(self, signers=T.shared_keys()["signers"], run=T.keygen_runner(T.shared_keys()["dir"]))
+        wjson(self.path, self.signed(tools=("codex", "opencode")))
+        st = self.state()
+        self.assertEqual(st["status"], "invalid"); self.assertIn("codex", st["why"])
+        rec = dict(self.signed(), method="recorded", recorded_by=T.TEST_PRINCIPAL, tools=["codex", "opencode"])
+        del rec["principal"], rec["signature"]
+        wjson(self.path, rec)
         st = self.state()
         self.assertEqual(st["status"], "invalid"); self.assertIn("codex", st["why"])
         n, (bench, gate) = self.covered()
@@ -158,46 +181,59 @@ class TestClearsNothing(Waiver):
         self.assertEqual(self.state()["status"], "invalid")
 
 
-class TestSigning(Waiver):
-    def test_signing_is_the_human_gate(self):
-        with mock.patch.object(A, "is_tty", lambda fd: fd != 0):
-            with self.assertRaises(A.Refused) as cm: self.sign()
-        self.assertEqual(str(cm.exception), "machine-waiver sign needs a human at an interactive terminal (stdin is not "
-                         "a TTY)")
-        self.assertFalse(os.path.exists(self.path))
-        T.install_test_approver(self, read_line=lambda p: REASON + "\n" if "reason" in p else "WRONG1\n")
-        with self.assertRaises(A.Refused) as cm: self.sign()
-        self.assertIn("challenge mismatch: nothing was signed", str(cm.exception))
-        self.assertFalse(os.path.exists(self.path))
-        with mock.patch.object(A, "is_tty", lambda fd: fd != 0):
-            with self.assertRaises(A.Refused): se.revoke_machine_waiver()
-
-    def test_the_record_and_the_signed_bytes(self):
+class TestRecording(Waiver):
+    def test_recording_needs_no_tty_no_challenge_and_no_key(self):
+        asked = []
+        T.install_test_approver(self, read_line=lambda p: asked.append(p) or REASON + "\n", run=T.no_process)
         rec = self.sign()
-        self.assertEqual(sorted(rec), ["at", "expires", "format", "machine_id", "method", "principal", "reason",
-                                       "signature", "tools"])
-        self.assertEqual(A.machine_waiver_payload(THIS, ["opencode", "hermes"], rec["expires"], REASON, rec["at"]),
-                         ("skill-master-approval v1\nkind machine_waiver\nmachine_id %s\ntools opencode,hermes\n"
-                          "expires %s\nreason %s\nat %s\n" % (THIS, rec["expires"], REASON, rec["at"])).encode("ascii"))
-        self.assertEqual(oct(os.stat(self.path).st_mode & 0o777), oct(0o600))
-        self.assertEqual(json.loads(T.read(self.log).splitlines()[0])["decision"], "machine-waiver-signed")
+        self.assertEqual(asked, [A.REASON_PROMPT])
+        self.assertEqual(rjson(self.path), rec)
+        self.assertEqual(se.sign_machine_waiver(["hermes"], reason="hermes runs in-house only")["reason"],
+                         "hermes runs in-house only")
+        self.assertEqual(asked, [A.REASON_PROMPT])
+        se.revoke_machine_waiver()
+        self.assertFalse(os.path.exists(self.path))
+        self.assertFalse(os.path.exists(T.gate_approver().signers))
 
-    def test_show_prints_hash_principal_reason_and_expiry_and_no_signature(self):
+    def test_the_record(self):
+        rec = self.sign()
+        self.assertEqual(sorted(rec), ["at", "expires", "format", "machine_id", "method", "reason", "recorded_by", "tools"])
+        self.assertEqual((rec["format"], rec["method"], rec["machine_id"], rec["tools"], rec["reason"], rec["recorded_by"]),
+                         (1, "recorded", THIS, ["opencode", "hermes"], REASON, T.TEST_PRINCIPAL))
+        self.assertEqual(rec["expires"], A.iso_at(A.iso_seconds(rec["at"]) + 90 * 86400))
+        self.assertEqual(oct(os.stat(self.path).st_mode & 0o777), oct(0o600))
+        line = json.loads(T.read(self.log).splitlines()[0])
+        self.assertEqual((line["decision"], line["principal"]), ("machine-waiver-signed", T.TEST_PRINCIPAL))
+
+    def test_a_refused_reason_or_an_unreadable_machine_id_records_nothing(self):
+        for reason in ("", " padded", "x" * 201):
+            with self.subTest(reason=reason[:10]):
+                with self.assertRaises(A.Refused) as cm: se.sign_machine_waiver(["opencode"], reason=reason)
+                self.assertIn("reason refused", str(cm.exception)); self.assertIn("nothing was recorded", str(cm.exception))
+        self.machine = None
+        with self.assertRaises(A.Refused) as cm: self.sign()
+        self.assertIn("cannot read this Mac's IOPlatformUUID; nothing was recorded", str(cm.exception))
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_a_test_process_never_writes_the_real_home_waiver(self):
+        with mock.patch.object(A, "account_home", lambda: self.home):
+            with self.assertRaises(se.EvalError) as cm: self.sign()
+            self.assertIn("inside a test process", str(cm.exception))
+            with self.assertRaises(se.EvalError): se.revoke_machine_waiver()
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_show_prints_hash_principal_reason_and_expiry(self):
         rec = self.sign()
         rc, out, err = self.cli("machine-waiver", "show")
         self.assertEqual(rc, 0, err)
         st = self.state()
         for want in (st["sha256"], T.TEST_PRINCIPAL, REASON, rec["expires"], "opencode,hermes", "approved"):
             self.assertIn(want, out)
-        self.assertNotIn("BEGIN SSH SIGNATURE", out)
 
     def test_the_policy_lists_machine_waivable(self):
         doc = rjson(os.path.join(T.ROOT, "policy", "gate.rules.json"))
         self.assertEqual(doc["machine_waivable"], ["opencode", "hermes"])
         self.assertEqual(se.MACHINE_WAIVABLE, ("opencode", "hermes"))
-        schema = rjson(os.path.join(T.ROOT, "schemas", "machine-waiver.schema.json"))
-        self.assertEqual(sorted(schema["required"]), ["at", "expires", "format", "machine_id", "method", "principal",
-                                                      "reason", "signature", "tools"])
 
 
 class TestRegistration(Waiver):

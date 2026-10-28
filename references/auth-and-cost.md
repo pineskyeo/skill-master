@@ -18,15 +18,15 @@ This page is for the operator of `skill_eval.py`. It covers the two auth profile
 | `--budget-usd` | required for a live start | required, and it is a hard cap |
 
 - `plan` and `estimate` use `personal-mac` when the flag is absent and say so in the `auth profile:` line.
-- Every live start (`run`, `grade`, `calibrate`, `loop`, with or without `--dry-run`) needs the flag. Without it the start stops before anything is signed.
+- Every live start (`run`, `grade`, `calibrate`, `loop`, with or without `--dry-run`) needs the flag. Without it the start stops before anything is recorded.
 - `personal-mac` behaves exactly as before H3. The loader refuses a file whose `personal-mac` differs from the shipped values.
-- The file is outside the rule bundle, so editing it does not move `ruleset_sha256` and does not invalidate approvals. A `--live` signature covers the file's bytes, so an edit between signing and start refuses the start.
+- The file is outside the rule bundle, so editing it does not move `ruleset_sha256` and does not invalidate approvals. The recorded `--live` approval binds the file's bytes through the plan hash, so an edit between recording and start refuses the start.
 
 ### No Claude call under company (plan.md:902)
 
 Under `company` every Claude call is refused, whatever its `--max-budget-usd`. That covers the exec, trigger, grader, pairwise, calibrate and builder calls. The reason is that `--max-budget-usd` is not an enforceable per-call maximum: operator lane 8b reported $0.161712 against a $0.01 per-call cap. Claude is also not used through the Anthropic API at the company. pinesky chose this on 2026-10-25 as option (c) for R19-f1 (decisions.tsv 2026-10-25T00:10:05Z and 00:32:52Z). The rule is code in `engine/spend.py` (`API_KEY_REFUSED` and `api_key_refusal`), as the Codex rule is, and `policy/auth-profiles.json` is unchanged. It is checked in three places:
 
-- `plan` lists the refusal in its `budget enforcement:` line and still exits 0. A live start refuses in its `strict-budget` gate before anything is signed, with `error: claude: refused in API-key mode (auth profile company): --max-budget-usd is not an enforceable per-call cap; refusing it` (`claude grader:` or `claude builder:` for those calls) and exit 2. A Codex refusal, when there is one, is shown first. No file is written.
+- `plan` lists the refusal in its `budget enforcement:` line and still exits 0. A live start refuses in its `strict-budget` gate before anything is recorded, with `error: claude: refused in API-key mode (auth profile company): --max-budget-usd is not an enforceable per-call cap; refusing it` (`claude grader:` or `claude builder:` for those calls) and exit 2. A Codex refusal, when there is one, is shown first. No file is written.
 - The ledger raises the same refusal before it writes any row.
 - `live_exec` refuses to start a `claude` process in API-key mode, even for a caller without a ledger.
 
@@ -57,7 +57,7 @@ Under `company`, such a call starts only when both hold:
 
 Under `personal-mac` each Claude call still gets `--max-budget-usd`, which is `CLAUDE_CAP_HEADROOM` (0.5) of the remaining budget, floored to cents.
 
-The cap is per command. It is the signed `--budget-usd` of that command, and the bounds of crashed calls that this command recovers count against it. There is no cap across the commands of one workspace.
+The cap is per command. It is the recorded `--budget-usd` of that command, and the bounds of crashed calls that this command recovers count against it. There is no cap across the commands of one workspace.
 
 A call stops the command when the CLI reports a cost above its per-call cap (an overshoot), or when the spend goes above the hard cap. A call whose CLI reports no valid `total_cost_usd` (missing, null, negative, not finite or not a number) has an unknown real cost: it is charged at least its per-call cap (`charged_source` `cap_charged_unreported` when the cap is more than the computed charge), and it stops the command too. Every later call of that command is refused with a reason that names the overshoot, the excess or the unreported cost. Under `run` the first refused exec or trigger call ends the iteration (`plan.json` `stopped`); `loop` then returns `run-stopped`. When the stopping call is the last paid call of the command, the command checks once more after it: `run` records the reason in `plan.json` `stopped` and logs `STOPPED:`, `grade` and `calibrate` exit 2 with `error: <reason>` (`calibrate` writes no `calibration.json`), and `loop` returns `run-stopped` with the reason. Under API-key billing a `run` whose iteration stopped, for any reason, exits 3; under `personal-mac` it exits 0. No `company` run reaches that point today, because its start refuses every engine.
 
@@ -82,12 +82,12 @@ A row that a call writes while the loop builder runs is recorded as a harness wr
 
 An allowed intent with no result row and no recovered row is a dangling intent. It means the harness died during that call. Both profiles recover. Under `company` no call is admitted today, so a `company` dangling intent can only come from a ledger written before the Claude refusal (plan.md:902) or edited by hand.
 
-1. `plan`, `--live --dry-run` and the signing summary read the ledger without creating or locking it. When there are dangling intents they print `spend ledger: N dangling intent(s) from crashed calls, $X counted as spent at the next live start`, and the budget gates compare the estimate with the budget minus `$X`.
-2. After the start is signed and live mode is on, the command opens the ledger and takes an exclusive `flock`. If another live command holds it, the start refuses with `another live command is using <ws>/spend.jsonl`.
+1. `plan`, `--live --dry-run` and the approval summary read the ledger without creating or locking it. When there are dangling intents they print `spend ledger: N dangling intent(s) from crashed calls, $X counted as spent at the next live start`, and the budget gates compare the estimate with the budget minus `$X`.
+2. After the start is recorded and live mode is on, the command opens the ledger and takes an exclusive `flock`. If another live command holds it, the start refuses with `another live command is using <ws>/spend.jsonl`.
 3. It reads the file again and refuses when the dangling intents differ from the ones it previewed.
 4. It writes one `recovered` row per dangling intent and starts its spend at their sum. Each crashed call is counted once.
 
-The reader ignores a torn last line (no trailing newline, or not JSON) and reports it. The recovering command cuts that line off before it appends. Any other bad line, or a row that misses a field, stops the command with the line number. So does a row whose `call_id` (or `recovers`) is not a non-empty string, an intent whose `decision` is not `allowed` or `refused`, and a row whose summed amount is negative, not finite or not a number (`bound_usd`, `spent_before_usd` and `call_cap_usd` of an intent, `reported_cost_usd` and `charged_usd` of a result, `counted_usd` of a recovered row; each may be null). A live start then exits 2 before anything is signed, and `plan` and `report` fail closed the same way. `remaining_usd` is not checked, because it is negative after an overshoot.
+The reader ignores a torn last line (no trailing newline, or not JSON) and reports it. The recovering command cuts that line off before it appends. Any other bad line, or a row that misses a field, stops the command with the line number. So does a row whose `call_id` (or `recovers`) is not a non-empty string, an intent whose `decision` is not `allowed` or `refused`, and a row whose summed amount is negative, not finite or not a number (`bound_usd`, `spent_before_usd` and `call_cap_usd` of an intent, `reported_cost_usd` and `charged_usd` of a result, `counted_usd` of a recovered row; each may be null). A live start then exits 2 before anything is recorded, and `plan` and `report` fail closed the same way. `remaining_usd` is not checked, because it is negative after an overshoot.
 
 ## Actual spend in reports
 

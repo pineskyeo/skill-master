@@ -290,13 +290,11 @@ class TestRegisteredSite(TR.Reg):
 
     def test_a_registered_unit_shows_its_record_and_the_stand_in_for_lanes_7_and_8(self):
         rec = self.registered()
-        calls = []
-        T.install_test_approver(self, run=T.keygen_runner(T.shared_keys()["dir"], calls))
+        T.install_test_approver(self, run=T.no_process)
         out = os.path.join(self.tmp, "site")
         with mock.patch.object(socket, "socket", side_effect=AssertionError("socket")):
             rc, stdout, err = self.build(out)
         self.assertEqual(rc, 0, err)
-        self.assertTrue(calls and all(c[:3] == ["/usr/bin/ssh-keygen", "-Y", "verify"] for c in calls), calls)
         files = site(out)
         page = files["units/skills--branch-setup.html"].decode("ascii")
         self.assertEqual(badge(page, "registration"), "registered 1.0.0 by %s" % T.TEST_PRINCIPAL)

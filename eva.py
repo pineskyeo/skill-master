@@ -930,7 +930,7 @@ def english_state(rep):
 
 def build_index(root):
     """(rows, INDEX.md text): one row per unit with its check, English, parity and registration state, verified now
-    (skill_eval.registration_state, imported only for a record that needs its signature and hashes checked).
+    (skill_eval.registration_state, imported only for a record that needs its register approval and hashes checked).
     engine/registry.document builds registry.json from the registered rows only."""
     reg = []
     for u in find_units(root):

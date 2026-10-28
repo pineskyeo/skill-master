@@ -27,17 +27,17 @@ This page lists every subcommand of `eva.py` and `skill_eval.py`. The flags come
 | `calibrate SKILL` | Measure the grader's agreement and Cohen's kappa against the human labels of a golden file | the run flags, `--iteration`, `--golden` (required), `--live` |
 | `report SKILL` | Write the benchmark, the gate and `comparison.md` of an iteration | `--workspace`, `--iteration` |
 | `loop SKILL` | Run, grade, report and call the metered Claude builder until the gate is clean | the run flags, `--builder-prompt`, `--builder-model`, `--max-iterations`, `--golden`, `--live` |
-| `approve SKILL` | Sign one gate (human-only) | `--gate` (required), `--workspace` |
-| `approve --batch` | Sign every pending approval of the units after one challenge and one passphrase (human-only) | `--unit` (repeated), `--workspace` (once per `--unit` or never), `--cwd` |
-| `pending` | List every missing or stale approval of the units; signs nothing | `--unit` (repeated, required), `--workspace`, `--cwd` |
-| `approve-ui` | Serve the local approval page for one batch (human-only) | `--unit` (repeated, required), `--workspace`, `--cwd`, `--tailscale` |
-| `approver-session` | Start a subshell whose private ssh-agent holds the approver key for 8 hours (human-only) | none |
-| `machine-waiver {sign,show,revoke}` | Sign, show or revoke this Mac's machine waiver (`sign` and `revoke` human-only) | `sign --tools` (default: `machine_waivable`) |
-| `register SKILL` | Record the registration (human-only) | `--workspace` |
+| `approve SKILL` | Record one gate as an unsigned approval | `--gate` (required), `--workspace`, `--reason` (a `coverage_waiver:<tool>` gate) |
+| `approve --batch` | Record every pending approval of the units; one reason line from stdin per coverage waiver item | `--unit` (repeated), `--workspace` (once per `--unit` or never), `--cwd` |
+| `pending` | List every missing or stale approval of the units; records nothing | `--unit` (repeated, required), `--workspace`, `--cwd` |
+| `approve-ui` | Removed (unit N1): prints one line and exits 2; use `approve --batch` | `--unit` (repeated, required), `--workspace`, `--cwd`, `--tailscale` |
+| `approver-session` | Removed (unit N1): prints one line and exits 0 | none |
+| `machine-waiver {sign,show,revoke}` | Record, show or revoke this Mac's machine waiver | `sign --tools` (default: `machine_waivable`), `sign --reason` |
+| `register SKILL` | Record the registration | `--workspace` |
 | `snapshot SKILL` | Copy the skill folder to `<workspace>/skill-snapshot` | `--workspace` |
 | `check-builtin-plugins` | Show the enabled state of every `@builtin` Claude plugin | none |
 | `builder-check SKILL` | Print the loop builder's writable set and a fingerprint of every entry outside it | `--workspace` (required), `--compare SAVED` |
-| `approver-check` | Check the approver key and the approvers file | none |
+| `approver-check` | Removed (unit N1): prints `approver-check: OK: ...` and exits 0 | none |
 | `hub build [ROOT]` | Write the static registry site | `--out` (required), `--templates` |
 | `agent validate AGENT` | Validate an AGENT.md v2 agent and its wrappers | none |
 | `agent plan AGENT` | Print the per-tool plan and the estimate | the agent run flags, the agent grader flags |
@@ -52,20 +52,18 @@ This page lists every subcommand of `eva.py` and `skill_eval.py`. The flags come
 
 `python3 eva.py eval <arguments>` is not an argparse subcommand. `eva.main` passes the arguments after `eval` to `skill_eval.main`, so every `skill_eval.py` subcommand, check and gate applies to it unchanged.
 
-## Human-only commands
+## Approval commands
 
-These commands call the human gate of `engine/approvals.py` (`APPROVER["it"].sign` in `skill_eval.py`). The gate needs a person at a real terminal, no agent process or agent environment variable, a typed challenge and an ssh signature with the approver key's passphrase. They are for a person only:
+These commands write an unsigned recorded approval through `engine/approvals.py` (`APPROVER["it"].sign` in `skill_eval.py`). Approvals are unsigned recorded decisions: no approver key, ssh-agent, passphrase, typed challenge, TTY, agent-ancestry check or approver session is needed, and a pipe or a script works. Each record binds the kind, gate, unit, gated-file hash and `ruleset_sha256`, plus the budget of a `--live` start and the reason of a coverage waiver:
 
 - `approve`, for every gate, and `approve --batch`.
-- `approve-ui` and its launch script `scripts/approve-ui.sh`, with or without `--tailscale`.
-- `approver-session`.
 - `machine-waiver sign` and `machine-waiver revoke`.
 - `register`.
 - `run --live`, `grade --live`, `calibrate --live` and `loop --live`.
 - `agent run --live`, `agent grade --live` and `agent loop --live`.
 - `install --scope user`.
 
-Every refusal exits with status 2. [Approval gates](approval-gates.md) lists the checks, the refusal lines and what a signature proves and does not prove.
+Every refusal exits with status 2. [Approval gates](approval-gates.md) lists the steps, the refusal lines and what a record proves and does not prove.
 
 ## eva.py
 
@@ -117,7 +115,7 @@ Every refusal exits with status 2. [Approval gates](approval-gates.md) lists the
 | `--seed` | The seed that `grade --live` and `loop --live` pass to grading. |
 | `--run-root` | The folder for the per-run sandboxes. The default is the system temp folder. |
 
-Without `--live`, `plan`, `run`, `calibrate` and `loop` print the plan and the estimate and start no tool CLI, and `grade` grades only the static and human items. The printed plan reads the approval records, so these commands start `/usr/bin/ssh-keygen -Y verify` once per current signed record ([Approval gates](approval-gates.md#statuses)). `--live --dry-run` lists every live gate the command would fail, prints the real command without `--dry-run`, and exits 0 when no gate fails and 3 otherwise. [Auth profiles and cost](auth-and-cost.md) covers `--auth-profile`, `--budget-usd` and the spend ledger.
+Without `--live`, `plan`, `run`, `calibrate` and `loop` print the plan and the estimate and start no tool CLI, and `grade` grades only the static and human items. The printed plan reads the approval records; only a record signed before unit N1 starts `/usr/bin/ssh-keygen -Y verify`, once per current signed record ([Approval gates](approval-gates.md#statuses)). `--live --dry-run` lists every live gate the command would fail, prints the real command without `--dry-run`, and exits 0 when no gate fails and 3 otherwise. [Auth profiles and cost](auth-and-cost.md) covers `--auth-profile`, `--budget-usd` and the spend ledger.
 
 ### The agent flags
 
@@ -141,20 +139,21 @@ Each flag means what it means for the skill commands.
 - `run --live` exits 0 when the iteration finished. Under the `company` auth profile a stopped iteration exits 3.
 - `report` exits 3 when the gate needs approval and 0 when it is clean.
 - `loop` takes `--builder-prompt FILE`, the instructions for the metered Claude builder. The file must not be empty. `--max-iterations` must be between 1 and the policy maximum. The removed `--builder` shell command is refused. `loop --live` prints its result as one JSON object, such as `{"status": "clean", "iteration": 2}`, and exits 0 for `clean` and 3 for any other status. [The eval harness](#the-eval-harness-skill_evalpy) lists the statuses.
-- `approve --gate` takes `requirements`, `eval_set`, `requirements_eval_set`, `rule_review`, `iteration-N`, `registration` or `coverage_waiver:<tool>`. `approve` takes either `SKILL --gate G [--workspace WS]` or `--batch --unit DIR ...`. Any other mix exits 2 with `approve: give SKILL and --gate, or --batch with --unit`.
-- `pending`, `approve --batch` and `approve-ui` take the units as repeated `--unit DIR`. `--workspace WS` is given once per `--unit` in the same order, or not at all, and then each unit uses its default workspace. A workspace does not record its unit folder before a run, so the units are always named. Relative paths resolve under `--cwd`, which defaults to the current folder.
-- `pending` prints one block per missing or stale approval with its unit, gate, status, summary, gate hash, `ruleset_sha256`, spend so far from `spend.jsonl` and the estimate `plan` prints for the next live run, then `N pending approval(s); nothing was signed`. A skill lists `requirements_eval_set` when the live approvals gate is not open, `rule_review` when its findings have no current decision, `registration` when the gate inside the last iteration's `benchmark.json` needs approval, and each `coverage_waiver:<tool>` whose tool did not run and is not cleared. An agent folder lists the same gates; its eval set is its `scenarios/*.json`. It runs no presence check, writes nothing and exits 0.
-- `approve --batch` prints one `signed <unit> <gate> ...` or `not signed <unit> <gate>: <why>` line per item and exits 2 when any item was not signed.
-- `approve-ui` prints the URL with its one-time token and the batch challenge to the launching terminal only. It exits 0 when a submitted batch signed every approved item, and 2 otherwise. `scripts/approve-ui.sh` changes to the repository folder and runs `python3 skill_eval.py approve-ui --cwd <caller's folder>` with the given arguments. Sessions cannot set the execute bit, so start it as `zsh scripts/approve-ui.sh --unit DIR ...`.
-- `machine-waiver show` prints the waiver's state, sha256, principal, reason, expiry, tools, machine id and file, never the signature. It runs no presence check and exits 0 when the waiver counts and 1 otherwise.
+- `approve --gate` takes `requirements`, `eval_set`, `requirements_eval_set`, `rule_review`, `iteration-N`, `registration` or `coverage_waiver:<tool>`. `approve` takes either `SKILL --gate G [--workspace WS] [--reason TEXT]` or `--batch --unit DIR ...`. Any other mix, `--batch` with `--reason` included, exits 2 with `approve: give SKILL and --gate, or --batch with --unit`. A coverage waiver takes its reason from `--reason`, else from one line of stdin; `--reason` on another gate exits 2.
+- `pending` and `approve --batch` take the units as repeated `--unit DIR`. `--workspace WS` is given once per `--unit` in the same order, or not at all, and then each unit uses its default workspace. A workspace does not record its unit folder before a run, so the units are always named. Relative paths resolve under `--cwd`, which defaults to the current folder.
+- `pending` prints one block per missing or stale approval with its unit, gate, status, summary, gate hash, `ruleset_sha256`, spend so far from `spend.jsonl` and the estimate `plan` prints for the next live run, then `N pending approval(s); nothing was recorded`. A skill lists `requirements_eval_set` when the live approvals gate is not open, `rule_review` when its findings have no current decision, `registration` when the gate inside the last iteration's `benchmark.json` needs approval, and each `coverage_waiver:<tool>` whose tool did not run and is not cleared. An agent folder lists the same gates; its eval set is its `scenarios/*.json`. It writes nothing and exits 0.
+- `approve --batch` reads one reason line from stdin per coverage waiver item, in list order, then prints one `recorded <unit> <gate> sha256 <hash12> by <user>` or `not recorded <unit> <gate>: <why>` line per item and exits 2 when any item was not recorded. A refused reason records nothing.
+- `approve-ui` (and `scripts/approve-ui.sh`, which runs `python3 skill_eval.py approve-ui --cwd <caller's folder>` with the given arguments) prints `approve-ui: approvals are unsigned recorded decisions; ...; no page was started, use approve --batch --unit DIR` and exits 2. `approver-session` prints the same note and exits 0.
+- `machine-waiver sign` takes the reason from `--reason`, else from one line of stdin, and prints `machine waiver recorded: tools ..., expires ..., sha256 ...`. `machine-waiver revoke` deletes the file and asks nothing.
+- `machine-waiver show` prints the waiver's state, sha256, who recorded it (or the principal of a waiver signed before unit N1), reason, expiry, tools, machine id and file. It exits 0 when the waiver counts and 1 otherwise.
 - `snapshot` refuses when `<workspace>/skill-snapshot` exists. It also refuses a skill folder that holds a link that resolves outside the folder, dangles, resolves in a loop of links or points back at a folder on its own path, names every such link and copies nothing.
 - `check-builtin-plugins` starts `claude --setting-sources project,local --settings <launch settings> plugin list --json` and reports the `enabled` state of every `@builtin` entry. It makes no model call and exits 1 when it cannot confirm that every built-in plugin is off.
 - `builder-check` writes nothing and starts no process. With `--compare SAVED` it prints every changed path and exits 1 when any changed.
-- `approver-check` prints `approver-check: OK` and exits 0, or prints one `approver-check: ` line per problem and exits 1. It signs nothing.
+- `approver-check` prints `approver-check: OK: approvals are unsigned recorded decisions; ...` and exits 0. It reads no key and starts no process.
 - `hub build` writes `index.html`, `registry.json`, `style.css` and one page per unit of ROOT (default `.`) into `--out`, which must be absent or empty, after an English-only and link scan of every file. `--templates` defaults to `engine/hub_templates`. It uses no network and pushes nothing.
 - `agent validate` prints one line per check and per wrapper and exits 1 when a hard check fails.
 - `agent plan` prints the plan and executes nothing. So do `agent run` and `agent loop` without `--live`. `--old-agent` names the previous AGENT.md v2 version of the agent as its baseline. After its earlier lines the plan prints the agent's approval gates: the rule review, the coverage waivers, the machine waiver, the combined `requirements_eval_set` gate, the separate `requirements` and `eval_set` gates, and an `agent live gates (...)` line with the state of the rule-review and approvals checks.
-- `agent run --live` and `agent loop --live` refuse, before signing and again after it, without a current `requirements_eval_set` approval (or current `requirements` and `eval_set` approvals) in the agent workspace and without a current `rule_review` decision when the agent has rule-review findings. `agent grade --live` reads no approval. [Approval gates](approval-gates.md#agent-live-gates) has the refusal lines and the loop rule.
+- `agent run --live` and `agent loop --live` refuse, before the live start is recorded and again after it, without a current `requirements_eval_set` approval (or current `requirements` and `eval_set` approvals) in the agent workspace and without a current `rule_review` decision when the agent has rule-review findings. `agent grade --live` reads no approval. [Approval gates](approval-gates.md#agent-live-gates) has the refusal lines and the loop rule.
 - `agent grade` without `--live` grades the transcripts and leaves `llm` criteria as needs-review.
 - `agent report` exits 3 when the gate needs approval and 0 when it is clean. The gate problems hold every parity FAIL row of the agent folder as `<row id>: <reason>`, such as `parity-permissions-hermes`, so every agent needs a `registration` approval while the Hermes permission row stays FAIL (gates.md G4). `register` recomputes these rows and refuses an agent whose reported gate does not name each of them. The hub page of a registered agent lists the findings its `registration` approval named.
 - `install`, `version bump`, `deprecate` and `drift` are described in [Install, versions and drift](install.md).
@@ -165,7 +164,7 @@ Each flag means what it means for the skill commands.
 
 ### Live gates
 
-No `claude` or `codex` CLI and no model runs for `run`, `grade`, `calibrate` or `loop` unless the command line holds `--live`, a finite `--budget-usd` above 0 and `--auth-profile`, and a person signs the start ([Approval gates](approval-gates.md)). The exception is `check-builtin-plugins`, which starts the `claude` CLI without `--live` and makes no model call. `run`, `grade`, `calibrate` and `loop` then check the live gates in the order that `policy/gates.json` declares under `live`: `eval-set-valid`, `strict-budget`, `codex-grader-not-under-test`, `subscription-auth`, `grader-not-model-under-test`, `rule-review`, `approvals` (`requirements` and `eval_set`), `priced-models`, `preflight` (`run` and `loop` only), `per-call-bound` and `estimate-within-budget`. `loop` checks them again before every iteration, with the reloaded eval set and the remaining budget, and stops with `gates-failed` on a failure.
+No `claude` or `codex` CLI and no model runs for `run`, `grade`, `calibrate` or `loop` unless the command line holds `--live`, a finite `--budget-usd` above 0 and `--auth-profile`, and the start is recorded as an unsigned approval bound to the plan hash and the budget ([Approval gates](approval-gates.md)). The exception is `check-builtin-plugins`, which starts the `claude` CLI without `--live` and makes no model call. `run`, `grade`, `calibrate` and `loop` then check the live gates in the order that `policy/gates.json` declares under `live`: `eval-set-valid`, `strict-budget`, `codex-grader-not-under-test`, `subscription-auth`, `grader-not-model-under-test`, `rule-review`, `approvals` (`requirements` and `eval_set`), `priced-models`, `preflight` (`run` and `loop` only), `per-call-bound` and `estimate-within-budget`. `loop` checks them again before every iteration, with the reloaded eval set and the remaining budget, and stops with `gates-failed` on a failure.
 
 `--strict-budget` is the default. Codex has no per-call budget cap, so its budget is a soft limit: one call can exceed `--budget-usd`, and the Codex `auth.json` copy is readable by the agent under test. So the default `--strict-budget` refuses every `--live` run that selects Codex, including the default `--engines claude,codex`. `--no-strict-budget` is the risky opt-out. It prints both risks as warnings to stderr, and `plan.json` records `budget_enforcement` (`per_call_cap` for Claude, `soft_limit` for Codex). The Codex grader is refused while Codex is also under test.
 
@@ -220,7 +219,7 @@ Under the `personal-mac` auth profile, live runs use subscription auth only: the
 
 - `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `CODEX_API_KEY`, the other credential variables of `skill_eval.API_KEY_ENV` and the provider-routing variables of `skill_eval.PROVIDER_ENV` refuse a live start when set, even when empty. They are removed from every child environment anyway. Their values are never read or printed, and a run records only the removed names.
 - `CLAUDE_CODE_OAUTH_TOKEN` in the shell is not refused but removed from every child, so a run authenticates with the same Keychain login that `claude auth status` checked. Nothing is asked of the user: no `claude setup-token`, no new login and no exported token.
-- `SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `SKILL_MASTER_APPROVER_SESSION`, `PS1` and `PROMPT` (`skill_eval.APPROVER_SESSION_ENV`) are removed from every child too, so a run started inside `approver-session` gives the skill under test no path to the agent that holds the approver key. A skill whose eval needs ssh-agent (for example git over ssh) cannot use one in a run.
+- `SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `SKILL_MASTER_APPROVER_SESSION`, `PS1` and `PROMPT` (`skill_eval.APPROVER_SESSION_ENV`) are removed from every child too, so a run started from a shell with an ssh-agent, or from an approver-session shell left from before unit N1, gives the skill under test no path to that agent. A skill whose eval needs ssh-agent (for example git over ssh) cannot use one in a run.
 - The live gate runs `claude auth status --json` (no model call). It passes only with `loggedIn: true` and a method value under a method-like key that is one of the recognized subscription methods. An API-key method, missing JSON or an unknown method refuses. The JSON key names are UNVERIFIED. A session started over SSH or in a tmux server outside the desktop session may not reach the Keychain (UNVERIFIED); `claude auth status` then reports no login and the start refuses.
 - Account switching: every `claude` child gets the caller marker `CLAUDE_AS_CALLER=skill_eval` and `CLAUDE_AS_AUTO_SWITCH`, which is `1` only for a call whose `--tools` provably exclude Bash (the grader and the builder) and `0` otherwise. An account shim named `claude` on `PATH` may then retry such a call once on another account (`~/.claude-acctN`) after a usage-limit error. skill_eval itself never passes a token. `SKILL_EVAL_ACCOUNT_SWITCH=0` turns switching off. The config dir of every account the shim may switch to gets the same preflight and launch checks as the default one. Without the shim on `PATH`, the real CLI ignores the marker.
 - Codex: only the `auth_mode` field of the file-based `$CODEX_HOME/auth.json` is read, and it must be `chatgpt`. Each run gets a read-only copy (mode 0400, in a 0700 folder) that is removed with the sandbox. The harness never prints or logs it, but the copy is readable by the agent under test, which runs as the same user, so its tokens may end up in a saved answer, transcript or output file.

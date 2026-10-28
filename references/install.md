@@ -90,17 +90,17 @@ under a forbidden file.
 
 Order of a user-scope install:
 
-1. The human gate: a person at a real terminal, no agent in the parent chain (references/approval-gates.md).
-2. The agent's record in its workspace must read `registered` now (`registration_state`), so the G1 coverage gate held
+1. The agent's record in its workspace must read `registered` now (`registration_state`), so the G1 coverage gate held
    when it was recorded and nothing has changed since. The wrapper must be up to date.
-3. The person signs the manifest hash under the gate `install_user`. The manifest is canonical JSON of format 1, scope,
-   tool, unit name, the record's registration hash and each destination with its source path and source sha256.
-4. The plan is computed again. If its hash differs from the signed one, nothing is written. Otherwise the signed
-   record is stored under `install_user` in the workspace `approvals.json`, and the file is written by the same rules
-   as a project install. A backup goes to `$HOME/.unit-install-backup/`.
+2. The manifest hash is recorded as an unsigned approval under the gate `install_user` (references/approval-gates.md).
+   The manifest is canonical JSON of format 1, scope, tool, unit name, the record's registration hash and each
+   destination with its source path and source sha256.
+3. The plan is computed again. If its hash differs from the recorded one, nothing is written. Otherwise the record is
+   stored under `install_user` in the workspace `approvals.json`, and the file is written by the same rules as a
+   project install. A backup goes to `$HOME/.unit-install-backup/`.
 
-`--dry-run` signs nothing, writes nothing, and prints the plan and the prerequisite states. A repeat run whose file is
-unchanged prints `no change` and asks for no signature.
+`--dry-run` records nothing, writes nothing, and prints the plan and the prerequisite states. A repeat run whose file is
+unchanged prints `no change` and records nothing.
 
 ## Agent records
 
@@ -108,7 +108,7 @@ unchanged prints `no change` and asks for no signature.
 AGENT.md v2 folder. The workspace is `<parent>/<name>-workspace` unless `--workspace` names one. For an agent:
 
 - The eval set is the files `scenarios/*.json`.
-- `agent report` reads the signed waivers, so a valid waiver clears the `coverage-missing` problem of its tool only.
+- `agent report` reads the recorded waivers, so a valid waiver clears the `coverage-missing` problem of its tool only.
 - The record has `kind` `agent`. `skill_path` is the agent folder, `skill_sha256` its tree hash, `eval_set_sha256` the
   scenario hash, `skill_md_sha256` the hash of AGENT.md, and `version` the optional AGENT.md key `version` (SemVer).
 

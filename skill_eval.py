@@ -6,8 +6,8 @@ scripts/run_eval.py) and agentskills.io (evaluating-skills, optimizing-descripti
 in references/eval-set-format.md ("Deviations from skill-creator"). Python 3.9 standard library only.
 
 Safety: no model or CLI is ever executed unless the command line has --live AND a finite --budget-usd, the approval
-gates pass, the cost estimate fits the budget, and a person signs the start at a terminal (engine/approvals.py,
-references/approval-gates.md). Without --live every command is a dry run: it prints the
+gates pass, the cost estimate fits the budget, and the start is recorded as an unsigned approval bound to the plan
+hash and the budget (engine/approvals.py, references/approval-gates.md). Without --live every command is a dry run: it prints the
 plan and the estimated cost. Engines and graders take an injectable exec_fn so tests run fully mocked.
 Auth under the personal-mac profile is subscription only (Claude Code claude.ai OAuth, Codex ChatGPT login;
 references/engine-cli.md "Subscription auth"): API-key variables are refused and scrubbed from every child, and costs
@@ -20,7 +20,7 @@ Usage: python3 skill_eval.py <validate|estimate|plan|run|grade|calibrate|report|
        python3 skill_eval.py <install|deprecate> <unit> ... | version bump <unit> <part> | drift [ROOT]  (unit B6)
        (also reachable as: python3 eva.py eval <subcommand> ...)
 """
-import argparse, contextlib, csv, datetime, errno, hashlib, io, itertools, json, math, mmap, os, platform, random, re, secrets, shlex, shutil, subprocess, sys, tempfile, time
+import argparse, contextlib, csv, datetime, errno, hashlib, io, itertools, json, math, mmap, os, platform, random, re, shlex, shutil, subprocess, sys, tempfile, time
 from engine import approvals, registry, spend, writable
 
 POLICY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "policy")
@@ -413,10 +413,10 @@ def full_prompt(case):
 _LIVE = {"on": False, "gated": False, "ledger": None}
 
 def enable_live(grant):
-    """The only way main() turns live mode on: a --live start signed and verified at the human gate. From then on every
-    live_exec needs an open intent of the command's spend ledger (_LIVE["ledger"], engine/spend.py)."""
+    """The only way main() turns live mode on: a --live start recorded and read back approved (engine/approvals.py).
+    From then on every live_exec needs an open intent of the command's spend ledger (_LIVE["ledger"], engine/spend.py)."""
     if not (isinstance(grant, approvals.Grant) and grant.kind == "live"):
-        raise EvalError("live mode needs a --live start signed at the human gate")
+        raise EvalError("live mode needs a recorded --live start (engine/approvals.py)")
     _LIVE.update(on=True, gated=True)
 
 def live_exec(cmd, cwd, timeout, env=None):
@@ -674,9 +674,9 @@ BILLING = "subscription"
 ACTUAL_SPEND_NOTE = ("not metered: subscription runs (claude.ai plan / ChatGPT plan) are not billed per token; plan "
                      "limits and any extra-usage charges are visible only in your account")
 
-# The ssh-agent and approver-session variables (engine/approvals.py run_session). A child that inherits them reaches
-# the agent that holds the unlocked approver key, and the skill under test runs inside such a child (R25-1).
-APPROVER_SESSION_ENV = ("SSH_AUTH_SOCK", "SSH_AGENT_PID", approvals.SESSION_ENV, "PS1", "PROMPT")
+# The ssh-agent variables and those of an approver-session shell started before unit N1. A child that inherits them
+# reaches an agent that may hold an unlocked key, and the skill under test runs inside such a child (R25-1).
+APPROVER_SESSION_ENV = ("SSH_AUTH_SOCK", "SSH_AGENT_PID", "SKILL_MASTER_APPROVER_SESSION", "PS1", "PROMPT")
 
 def scrub_env(env):
     """Copy of env without the API-key and provider-routing variables (NON_SUBSCRIPTION_ENV), IGNORED_AUTH_ENV and
@@ -2362,7 +2362,7 @@ def agent_scenario_files(agent_dir):
 def unit_eval_files(spec):
     return agent_scenario_files(spec["skill_dir"]) if spec.get("kind") == "agent" else eval_set_files(spec["skill_dir"])
 
-APPROVER ={"it": approvals.cli_approver()}  # the human gate (engine/approvals.py); in-process tests replace it
+APPROVER ={"it": approvals.cli_approver()}  # recorded approvals (engine/approvals.py); in-process tests replace it
 POLICY_HASHED = (("pricing", "pricing.json"), ("models", "models.json"), ("auth_profiles", "auth-profiles.json"))
 
 def file_sha256(path):
@@ -2436,15 +2436,20 @@ def shown_config(path):
     home = os.environ.get("HOME") or ""
     return "~" + path[len(home):] if home and path and path.startswith(home.rstrip(os.sep) + os.sep) else str(path)
 
+def real_config_in_tests(path):
+    """True inside a test process for a path under the password-database home's .config/skill-master, which tests never
+    open or write."""
+    real = os.path.join(approvals.account_home(), *CONFIG_PARTS)
+    return approvals.in_test_process() and (path == real or path.startswith(real + os.sep))
+
 def machine_waiver(now=None):
-    """The machine waiver of $HOME as {status, principal, reason, why, sha256, tools, expires, record}. Inside a test
-    process a path under the password-database home is never opened."""
+    """The machine waiver of $HOME as {status, principal, reason, why, sha256, tools, expires, record}; principal is
+    recorded_by of a recorded waiver. Inside a test process a path under the password-database home is never opened."""
     path = machine_waiver_path()
     empty = {"principal": None, "reason": None, "sha256": None, "tools": [], "expires": None, "record": None,
              "path": path}
     if path is None: return dict(empty, status="invalid", why="HOME is not an absolute path")
-    real = os.path.join(approvals.account_home(), *CONFIG_PARTS)
-    if approvals.in_test_process() and (path == real or path.startswith(real + os.sep)):
+    if real_config_in_tests(path):
         return dict(empty, status="invalid", why="refusing to read the real machine waiver inside a test process")
     try:
         with open(path, "rb") as f: raw = f.read()
@@ -2481,27 +2486,29 @@ def approvals_log(entry):
     if path is None: raise EvalError("HOME is not an absolute path; cannot write approvals.log")
     approvals.append_log(path, dict(entry, at=approvals.now_iso()))
 
-def sign_machine_waiver(tools):
+def writable_config(path, what):
+    if path is None: raise EvalError("HOME is not an absolute path; %s" % what)
+    if real_config_in_tests(path): raise EvalError("refusing to change the real machine waiver inside a test process")
+
+def sign_machine_waiver(tools, reason=None):
+    """machine-waiver sign: the recorded waiver (engine/approvals.py) written to $HOME, and one approvals.log line."""
     path = machine_waiver_path()
-    if path is None: raise EvalError("HOME is not an absolute path; nothing was signed")
+    writable_config(path, "nothing was recorded")
     try: machine = MACHINE["id"]()
     except (OSError, ValueError, subprocess.SubprocessError): machine = None
-    rec = APPROVER["it"].sign_machine_waiver(machine, list(tools), MACHINE_WAIVABLE)
+    rec = APPROVER["it"].sign_machine_waiver(machine, list(tools), MACHINE_WAIVABLE, reason=reason)
     approvals.write_private(path, json.dumps(rec, indent=2, sort_keys=True) + "\n")
     approvals_log({"unit": "machine", "gate": "machine-waiver", "sha256": approvals.machine_waiver_sha256(rec),
-                   "decision": "machine-waiver-signed", "reason": rec["reason"], "principal": rec["principal"]})
+                   "decision": "machine-waiver-signed", "reason": rec["reason"], "principal": rec["recorded_by"]})
     return rec
 
 def revoke_machine_waiver():
     path = machine_waiver_path()
+    writable_config(path, "nothing to revoke")
     mw = machine_waiver()
-    ap = APPROVER["it"]
-    sitting = ap.open_sitting("machine-waiver revoke")
-    if path is None or not os.path.isfile(path):
+    if not os.path.isfile(path):
         raise EvalError("no machine waiver at %s; nothing to revoke" % shown_config(path))
-    ap.write(approvals.printable(machine_waiver_line(mw)))
-    code = sitting.challenge()
-    sitting.confirm([], ap.read_line("type %s to revoke (anything else cancels): " % code))
+    APPROVER["it"].write(approvals.printable(machine_waiver_line(mw)))
     os.remove(path)
     approvals_log({"unit": "machine", "gate": "machine-waiver", "sha256": mw["sha256"],
                    "decision": "machine-waiver-revoked", "reason": mw["reason"], "principal": mw["principal"]})
@@ -2522,9 +2529,10 @@ def approval_label(v):
 def approve(gate, spec, ws):
     return _approve_with(gate, lambda: (spec, ws))
 
-def _approve_with(gate, load, sitting=None):
-    """Signs gate_hash(gate) at the human gate, then writes only that key of approvals.json. sitting: the approve
-    --batch or approve-ui sitting whose challenge confirmed this gate's hash (engine/approvals.py Sitting)."""
+def _approve_with(gate, load, reason=None, listed=None):
+    """Records gate_hash(gate) as an unsigned approval (engine/approvals.py), then writes only that key of
+    approvals.json. reason: a waiver gate's reason (else the approver reads one line). listed: the approve --batch
+    item, whose sha256 and ruleset_sha256 the record must still match."""
     st = {}
     def prepare():
         spec, ws = load()
@@ -2535,9 +2543,10 @@ def _approve_with(gate, load, sitting=None):
         except EvalError as ex: raise EvalError("%s; nothing was signed" % ex)
         st.update(ws=ws)
         rules = ruleset_sha256()
+        if listed is not None and (h, rules) != (listed["sha256"], listed["ruleset_sha256"]):
+            raise EvalError("%s for %s changed since the list was shown; nothing was recorded" % (gate, spec["skill_name"]))
         return approvals.Prepared(spec["skill_name"], h, rules, approve_show(gate, spec, ws, rules))
-    ap = APPROVER["it"]
-    grant = ap.sign("approve", gate, prepare) if sitting is None else ap.sign("approve", gate, prepare, sitting=sitting)
+    grant = APPROVER["it"].sign("approve", gate, prepare, reason=reason)
     return store_approval(st["ws"], gate, grant.record)
 
 def store_approval(ws, gate, record):
@@ -2547,7 +2556,7 @@ def store_approval(ws, gate, record):
     return record
 
 def approve_show(gate, spec, ws, rules):
-    """What the person approves, printed before the challenge; the last line is the rule bundle hash it binds."""
+    """What the person approves, printed before the record is written; the last line is the rule bundle hash it binds."""
     if gate == "requirements": shown = ["requirements: %s" % os.path.join(ws, "requirements.md")]
     elif gate == COMBINED_GATE:
         shown = (["requirements: %s sha256 %s" % (os.path.join(ws, "requirements.md"),
@@ -3754,9 +3763,9 @@ def registration_coverage(spec, ws, bench, n):
     missing = [GATE_MESSAGES["coverage-missing"] % c for _, c in states if c["state"] == "missing"]
     if missing:
         raise EvalError("iteration-%d cannot be registered: %s. Registration needs a graded dynamic run on every tool of "
-                        "coverage_required (%s) or, for each tool that did not run, a signed `approve --gate "
-                        "coverage_waiver:<tool>` with a reason typed at the terminal; a registration approval does not "
-                        "clear coverage" % (n, "; ".join(missing), ", ".join(COVERAGE_REQUIRED)))
+                        "coverage_required (%s) or, for each tool that did not run, a recorded `approve --gate "
+                        "coverage_waiver:<tool>` with a reason (--reason or one line of stdin); a registration approval "
+                        "does not clear coverage" % (n, "; ".join(missing), ", ".join(COVERAGE_REQUIRED)))
     waived = {t: " (waived by %s, reason: %s)" % (c["principal"], c["reason"]) for t, c in states if c["state"] == "waived"}
     waived.update((t, " (waived by machine policy %s, %s, expires %s, reason: %s)" % (
         c["waiver_hash"], c["principal"], c["expires"], c["reason"])) for t, c in states if c["state"] == "machine-waived")
@@ -3893,9 +3902,25 @@ def unit_spec(unit_dir):
     spec = {"skill_name": registry.unit_name(unit_dir, meta), "skill_dir": unit_dir}
     return (dict(spec, kind="agent") if agent else spec), meta
 
+RECORD_SLOTS = dict([(("signed",), ("register", "registration")), (("approval",), ("approve", "registration")),
+                     (("approvals", "registration"), ("approve", "registration")), (("machine_waiver", "record"), None)]
+                    + [(("approvals", g), ("approve", g)) for g in approvals.WAIVER_GATES])
+
 def registration_schema_errors(rec):
+    """The registration schema's errors. The schema is part of the ruleset hash and names only records signed before
+    unit N1, so an error inside a RECORD_SLOTS slot is dropped when the slot holds a well-formed recorded record of the
+    slot's kind and gate (engine/approvals.py recorded_problem, or machine_waiver_problem for the machine waiver); the
+    verdicts of classify still check every such record."""
     from engine import schema
-    return schema.compile_schema(schema.load(os.path.join(RULESET_ROOT, registry.SCHEMA_NAME))).validate(rec)
+    errors = schema.compile_schema(schema.load(os.path.join(RULESET_ROOT, registry.SCHEMA_NAME))).validate(rec)
+    def recorded(slot, want):
+        value = rec
+        for k in slot: value = value.get(k) if isinstance(value, dict) else None
+        if not (isinstance(value, dict) and value.get("method") == approvals.RECORDED): return False
+        if want is None: return approvals.machine_waiver_problem(value, MACHINE_WAIVABLE) is None
+        return approvals.recorded_problem(value) is None and (value["kind"], value["gate"]) == want
+    slots = [s for s, want in RECORD_SLOTS.items() if recorded(s, want)]
+    return [e for e in errors if not any(tuple(e[0][:len(s)]) == s for s in slots)]
 
 def registration_state(unit_dir, ws=None):
     """(state, reason, record) of the unit's registration record, verified now (engine/registry.classify, B5 D4): the
@@ -3962,7 +3987,7 @@ def unit_view(root, row):
     hashes = {"tree_sha256": skill_tree_hash(u)}
     hashes.update((k, rec[k]) for k in registry.RECORD_HASHES
                   if isinstance(rec.get(k), str) and approvals.SHA_RE.fullmatch(rec[k]))
-    label = (("registered %s by %s" % (rec["version"], rec["signed"]["principal"])) if registered else
+    label = (("registered %s by %s" % (rec["version"], approvals.decided_by(rec["signed"]))) if registered else
              registry.label(row["registration"], row["registration_reason"], rec))
     files = eva.unit_tree(u).files
     return {"kind": row["kind"], "name": row["name"], "description": row["description"],
@@ -3973,7 +3998,7 @@ def unit_view(root, row):
             "scripts": any("scripts" in f.split("/")[:-1] or f.endswith((".py", ".sh", ".js")) for f in files),
             "wrappers": {t: os.path.isfile(os.path.join(u, *eva._wrapper_rel(t, row["name"]).split("/")))
                          for t in eva.TOOLS} if row["kind"] == "agent" else {},
-            "approvals": [{"gate": g, "principal": a["principal"], "reason": a.get("reason")}
+            "approvals": [{"gate": g, "principal": approvals.decided_by(a), "reason": a.get("reason")}
                           for g, a in sorted(rec["approvals"].items())] if registered else [],
             "machine_waiver": rec.get("machine_waiver") if registered else None,
             "findings": registration_findings(row["workspace"], rec) if registered and row["kind"] == "agent" else None}
@@ -4430,9 +4455,9 @@ def agent_plan_text(a, agent, old, ws, engines, cells, prices, tokens):
         "; STRICT (default): --live refuses %s (no per-call cap)" % ", ".join(soft) if soft and a.strict_budget else
         "; WARNING " + NO_STRICT_WARNING % ", ".join(soft) if soft else ""))
     L += ["tool coverage (dynamic): " + coverage_line(tool_coverage([e.name for e in engines])),
-          "registration coverage: registration needs a graded run on every tool of coverage_required (%s) or a signed "
+          "registration coverage: registration needs a graded run on every tool of coverage_required (%s) or a recorded "
           "coverage_waiver:<tool> (G1, plan.md:1136); `agent report`, `agent loop` and `register` read the agent's "
-          "signed coverage waivers, so a tool that did not run stays coverage-missing unless its waiver verifies"
+          "recorded coverage waivers, so a tool that did not run stays coverage-missing unless its waiver verifies"
           % ", ".join(COVERAGE_REQUIRED),
           "multi-turn: non-interactive continuation is UNVERIFIED for %s; every scenario with more than one turn "
           "records %s until an operator probe verifies a tool" % (
@@ -4457,7 +4482,7 @@ def agent_gate_lines(agent, ws):
     approvals_state = "pass" if not lacking else "fail: " + ", ".join(
         "%s %s" % (g, v.status) for g, v in [(COMBINED_GATE, verdict_of(COMBINED_GATE, spec, ws))] + lacking)
     return ["rule review (English-only / parity needs-review findings): " + (
-                "none" if rr is None else "RECORDED (signed by %s)" % rr.principal if rr.status == "approved" else
+                "none" if rr is None else "RECORDED (by %s)" % rr.principal if rr.status == "approved" else
                 "NOT RECORDED (%sblocks agent run --live and agent loop --live)" % (
                     "" if rr.status == "missing" else rr.status + "; ")),
             "coverage waivers: " + ", ".join("%s=%s" % (t, waiver_label(waivers[t])) for t in COVERAGE_REQUIRED),
@@ -4655,10 +4680,10 @@ def agent_plan_hash(a, ws, parts):
 
 def agent_live_start(a, agent, ws, gate, problems, parts, show, claude_called):
     """The skill live order for an agent command: --budget-usd and --auth-profile were checked by the caller; then
-    the ledger preview, problems(left) (every check that starts no agent, model or builder; an approval verify runs
-    ssh-keygen) inside the human gate before signing, the
-    signature, problems(left) again plus `claude auth status` when Claude is called under subscription auth, the plan
-    hash recheck, enable_live and the spend ledger. Returns the Budget."""
+    the ledger preview, problems(left) (every check that starts no agent, model or builder; only a signed approval
+    from before N1 runs ssh-keygen) inside prepare(), the recorded live approval, problems(left) again plus `claude
+    auth status` when Claude is called under subscription auth, the plan hash recheck, enable_live and the spend
+    ledger. Returns the Budget."""
     dangling = spend.preview(ws)
     left = a.budget_usd - sum(r["bound_usd"] or 0.0 for r in dangling)
     def prepare():
@@ -4670,8 +4695,8 @@ def agent_live_start(a, agent, ws, gate, problems, parts, show, claude_called):
                                    "workspace: " + ws] + show + [x for x in (spend.preview_line(dangling),) if x]
                                   + ["ruleset_sha256 " + rules])
     grant = APPROVER["it"].sign("live", gate, prepare, budget_usd=a.budget_usd)
-    print("signed agent %s --live by %s (plan sha256 %s)" % (a.agent_cmd, grant.record["principal"], grant.sha256[:12]),
-          file=sys.stderr)
+    print("recorded agent %s --live by %s (plan sha256 %s)" % (a.agent_cmd, grant.record["recorded_by"],
+                                                                grant.sha256[:12]), file=sys.stderr)
     probs = problems(left) + (claude_auth_problems() if claude_called and not api_key_mode() else [])
     if probs: raise EvalError("agent %s --live refused after signing: %s" % (a.agent_cmd, "; ".join(probs)))
     if agent_plan_hash(a, ws, parts()) != grant.sha256:
@@ -4753,8 +4778,8 @@ def agent_run(a, agent, ws, prices, tokens):
     if a.agent_cmd == "plan" or not a.live:
         print(agent_plan_text(a, agent, old, ws, engines, cells, prices, tokens))
         print("\nDRY RUN: nothing was executed. A real run needs `agent run --live --auth-profile P --budget-usd X`, a "
-              "clean `agent validate`, generated wrappers, " + AGENT_LIVE_APPROVALS + ", an estimate within budget and "
-              "a signature at the terminal.")
+              "clean `agent validate`, generated wrappers, " + AGENT_LIVE_APPROVALS + " and an estimate within budget; "
+              "the start is recorded as an unsigned approval.")
         return 0
     agent_live_required(a)
     est = agent_estimate(engines, cells, a.runs, old, prices, tokens)
@@ -5142,8 +5167,8 @@ def agent_loop_cli(a, agent, ws, prices, tokens):
         print(agent_plan_text(a, agent, old, ws, engines, cells, prices, tokens))
         print("\n".join(loop_lines))
         print("\nDRY RUN: nothing was executed. A real loop needs `agent loop --live --auth-profile P --budget-usd X "
-              "--builder-prompt FILE`, a clean `agent validate`, generated wrappers, " + AGENT_LIVE_APPROVALS + ", an "
-              "estimate within budget and a signature at the terminal.")
+              "--builder-prompt FILE`, a clean `agent validate`, generated wrappers, " + AGENT_LIVE_APPROVALS + " and an "
+              "estimate within budget; the start is recorded as an unsigned approval.")
         return 0
     agent_live_required(a)
     ge, names = grader_engine_of(a), [e.name for e in engines]
@@ -5345,7 +5370,7 @@ def install_user_scope(a, spec, meta, ws, tools):
         except (EvalError, install.InstallError) as ex:
             print("prerequisites: %s" % ex)
             return 2
-        print("registration: registered %s (by %s)" % (rec["version"], rec["signed"]["principal"]))
+        print("registration: registered %s (by %s)" % (rec["version"], approvals.decided_by(rec["signed"])))
         print("wrapper: claude up to date; nothing is signed or written in a dry run")
         return install_finish(plan, pol, True, [])
     try:
@@ -5361,7 +5386,8 @@ def install_user_scope(a, spec, meta, ws, tools):
         return approvals.Prepared(spec["skill_name"], h, rules, [
             "install user scope: %s" % e.dest for e in plan.entries] + [
             "install source sha256 %s (%s)" % (hashlib.sha256(e.data).hexdigest(), e.source) for e in plan.entries] + [
-            "install record: %s %s registered by %s" % (spec["skill_name"], rec["version"], rec["signed"]["principal"]),
+            "install record: %s %s registered by %s" % (spec["skill_name"], rec["version"],
+                                                       approvals.decided_by(rec["signed"])),
             "ruleset_sha256 " + rules])
     grant = APPROVER["it"].sign("approve", INSTALL_USER_GATE, prepare)
     plan, _, h = planned()
@@ -5513,12 +5539,12 @@ def plan_text(spec, problems, a, engines, ws, est, tokens=None, prices=None):
     verdict_of = _memo_verdicts()
     rr = verdict_of("rule_review", spec, ws) if rule_review_items(spec["skill_dir"]) else None
     L += ["rule review (English-only / parity needs-review findings): " + (
-              "none" if rr is None else "RECORDED (signed by %s)" % rr.principal if rr.status == "approved" else
+              "none" if rr is None else "RECORDED (by %s)" % rr.principal if rr.status == "approved" else
               "NOT RECORDED (%sblocks --live and the loop)" % ("" if rr.status == "missing" else rr.status + "; ")),
           "multi-tool parity (static, eva.py): " + eva.parity_line(eva.parity_status(spec["skill_dir"])),
           "tool coverage (dynamic): " + coverage_line(tool_coverage([e.name for e in engines])),
           "registration coverage: registration needs a graded dynamic run on every tool of coverage_required (%s) or a "
-          "signed coverage_waiver:<tool> with a typed reason for each tool that did not run; waivers: %s" % (
+          "recorded coverage_waiver:<tool> with a reason for each tool that did not run; waivers: %s" % (
               ", ".join(COVERAGE_REQUIRED), ", ".join("%s=%s" % (t, approval_label(verdict_of(
                   approvals.WAIVER_PREFIX + t, spec, ws))) for t in COVERAGE_REQUIRED))]
     L += [machine_waiver_line(machine_waiver()),
@@ -6008,114 +6034,18 @@ def pending_items(pairs):
     return out
 
 def approve_batch(units, workspaces, cwd=None):
-    """Presence and approver-check once, before any eval set is read; each item signed like a single approve."""
+    """Every pending item recorded like a single approve; a coverage waiver item reads one reason line from stdin."""
     from engine import approval_batch
-    sitting = APPROVER["it"].open_sitting("approve --batch")
     items = pending_items(unit_pairs(units, workspaces, cwd))
     if not items:
-        print("nothing is pending; nothing was signed")
+        print("nothing is pending; nothing was recorded")
         return 0
-    outcomes = approval_batch.run_batch(sitting, items, lambda item, s: _approve_with(item["gate"], unit_loader(item),
-                                                                                      sitting=s),
-                                        (approvals.Refused, EvalError))
+    outcomes = approval_batch.run_batch(APPROVER["it"], items, lambda item, reason: _approve_with(
+        item["gate"], unit_loader(item), reason=reason, listed=item), (approvals.Refused, EvalError))
     for o in outcomes: print(approvals.printable(o.line))
     return 0 if all(o.ok for o in outcomes) else 2
 
-def _approve_ui():
-    from engine import approve_ui
-    return approve_ui
-
-def tailscale_run(argv):
-    U = _approve_ui()
-    binary = U.tailscale_binary()
-    if binary is None: return 127, "", "tailscale not found at %s" % ", ".join(U.TAILSCALE_PATHS)
-    rc, out, err = approvals.run_process([binary] + list(argv), timeout=5)
-    return rc, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
-
-UI = {"server": lambda host: _approve_ui().make_server(host, None), "clock": time.monotonic,
-      "tailscale": tailscale_run}  # in-process tests replace all three
-
-def page_submit(sitting, items):
-    """The page's submit callback: the TTY re-check, the batch challenge (Sitting.confirm), each approved item signed
-    through _approve_with, and one approvals.log line per approval or rejection."""
-    from engine import approval_batch
-    U, ap = _approve_ui(), sitting.approver
-    def submit(decisions, typed):
-        lost = sitting.tty_problems()
-        if lost: raise U.Blocked("the launching terminal is gone (%s); nothing was signed" % "; ".join(lost))
-        chosen = [(items[i], d, r) for i, d, r in decisions if d in ("approve", "reject")]
-        bad = lambda it, r: it["needs_reason"] and approvals.reason_problem(r)
-        approve = [(it, r) for it, d, r in chosen if d == "approve" and it["sha256"] and not bad(it, r)]
-        try:
-            sitting.confirm([approval_batch.draft(it, r) for it, r in approve], typed)
-        except approvals.Refused:
-            ap.write("challenge mismatch: nothing was signed; new batch challenge: type %s into the page"
-                     % sitting.challenge())
-            raise U.Mismatch()
-        lines = ["not signed %s %s: %s" % (it["unit"], it["gate"], bad(it, r) or "the gated file is missing")
-                 for it, d, r in chosen if d == "approve" and (bad(it, r) or not it["sha256"])]
-        for it, r in approve:
-            try:
-                rec = _approve_with(it["gate"], unit_loader(it), sitting=sitting)
-            except (approvals.Refused, EvalError) as ex:
-                lines.append("not signed %s %s: %s" % (it["unit"], it["gate"], ex))
-                continue
-            approvals_log({"unit": it["unit"], "gate": it["gate"], "sha256": rec["sha256"], "decision": "approved",
-                           "reason": r, "principal": rec["principal"]})
-            lines.append("signed %s %s sha256 %s by %s" % (it["unit"], it["gate"], rec["sha256"][:12], rec["principal"]))
-        for it, d, r in chosen:
-            if d != "reject": continue
-            approvals_log({"unit": it["unit"], "gate": it["gate"], "sha256": it["sha256"], "decision": "rejected",
-                           "reason": r, "principal": sitting.principal})
-            lines.append("rejected %s %s (it stays pending): %s" % (it["unit"], it["gate"], r or "no reason given"))
-        for line in lines: ap.write(approvals.printable(line))
-        return lines
-    return submit
-
-def approve_ui(pairs, tailscale=False):
-    """approve-ui: presence and approver-check before any socket (the H1 refusal text on a problem), the tailnet checks
-    in --tailscale mode, the passphrase once (or the approver-session agent), then one page batch on 127.0.0.1 (or the
-    Tailscale address) whose URL and challenge go to the launching terminal only. pairs: a list, or a function the
-    command line resolves after the gate. Returns 0 when a batch was submitted and every approved item was signed."""
-    U, ap = _approve_ui(), APPROVER["it"]
-    sitting = ap.open_sitting("approve-ui")
-    host, names, whois, owner = "127.0.0.1", ["127.0.0.1"], None, None
-    if tailscale:
-        cfg_path = config_path("approve-ui.json")
-        try: cfg = rjson(cfg_path, {}) if cfg_path else {}
-        except ValueError as ex:
-            raise EvalError("--tailscale: %s is not JSON (%s); nothing was started" % (shown_config(cfg_path), ex))
-        owner = cfg.get("tailnet_owner_login") if isinstance(cfg, dict) else None
-        if not (isinstance(owner, str) and owner.strip()):
-            raise EvalError("--tailscale needs tailnet_owner_login in %s; nothing was started" % shown_config(cfg_path))
-        rc, out, err = UI["tailscale"](["ip", "-4"])
-        if rc != 0:
-            raise EvalError("--tailscale: `tailscale ip -4` failed (exit %s: %s); is Tailscale up? nothing was started"
-                            % (rc, approvals.first_line(err or out)))
-        try: host, _ = U.bind_address(True, out)
-        except ValueError as ex: raise EvalError("--tailscale: %s; nothing was started" % ex)
-        magic = cfg.get("magicdns_name")
-        names = [host] + ([magic] if isinstance(magic, str) and magic else [])
-        whois = lambda peer: U.whois_login(*UI["tailscale"](["whois", "--json", peer]))
-    sitting.unlock()
-    items = pending_items(pairs() if callable(pairs) else pairs)
-    if not items:
-        ap.write("nothing is pending; no page was started")
-        return 0
-    server = UI["server"](host)
-    hosts = {"%s:%d" % (n, server.port) for n in names}
-    core = U.Core(items, secrets.token_urlsafe(32), secrets.token_urlsafe(32), hosts, {"http://" + h for h in hosts},
-                  UI["clock"], page_submit(sitting, items), whois=whois, owner=owner, port=server.port)
-    server.core = core
-    if tailscale:
-        ap.write("TAILNET MODE (--tailscale, this launch only): the page listens on %s:%d for tailnet peers whose "
-                 "whois login is the owner login of approve-ui.json" % (host, server.port))
-    ap.write("open this URL once in your browser; the page closes after the batch or 10 minutes without a request:")
-    ap.write("http://%s:%d/?t=%s" % (host, server.port, core.token))
-    ap.write("batch challenge: type %s into the page with your decisions" % sitting.challenge())
-    U.serve(server, core, UI["clock"])
-    ap.write(core.exit_reason or "the page closed")
-    return 0 if core.ok else 2
+UNSIGNED_NOTE = "approvals are unsigned recorded decisions; no approver key, ssh-agent or approver session is needed"
 
 def machine_waiver_show():
     mw = machine_waiver()
@@ -6189,37 +6119,38 @@ def build_parser():
             s.add_argument("--builder-model", default=DEFAULT_BUILDER_MODEL)
             s.add_argument("--max-iterations", type=int, default=MAX_AUTO_ITERATIONS)
             s.add_argument("--golden")
-    text = ("sign one gate at a terminal, or with --batch every pending approval of the --unit folders after one "
-            "challenge and one passphrase (engine/approvals.py; references/approval-gates.md); a skill or an agent "
-            "folder, gates requirements_eval_set, requirements, eval_set, rule_review, registration, "
-            "coverage_waiver:<tool>")
+    text = ("record one gate as an unsigned approval, or with --batch every pending approval of the --unit folders "
+            "(engine/approvals.py; references/approval-gates.md); a skill or an agent folder, gates "
+            "requirements_eval_set, requirements, eval_set, rule_review, registration, coverage_waiver:<tool>")
     s = sp.add_parser("approve", help=text, description=text)
     s.add_argument("skill", nargs="?")
     s.add_argument("--workspace", action="append")
     s.add_argument("--gate")
+    s.add_argument("--reason", help="the reason of a coverage_waiver:<tool> gate (default: one line read from stdin)")
     s.add_argument("--batch", action="store_true")
     s.add_argument("--unit", action="append")
     s.add_argument("--cwd", help="the folder relative --unit and --workspace paths start from (default: this one)")
     s = sp.add_parser("pending", help="free: every missing or stale approval of the --unit folders with its gate hash, "
-                      "ruleset_sha256, spend so far and plan estimate; signs nothing")
+                      "ruleset_sha256, spend so far and plan estimate; records nothing")
     s.add_argument("--unit", action="append", required=True)
     s.add_argument("--workspace", action="append")
     s.add_argument("--cwd")
-    s = sp.add_parser("approve-ui", help="the local approval page for the --unit folders: presence and approver-check, "
-                      "then one batch on 127.0.0.1 (or the Tailscale address with --tailscale)")
+    s = sp.add_parser("approve-ui", help="removed (unit N1): prints that approvals are unsigned recorded decisions and "
+                      "exits 2; use approve --batch")
     s.add_argument("--unit", action="append", required=True)
     s.add_argument("--workspace", action="append")
     s.add_argument("--cwd")
-    s.add_argument("--tailscale", action="store_true", help="bind the `tailscale ip -4` address for this launch only")
-    sp.add_parser("approver-session", help="a subshell whose private ssh-agent holds the approver key for 8 hours; every "
-                  "signing command inside still runs presence and asks its challenge")
-    s = sp.add_parser("machine-waiver", help="the signed machine waiver of this Mac for machine_waivable tools")
+    s.add_argument("--tailscale", action="store_true")
+    sp.add_parser("approver-session", help="removed (unit N1): prints that no approver session is needed")
+    s = sp.add_parser("machine-waiver", help="the recorded machine waiver of this Mac for machine_waivable tools")
     x = s.add_subparsers(dest="waiver_cmd", required=True)
-    x.add_parser("sign").add_argument("--tools", default=",".join(MACHINE_WAIVABLE))
+    s = x.add_parser("sign")
+    s.add_argument("--tools", default=",".join(MACHINE_WAIVABLE))
+    s.add_argument("--reason", help="the waiver's reason (default: one line read from stdin)")
     x.add_parser("show"); x.add_parser("revoke")
-    text = ("sign and write the format-2 record of a skill or an agent (kind agent) for the last iteration; a report with "
-            "problems needs a current registration approval that names them, and every coverage_required tool a run or "
-            "a waiver")
+    text = ("record and write the format-2 record of a skill or an agent (kind agent) for the last iteration; a report "
+            "with problems needs a current registration approval that names them, and every coverage_required tool a "
+            "run or a waiver")
     s = sp.add_parser("register", help=text, description=text)
     common(s, False)
     s = sp.add_parser("snapshot"); common(s, False)
@@ -6230,8 +6161,7 @@ def build_parser():
     s.add_argument("skill"); s.add_argument("--workspace", required=True)
     s.add_argument("--compare", metavar="SAVED", help="an earlier builder-check output: print every changed path, exit "
                    "1 when any changed")
-    sp.add_parser("approver-check", help="the approver key needs a passphrase and is not loaded in ssh-agent; the "
-                  "approvers file lists it (~/.config/skill-master)")
+    sp.add_parser("approver-check", help="prints that approvals are unsigned recorded decisions and exits 0 (unit N1)")
     s = sp.add_parser("hub", help="the static registry site (no network, no push; publishing is a git push by a person)")
     x = s.add_subparsers(dest="hub_cmd", required=True).add_parser(
         "build", help="write index.html, registry.json, style.css and one page per unit of ROOT into --out, after an "
@@ -6281,7 +6211,7 @@ def build_parser():
             x.add_argument("--max-iterations", type=int, default=MAX_AUTO_ITERATIONS)
     s = sp.add_parser("install", help="install an agent's generated wrappers or a skill folder per tool (policy/install"
                       ".json; references/install.md): project scope under --target, or the Claude agent at user scope "
-                      "after a signature of the manifest")
+                      "after a recorded approval of the manifest")
     s.add_argument("unit")
     s.add_argument("--tools", default=",".join(approvals.COVERAGE_TOOLS))
     s.add_argument("--scope", choices=("project", "user"), default="project")
@@ -6312,9 +6242,11 @@ def main(argv=None):
     if a.cmd == "check-builtin-plugins":
         rc, lines = builtin_plugin_check()
         print("\n".join(lines)); return rc
-    if a.cmd == "approver-check":
-        probs = APPROVER["it"].key_problems()
-        print("\n".join("approver-check: " + x for x in probs) if probs else "approver-check: OK"); return 1 if probs else 0
+    if a.cmd in ("approver-check", "approver-session", "approve-ui"):
+        ui = a.cmd == "approve-ui"
+        print("%s: %s%s%s" % (a.cmd, "OK: " if a.cmd == "approver-check" else "", UNSIGNED_NOTE,
+                              "; no page was started, use approve --batch --unit DIR" if ui else ""))
+        return 2 if ui else 0
     a.argv = list(sys.argv[1:] if argv is None else argv)
     if hasattr(a, "grader_engine") and a.grader_model is None and a.grader_engine == "claude":
         a.grader_model = DEFAULT_GRADER_MODEL
@@ -6344,22 +6276,21 @@ def _dispatch(a):
         from engine import approval_batch
         print(approval_batch.pending_text(pending_items(unit_pairs(a.unit, a.workspace, a.cwd))))
         return 0
-    if a.cmd == "approve-ui": return approve_ui(lambda: unit_pairs(a.unit, a.workspace, a.cwd), tailscale=a.tailscale)
-    if a.cmd == "approver-session": return approvals.run_session(APPROVER["it"])
     if a.cmd == "machine-waiver":
         if a.waiver_cmd == "show": return machine_waiver_show()
         if a.waiver_cmd == "revoke":
             revoke_machine_waiver(); print("machine waiver revoked"); return 0
-        rec = sign_machine_waiver([t for t in a.tools.split(",") if t])
-        print("machine waiver signed: tools %s, expires %s, sha256 %s" % (",".join(rec["tools"]), rec["expires"],
-                                                                          approvals.machine_waiver_sha256(rec)))
+        rec = sign_machine_waiver([t for t in a.tools.split(",") if t], reason=a.reason)
+        print("machine waiver recorded: tools %s, expires %s, sha256 %s" % (",".join(rec["tools"]), rec["expires"],
+                                                                            approvals.machine_waiver_sha256(rec)))
         return 0
     if a.cmd == "approve":
-        if a.batch and a.unit and not a.skill and not a.gate: return approve_batch(a.unit, a.workspace, a.cwd)
+        if a.batch and a.unit and not a.skill and not a.gate and a.reason is None:
+            return approve_batch(a.unit, a.workspace, a.cwd)
         if a.batch or a.unit or a.cwd or not a.skill or not a.gate or len(a.workspace or []) > 1:
             raise EvalError("approve: give SKILL and --gate, or --batch with --unit")
         a.workspace = (a.workspace or [None])[0]
-    if a.cmd in ("approve", "register"):  # the human gate runs before the eval set is read, the same for every fixture
+    if a.cmd in ("approve", "register"):  # recorded before the eval set is read, the same for every fixture
         def load():
             import eva
             if eva.detect_kind(a.skill) == "agent":
@@ -6368,7 +6299,8 @@ def _dispatch(a):
             spec, _ = load_eval_set(a.skill)
             return spec, os.path.realpath(a.workspace) if a.workspace else default_workspace(spec)
         if a.cmd == "approve":
-            rec = _approve_with(a.gate, load); print("approved %s sha256=%s" % (a.gate, rec["sha256"][:12])); return 0
+            rec = _approve_with(a.gate, load, reason=a.reason)
+            print("approved %s sha256=%s" % (a.gate, rec["sha256"][:12])); return 0
         rec = _register_with(load); print("registered %s %s iteration-%d (%s)" % (rec["skill_name"], rec["version"],
                                           rec["iteration"], "auto" if rec["approval"] == "auto" else "approved")); return 0
     if hasattr(a, "auth_profile"): select_auth_profile(a.auth_profile)  # plan/estimate/dry runs: personal-mac by default
@@ -6459,7 +6391,7 @@ def _dispatch(a):
     left = a.budget_usd - sum(r["bound_usd"] or 0.0 for r in dangling)
     if a.dry_run:
         return live_dry_run(a, spec, problems, ws, n, engines, tokens, prices, left)
-    def prepare():  # every gate that starts no process, before the person is asked to sign
+    def prepare():  # every gate that starts no process, before the live start is recorded
         report = []
         check_live_gates(a, spec, problems, ws, n, engines, tokens, prices, left, report=report)
         fails = [r for r in report if r not in (AUTH_STATUS_SKIPPED, CODEX_AUTH_SKIPPED)]
@@ -6469,7 +6401,8 @@ def _dispatch(a):
                                   ["live command: " + shlex.join(["python3", "skill_eval.py"] + a.argv), "workspace: " + ws]
                                   + [x for x in (spend.preview_line(dangling),) if x] + ["ruleset_sha256 " + rules])
     grant = APPROVER["it"].sign("live", a.cmd, prepare, budget_usd=a.budget_usd)
-    print("signed %s --live by %s (plan sha256 %s)" % (a.cmd, grant.record["principal"], grant.sha256[:12]), file=sys.stderr)
+    print("recorded %s --live by %s (plan sha256 %s)" % (a.cmd, grant.record["recorded_by"], grant.sha256[:12]),
+          file=sys.stderr)
     check_live_gates(a, spec, problems, ws, n, engines, tokens, prices, left)
     if a.cmd in ("run", "loop"):
         for e in engines:

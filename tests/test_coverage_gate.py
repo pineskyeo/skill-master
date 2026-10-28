@@ -1,11 +1,12 @@
-"""G1: registration needs a graded dynamic run on every tool of coverage_required (policy/gate.rules.json) or a signed
-coverage_waiver:<tool> per missing tool, bound to the unit, the eval set and the ruleset, with a reason typed at the
-human gate. `report` lists each missing tool as a coverage-missing:<tool> gate problem.
+"""G1: registration needs a graded dynamic run on every tool of coverage_required (policy/gate.rules.json) or a
+recorded coverage_waiver:<tool> per missing tool, bound to the unit, the eval set and the ruleset, with a reason from
+--reason or one line of stdin. `report` lists each missing tool as a coverage-missing:<tool> gate problem.
 
-Signing uses only the throwaway test key of tests/test_skill_eval.py, made under /tmp; subprocess is patched for the
-whole module and only that key runner starts /usr/bin/ssh-keygen. approve, register and the loop are reached only as
-Python calls on temp fixtures; builders and engines are fakes. The ruleset root is a temp copy of the bundle. ASCII only:
-non-ASCII text is built from code points."""
+The test approver records without a key and starts no process; only the signed-record cases use the throwaway test key
+of tests/test_skill_eval.py, made under /tmp, through the key runner that starts /usr/bin/ssh-keygen. subprocess is
+patched for the whole module. approve, register and the loop are reached only as Python calls on temp fixtures;
+builders and engines are fakes. The ruleset root is a temp copy of the bundle. ASCII only: non-ASCII text is built from
+code points."""
 import contextlib, hashlib, io, json, os, re, shutil, subprocess, sys, tempfile, unittest
 from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -61,13 +62,11 @@ class Cov(RB.Bound):
     def typing(self, reason, **kw):
         def read(prompt):
             self.events.append(("ask", prompt))
-            if re.search(r"type [A-Z0-9]{6} to sign", prompt): return T.type_challenge(prompt)
             return reason + "\n"
         T.install_test_approver(self, read_line=read, write=lambda s: self.events.append(("show", s)), **kw)
 
-    def asked(self, kind):
-        if kind == "challenge": return [p for e, p in self.events if e == "ask" and "to sign" in p]
-        return [p for e, p in self.events if e == "ask" and "to sign" not in p]
+    def asked(self):
+        return [p for e, p in self.events if e == "ask"]
 
     def run_both(self, engines=None):
         n = se.run_iteration(self.spec, self.ws, engines or self.engines(), runs=1, log=quiet)
@@ -171,15 +170,16 @@ class TestWaiver(Cov):
         self.assertEqual(bench["coverage_waivers"]["hermes"]["status"], "approved")
         self.assertEqual(bench["coverage_waivers"]["opencode"]["status"], "missing")
 
-    def test_the_reason_is_asked_after_the_summary_and_before_the_challenge(self):
+    def test_the_reason_is_asked_after_the_shown_lines_and_before_the_summary(self):
         n = self.run_both(); self.report(n)
         del self.events[:]
         self.waive("hermes")
         shown = [s for e, s in self.events if e == "show"]
-        order = [e if e == "show" else ("challenge" if "to sign" in s else "reason") for e, s in self.events]
-        self.assertEqual(order.count("reason"), 1); self.assertEqual(order.count("challenge"), 1)
-        self.assertLess(order.index("reason"), order.index("challenge"))
-        self.assertLess(order.index("show"), order.index("reason"))
+        order = [e for e, s in self.events]
+        self.assertEqual(order.count("ask"), 1)
+        self.assertLess(order.index("show"), order.index("ask"))
+        self.assertEqual(order[-1], "show")
+        self.assertIn("reason " + REASON, shown[-1])
         self.assertTrue(any("hermes" in s and NOT_AVAILABLE in s and "iteration-%d" % n in s for s in shown), shown)
         self.assertTrue(any(se.skill_tree_hash(self.d) in s for s in shown), shown)
         self.assertTrue(any(se.gate_hash("eval_set", self.spec, self.ws) in s for s in shown), shown)
@@ -213,30 +213,26 @@ class TestWaiver(Cov):
         self.assertEqual(missing_tools(gate), ["opencode", "hermes"])
         self.assertIn("waiver unsigned", line_for(gate["problems"], "hermes"))
 
-    def test_a_wrong_key_waiver_reads_invalid(self):
+    def test_a_waiver_signed_before_n1_verifies_and_a_wrong_key_or_tampered_one_reads_invalid(self):
         k = T.shared_keys()
         other_key, _ = T.make_key(tempfile.mkdtemp(dir=k["dir"]), "intruder", T.TEST_PASSPHRASE)
         gate, h, rules = waiver("hermes"), se.gate_hash(waiver("hermes"), self.spec, self.ws), se.ruleset_sha256()
-        data = A.payload("approve", gate, "branch-setup", h, rules, AT, reason=REASON)
-        def record(key):
-            sig = A.sign_payload(T.keygen_runner(k["dir"]), key, data, passphrase=T.TEST_PASSPHRASE)
-            return {"format": 1, "method": "ssh-sig", "sha256": h, "ruleset_sha256": rules, "principal": T.TEST_PRINCIPAL,
-                    "at": AT, "reason": REASON, "signature": sig}
-        ap = se.APPROVER["it"]
-        self.assertEqual(ap.verdict(record(k["key"]), "approve", gate, "branch-setup", h, rules).status, "approved",
+        ap = T.signed_approver()
+        rec = T.signed_record("approve", gate, "branch-setup", h, rules, at=AT, reason=REASON)
+        self.assertEqual(ap.verdict(rec, "approve", gate, "branch-setup", h, rules).status, "approved",
                          "control: the record shape verifies with the listed key")
-        v = ap.verdict(record(other_key), "approve", gate, "branch-setup", h, rules)
-        self.assertEqual(v.status, "invalid"); self.assertIn("signature does not verify", v.reason)
-
-    def test_a_tampered_waiver_reads_invalid(self):
-        rec = self.waive("hermes")
-        gate, h, rules, ap = waiver("hermes"), se.gate_hash(waiver("hermes"), self.spec, self.ws), se.ruleset_sha256(), \
-            se.APPROVER["it"]
-        for label, bad in (("another reason", dict(rec, reason="a different reason that nobody typed")),
+        for label, bad in (("another key", T.signed_record("approve", gate, "branch-setup", h, rules, at=AT,
+                                                           reason=REASON, key=other_key)),
+                           ("another reason", dict(rec, reason="a different reason that nobody typed")),
                            ("another time", dict(rec, at="2026-10-25T10:00:00Z"))):
             with self.subTest(label):
                 v = ap.verdict(bad, "approve", gate, "branch-setup", h, rules)
                 self.assertEqual(v.status, "invalid"); self.assertIn("signature does not verify", v.reason)
+
+    def test_a_malformed_waiver_reason_reads_invalid(self):
+        rec = self.waive("hermes")
+        gate, h, rules, ap = waiver("hermes"), se.gate_hash(waiver("hermes"), self.spec, self.ws), se.ruleset_sha256(), \
+            se.APPROVER["it"]
         for label, bad in (("no reason", {k: v for k, v in rec.items() if k != "reason"}),
                            ("non-ASCII reason", dict(rec, reason="ok " + KOREAN)), ("empty reason", dict(rec, reason="")),
                            ("long reason", dict(rec, reason="x" * 201)), ("reason not a string", dict(rec, reason=5))):
@@ -254,9 +250,9 @@ class TestWaiver(Cov):
         self.assertEqual(missing_tools(gate), ["opencode", "hermes"])
         h, rules = se.gate_hash(waiver("hermes"), self.spec, self.ws), se.ruleset_sha256()
         v = se.APPROVER["it"].verdict(rec, "approve", waiver("hermes"), "other-skill", h, rules)
-        self.assertEqual(v.status, "invalid"); self.assertIn("signature does not verify", v.reason)
+        self.assertEqual(v.status, "invalid"); self.assertIn("unit", v.reason)
 
-    def test_empty_non_ascii_control_and_long_reasons_refuse_and_sign_nothing(self):
+    def test_empty_non_ascii_control_and_long_reasons_refuse_and_record_nothing(self):
         self.run_both()
         se.approve("eval_set", self.spec, self.ws)
         before = state(self.approvals)
@@ -265,45 +261,37 @@ class TestWaiver(Cov):
                 del self.events[:]
                 self.typing(bad)
                 with self.assertRaises(A.Refused) as cm: se.approve(waiver("hermes"), self.spec, self.ws)
-                self.assertIn("reason", str(cm.exception)); self.assertIn("nothing was signed", str(cm.exception))
-                self.assertEqual(self.asked("challenge"), [])
+                self.assertIn("reason", str(cm.exception)); self.assertIn("nothing was recorded", str(cm.exception))
                 self.assertEqual(state(self.approvals), before)
         self.assertEqual(self.waive("hermes", "  " + "x" * 200 + "  ")["reason"], "x" * 200)
 
-    def test_no_flag_variable_or_file_supplies_the_reason(self):
-        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
-            se.build_parser().parse_args(["approve", self.d, "--gate", waiver("hermes"), "--reason", REASON])
+    def test_only_the_option_or_stdin_supplies_the_reason(self):
         self.run_both()
         write(os.path.join(self.ws, "reason.txt"), REASON)
         with mock.patch.dict(os.environ, {"SKILL_EVAL_REASON": REASON, "REASON": REASON}):
             self.typing("")
             with self.assertRaises(A.Refused): se.approve(waiver("hermes"), self.spec, self.ws)
-        self.assertEqual(len(self.asked("reason")), 1)
+        self.assertEqual(len(self.asked()), 1)
         self.assertFalse(os.path.exists(self.approvals))
+        del self.events[:]
+        rc, out, err = self.cli("approve", self.d, "--workspace", self.ws, "--gate", waiver("hermes"), "--reason", REASON)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.asked(), [])
+        self.assertEqual(rjson(self.approvals)[waiver("hermes")]["reason"], REASON)
+        rc, out, err = self.cli("approve", self.d, "--workspace", self.ws, "--gate", waiver("opencode"), "--reason",
+                                " " + REASON)
+        self.assertEqual(rc, 2, err); self.assertIn("reason refused: it has leading or trailing spaces", err)
 
-    def test_the_waiver_gate_is_the_human_gate(self):
+    def test_the_waiver_gate_records_with_a_reason_from_stdin(self):
         self.run_both()
         se.approve("eval_set", self.spec, self.ws)
-        before = state(self.approvals)
-        argv = ("approve", self.d, "--workspace", self.ws, "--gate", waiver("hermes"))
-        with mock.patch.object(A, "is_tty", lambda fd: False):
-            rc, out, err = self.cli(*argv)
-        self.assertEqual(rc, 2, err)
-        self.assertEqual(err.splitlines()[0], "approve needs a human at an interactive terminal (stdin is not a TTY)")
-        procs = {T.TEST_START_PID: (77, "python3", "/usr/bin/python3"), 77: (1, "claude.exe", "/opt/claude.exe"),
-                 1: (0, "launchd", "/sbin/launchd")}
-        self.typing(REASON, read_proc=A.table_reader(procs))
-        rc, out, err = self.cli(*argv)
-        self.assertEqual(rc, 2, err)
-        self.assertIn("agent process in the parent chain: claude.exe (pid 77)", err)
-        self.typing(REASON, environ=dict(T.AGENT_ENV, CLAUDECODE="1"))
-        rc, out, err = self.cli(*argv)
-        self.assertEqual(rc, 2, err); self.assertIn("agent environment variables are set: CLAUDECODE", err)
-        self.assertEqual(self.asked("reason"), []); self.assertEqual(state(self.approvals), before)
         self.typing(REASON)
-        rc, out, err = self.cli(*argv)
+        rc, out, err = self.cli("approve", self.d, "--workspace", self.ws, "--gate", waiver("hermes"))
         self.assertEqual(rc, 0, err); self.assertIn("approved %s" % waiver("hermes"), out)
-        self.assertEqual(rjson(self.approvals)[waiver("hermes")]["reason"], REASON)
+        rec = rjson(self.approvals)[waiver("hermes")]
+        self.assertEqual((rec["method"], rec["kind"], rec["gate"], rec["reason"]), ("recorded", "approve", waiver("hermes"),
+                                                                                    REASON))
+        self.assertEqual(self.asked(), [A.REASON_PROMPT])
 
 
 class TestRegistration(Cov):
@@ -317,7 +305,6 @@ class TestRegistration(Cov):
         self.assertIn("coverage-missing:opencode", msg); self.assertIn("coverage-missing:hermes", msg)
         self.assertNotIn("coverage-missing:claude", msg); self.assertNotIn("coverage-missing:codex", msg)
         self.assertIn("coverage_waiver:<tool>", msg)
-        self.assertEqual(self.asked("challenge"), [])
         self.assertFalse(os.path.exists(os.path.join(self.ws, "registration.json")))
 
     def test_registration_recomputes_coverage_and_never_reads_it_from_gate_json(self):
@@ -358,7 +345,6 @@ class TestRegistration(Cov):
     def refused(self):
         del self.events[:]
         with self.assertRaises(se.EvalError) as cm: se.register(self.spec, self.ws)
-        self.assertEqual(self.asked("challenge"), [])
         self.assertFalse(os.path.exists(os.path.join(self.ws, "registration.json")))
         return str(cm.exception)
 
@@ -399,7 +385,7 @@ class TestRegistration(Cov):
                 msg = self.refused()
                 self.assertIn("tool_coverage is malformed", msg)
 
-    def test_an_old_benchmark_without_stored_tool_coverage_and_with_waivers_reaches_the_signing_step(self):
+    def test_an_old_benchmark_without_stored_tool_coverage_and_with_waivers_is_recorded(self):
         n = self.run_both(); self.waive("opencode"); self.waive("hermes")
         bench, gate = self.report(n)
         self.assertEqual(gate["problems"], [])
@@ -407,10 +393,10 @@ class TestRegistration(Cov):
         del self.events[:]
         rec = se.register(self.spec, self.ws)
         self.assertEqual(rec["approval"], "auto")
-        self.assertEqual(len(self.asked("challenge")), 1)
+        self.assertEqual(rec["signed"]["method"], "recorded")
         self.assertEqual(rjson(os.path.join(self.ws, "registration.json")), rec)
 
-    def test_the_signing_summary_lists_each_required_tools_coverage_and_each_waivers_principal_and_reason(self):
+    def test_the_register_summary_lists_each_required_tools_coverage_and_each_waivers_principal_and_reason(self):
         n = self.run_both(); self.waive("opencode"); self.waive("hermes", reason="Hermes has no engine yet")
         self.report(n)
         del self.events[:]
@@ -422,9 +408,9 @@ class TestRegistration(Cov):
                           "register coverage opencode=%s (waived by test-approver, reason: %s)" % (NOT_AVAILABLE, REASON),
                           "register coverage hermes=%s (waived by test-approver, reason: Hermes has no engine yet)"
                           % NOT_AVAILABLE])
-        first_challenge = next(i for i, (e, p) in enumerate(self.events) if e == "ask" and "to sign" in p)
+        summary = next(i for i, (e, s) in enumerate(self.events) if e == "show" and s.startswith("register: gate "))
         last_coverage = max(i for i, (e, s) in enumerate(self.events) if e == "show" and s.startswith("register coverage "))
-        self.assertLess(last_coverage, first_challenge)
+        self.assertLess(last_coverage, summary)
 
 
 class TestPolicy(Cov):

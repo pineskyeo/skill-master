@@ -2,9 +2,9 @@
 
 A project install writes a unit's generated wrappers (or a skill folder) under --target after every check passed, with a
 dry run, collision refusal, a backup before overwrite and no change on a repeat run. A user-scope install writes only
-$HOME/.claude/agents/<name>.md for a registered agent, after a signature of the manifest hash. Every HOME here is a temp
-folder, every signature uses the throwaway test key of tests/test_skill_eval.py, subprocess is patched for the whole
-module, and every record fixture is built by test code in a temp folder. ASCII only."""
+$HOME/.claude/agents/<name>.md for a registered agent, after a recorded approval of the manifest hash. Every HOME here is
+a temp folder, every approval is recorded by the test approver of tests/test_skill_eval.py, subprocess is patched for
+the whole module, and every record fixture is built by test code in a temp folder. ASCII only."""
 import contextlib, hashlib, io, json, os, re, shutil, subprocess, sys, tempfile, unittest
 from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -94,8 +94,8 @@ class Base(T.Base):
 
 
 def register_agent_at(case, agent, ws, runs):
-    """A fake claude iteration, signed waivers for the other three tools, the registration gate and the record, all
-    signed by the case's test approver."""
+    """A fake claude iteration, waivers for the other three tools, the registration gate and the record, all recorded
+    by the case's test approver."""
     fake_iteration(agent, ws, runs)
     for tool in ("codex", "opencode", "hermes"):
         rc, out, err = cli("approve", agent, "--gate", "coverage_waiver:" + tool)
@@ -469,18 +469,19 @@ class TestDestinationSafety(Base):
 class TestUserScope(Base):
     def setUp(self):
         Base.setUp(self)
-        self.prompts = []
+        self.prompts, self.shown = [], []
         def read_line(prompt):
             self.prompts.append(prompt)
-            return T.type_challenge(prompt)
-        T.install_test_approver(self, read_line=read_line)
+            return T.type_reason(prompt)
+        T.install_test_approver(self, read_line=read_line, write=self.shown.append)
         self.user_dest = os.path.join(os.path.realpath(self.home), ".claude", "agents", NAME + ".md")
 
     def user(self, *extra, tools="claude", unit=None):
         return cli("install", unit or self.agent, "--scope", "user", "--tools", tools, *extra)
 
-    def challenges(self):
-        return [p for p in self.prompts if "to sign" in p]
+    def recorded(self):
+        """The install_user summaries the approver printed: one per recorded user-scope approval."""
+        return [s for s in self.shown if s.startswith("approve: gate install_user, ")]
 
     def test_other_tools_and_skills_are_refused_naming_q12(self):
         for tools in ("codex", "opencode", "hermes", "claude,codex", "claude,codex,opencode,hermes"):
@@ -499,11 +500,11 @@ class TestUserScope(Base):
         self.assertEqual(rc, 2, out + err)
         self.assertEqual((self.prompts, os.listdir(self.home)), ([], [".codex"]))
 
-    def test_an_unregistered_unit_refuses_before_the_challenge(self):
+    def test_an_unregistered_unit_refuses_before_anything_is_recorded(self):
         rc, out, err = self.user()
         self.assertEqual(rc, 2, out + err)
         self.assertIn("unregistered", err)
-        self.assertEqual(self.challenges(), [])
+        self.assertEqual(self.recorded(), [])
         self.assertFalse(os.path.lexists(os.path.join(self.home, ".claude")))
 
     def test_claude_config_dir_and_a_linked_claude_folder_refuse(self):
@@ -519,30 +520,20 @@ class TestUserScope(Base):
         self.assertEqual(rc, 2, out + err)
         self.assertIn("link", err)
         self.assertEqual(os.listdir(os.path.join(elsewhere, "agents")), [])
-        self.assertEqual(self.challenges(), [])
+        self.assertEqual(self.recorded(), [])
 
-    def test_an_unsigned_user_scope_writes_nothing(self):
+    def test_a_recorded_user_scope_install_lands_in_the_temp_home(self):
         self.register_agent()
-        del self.prompts[:]
-        with mock.patch.dict(se.APPROVER, {"it": T.gate_approver(read_line=lambda p: "WRONG\n")}):
-            rc, out, err = self.user()
-        self.assertEqual(rc, 2, out + err)
-        self.assertIn("challenge mismatch", err)
-        self.assertFalse(os.path.lexists(self.user_dest))
-        self.assertNotIn("install_user", rjson(os.path.join(self.ws, "approvals.json")))
-
-    def test_a_signed_user_scope_install_lands_in_the_temp_home(self):
-        self.register_agent()
-        del self.prompts[:]
+        del self.prompts[:], self.shown[:]
         rc, out, err = self.user("--dry-run")
         self.assertEqual(rc, 0, out + err)
-        self.assertEqual(self.challenges(), [])
+        self.assertEqual(self.recorded(), [])
         self.assertIn("registration: registered 1.0.0", out)
         self.assertIn("create " + self.user_dest, out)
         self.assertFalse(os.path.lexists(os.path.join(self.home, ".claude")))
         rc, out, err = self.user()
         self.assertEqual(rc, 0, out + err)
-        self.assertEqual(len(self.challenges()), 1)
+        self.assertEqual(len(self.recorded()), 1)
         self.assertEqual(read(self.user_dest, "rb"), self.wrapper(0))
         self.assertEqual(sorted(tree(os.path.join(self.home, ".claude"))), ["agents/%s.md" % NAME])
         rec = rjson(os.path.join(self.ws, "approvals.json"))["install_user"]
@@ -556,12 +547,26 @@ class TestUserScope(Base):
         self.assertEqual(rec["sha256"], want)
         self.assertEqual(se.APPROVER["it"].verdict(rec, "approve", "install_user", NAME, want, se.ruleset_sha256()).status,
                          "approved")
+        self.assertEqual((rec["method"], rec["kind"], rec["gate"], rec["unit"]), ("recorded", "approve", "install_user", NAME))
+        self.assertEqual(self.prompts, [])
         self.assertEqual(se.registration_state(self.agent, self.ws)[0], "registered", "the stored record keeps it valid")
-        del self.prompts[:]
+        del self.shown[:]
         rc, out, err = self.user()
         self.assertEqual(rc, 0, out + err)
         self.assertIn("no change", out.splitlines())
-        self.assertEqual(self.challenges(), [], "a repeat run writes nothing and signs nothing")
+        self.assertEqual(self.recorded(), [], "a repeat run writes nothing and records nothing")
+
+    def test_the_command_line_approver_records_a_user_scope_install_from_an_empty_account_home(self):
+        self.register_agent()
+        H.use_cli_approver(self)
+        rc, out, err = self.user()
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(read(self.user_dest, "rb"), self.wrapper(0))
+        rec = rjson(os.path.join(self.ws, "approvals.json"))["install_user"]
+        self.assertEqual((rec["method"], rec["gate"], rec["recorded_by"]),
+                         ("recorded", "install_user", se.approvals.os_user()))
+        self.assertNotIn("signature", rec)
+        self.assertEqual(os.listdir(self.account), [], "nothing is read or written under the account home")
 
     def test_a_source_changed_after_signing_refuses(self):
         self.register_agent()
@@ -570,8 +575,8 @@ class TestUserScope(Base):
 
         class Signer(object):
             def __getattr__(self, k): return getattr(real, k)
-            def sign(self, kind, gate, prepare, budget_usd=None):
-                grant = real.sign(kind, gate, prepare, budget_usd=budget_usd)
+            def sign(self, kind, gate, prepare, budget_usd=None, reason=None):
+                grant = real.sign(kind, gate, prepare, budget_usd=budget_usd, reason=reason)
                 with open(wrapper, "ab") as f: f.write(b"\nplanted\n")
                 return grant
         with mock.patch.dict(se.APPROVER, {"it": Signer()}):
@@ -585,8 +590,8 @@ class TestUserScope(Base):
 
         class Signer(object):
             def __getattr__(self, k): return getattr(real, k)
-            def sign(self, kind, gate, prepare, budget_usd=None):
-                grant = real.sign(kind, gate, prepare, budget_usd=budget_usd)
+            def sign(self, kind, gate, prepare, budget_usd=None, reason=None):
+                grant = real.sign(kind, gate, prepare, budget_usd=budget_usd, reason=reason)
                 if gate == "install_user":
                     with mock.patch.object(se, "now_iso", lambda: "2030-01-01T00:00:00Z"):
                         rc, out, err = cli("register", test.agent)
@@ -618,41 +623,29 @@ class TestUserScope(Base):
         rc, out, err = self.user()
         self.assertEqual(rc, 2, out + err)
         self.assertIn("stale", err)
-        self.assertEqual(self.challenges(), [])
+        self.assertEqual(self.recorded(), [])
         self.assertFalse(os.path.lexists(self.user_dest))
 
 
-class TestCliHumanGate(Base, H.Cli):
+class TestCliUserScope(Base, H.Cli):
+    """`install --scope user` in a child process with stdin from /dev/null (not a TTY), an empty temp HOME and no ssh
+    tool. The recorded install itself is in TestUserScope: a registered install stats the protected roots under the
+    password-database home (engine/install.py), which the child's sentinel counts as a touch."""
     def setUp(self):
         Base.setUp(self)
         self.cli_setup()
 
-    def test_a_non_tty_subprocess_is_refused_and_writes_nothing(self):
-        env = self.child_env(drop=("CLAUDE_CONFIG_DIR",))
+    def test_an_unregistered_agent_is_refused_and_nothing_is_written(self):
         p = T.REAL_POPEN([sys.executable, "-B", "skill_eval.py", "install", self.agent, "--scope", "user", "--tools",
                           "claude"], cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                         env=env)
+                         env=self.child_env())
         out, err = p.communicate(timeout=60)
-        err = err.decode("utf-8", "replace")
-        self.assertEqual(p.returncode, 2, err)
-        self.assertEqual(err.splitlines()[0], H.NOT_TTY % "approve", err)
+        rc, err = p.returncode, err.decode("utf-8", "replace")
+        self.assertEqual(rc, 2, err)
+        self.assertIn("unregistered", err)
         self.assertEqual(os.listdir(self.chome), [])
         self.assertFalse(os.path.exists(os.path.join(self.ws, "approvals.json")))
         self.assert_nothing_started()
-
-    def test_an_agent_ancestor_is_refused_in_process(self):
-        A = H.gate_module()
-        H.require_agent_ancestor(self)
-        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CONFIG_DIR"}
-        out, err = io.StringIO(), io.StringIO()
-        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(A, "is_tty", lambda fd: True), \
-                mock.patch.dict(se.APPROVER, {"it": A.cli_approver()}), \
-                mock.patch.object(A.Approver, "key_problems", H.sentinel), \
-                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = se.main(["install", self.agent, "--scope", "user", "--tools", "claude"])
-        self.assertEqual(rc, 2, err.getvalue())
-        self.assertIn("approve " + H.ANCESTOR, err.getvalue())
-        self.assertFalse(os.path.lexists(os.path.join(self.home, ".claude")))
 
 
 class TestAgentRecords(Base):
@@ -744,8 +737,8 @@ class TestAgentRecords(Base):
 
 
 PLAN_COVERAGE = ("registration coverage: registration needs a graded run on every tool of coverage_required (%s) or a "
-                 "signed coverage_waiver:<tool> (G1, plan.md:1136); `agent report`, `agent loop` and `register` read the "
-                 "agent's signed coverage waivers, so a tool that did not run stays coverage-missing unless its waiver "
+                 "recorded coverage_waiver:<tool> (G1, plan.md:1136); `agent report`, `agent loop` and `register` read the "
+                 "agent's recorded coverage waivers, so a tool that did not run stays coverage-missing unless its waiver "
                  "verifies")
 REGISTRY_SCHEMA = os.path.join(ROOT, "schemas", "registry.schema.json")
 RECORD_HASHES = ("benchmark_sha256", "skill_sha256", "eval_set_sha256", "skill_md_sha256", "ruleset_sha256")
@@ -808,20 +801,15 @@ class TestIndexAndHub(Base):
         self.assertEqual(badge(page, "registration"), "stale (benchmark_sha256 changed)")
 
     def test_an_agent_record_that_does_not_verify_now_stays_out_of_the_registry(self):
-        from engine import approvals as A
         self.register_agent()
         rp, p = os.path.join(self.ws, "registration.json"), os.path.join(self.agent, "AGENT.md")
         good, agent_md = rjson(rp), read(p)
-        k = T.shared_keys()
-        other, _ = T.make_key(tempfile.mkdtemp(dir=k["dir"]), "intruder", T.TEST_PASSPHRASE)
-        data = A.payload("register", "registration", NAME, se.registration_hash(good), good["signed"]["ruleset_sha256"],
-                         good["signed"]["at"])
-        foreign = dict(good, signed=dict(good["signed"], signature=A.sign_payload(
-            T.keygen_runner(k["dir"]), other, data, passphrase=T.TEST_PASSPHRASE)))
+        foreign = dict(good, signed=dict(good["signed"], unit="another-agent"))
         cases = (("no record", lambda: os.remove(rp), "unregistered"),
                  ("tampered field", lambda: wjson(rp, dict(good, registered_at="2026-01-01T00:00:00Z")),
                   "invalid (the record does not match its signature)"),
-                 ("signer not the approver", lambda: wjson(rp, foreign), "invalid (the register signature does not verify)"),
+                 ("a register record of another unit", lambda: wjson(rp, foreign),
+                  "invalid (the register signature does not verify)"),
                  ("AGENT.md changed", lambda: write(p, agent_md + "\nMore.\n"), "stale (skill_sha256 changed)"))
         for label, change, want in cases:
             with self.subTest(label):

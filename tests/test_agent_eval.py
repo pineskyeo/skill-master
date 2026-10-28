@@ -1,6 +1,6 @@
 """Unit B3: agent evaluation per tool (skill_eval.py agent, engine/agent_eval.py, engine/normalize/). Every engine and
-grader here is faked: subprocess is patched to fail for the whole module, and the human gate signs with the throwaway
-test key of tests/test_skill_eval.py (keygen_runner starts only /usr/bin/ssh-keygen on that key's folder)."""
+grader here is faked: subprocess is patched to fail for the whole module, and approvals are recorded by the test
+approver of tests/test_skill_eval.py, which starts no process."""
 import contextlib, hashlib, io, json, os, shutil, subprocess, sys, tempfile, unittest
 from unittest import mock
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -8,7 +8,6 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "tests"))
 import eva, skill_eval as se
 import test_skill_eval as T
-from engine import approvals
 
 FIXTURES = os.path.join(ROOT, "tests", "fixtures")
 AGENT_FIXTURE = os.path.join(FIXTURES, "agents", "code-reviewer-v2")
@@ -76,7 +75,7 @@ REQUIREMENTS = "Review the repository read-only and cite file:line evidence for 
 
 def open_gates(agent_dir, ws):
     """What an agent live start needs (K1): <ws>/requirements.md, a current requirements_eval_set approval and a current
-    rule_review decision, each signed by the case's test approver when it does not verify yet."""
+    rule_review decision, each recorded by the case's test approver when it does not verify yet."""
     os.makedirs(ws, exist_ok=True)
     if not os.path.isfile(os.path.join(ws, "requirements.md")):
         with open(os.path.join(ws, "requirements.md"), "w", encoding="utf-8") as f:
@@ -417,8 +416,8 @@ class AgentBase(T.Base):
             def __getattr__(self, k):
                 return getattr(real, k)
 
-            def sign(self, kind, gate, prepare, budget_usd=None):
-                grant = real.sign(kind, gate, prepare, budget_usd=budget_usd)
+            def sign(self, kind, gate, prepare, budget_usd=None, reason=None):
+                grant = real.sign(kind, gate, prepare, budget_usd=budget_usd, reason=reason)
                 if kind == "live":
                     change()
                 return grant
@@ -558,12 +557,12 @@ class TestValidatePlan(AgentBase):
 
 
 class TestLiveRefusals(AgentBase):
-    def refused(self, *argv, profile="personal-mac", budget="1", tty=True):
+    def refused(self, *argv, profile="personal-mac", budget="1"):
         fake = FakeAgentExec()
         args = ["agent", "run", self.agent, "--workspace", self.ws, "--live", "--runs", "1"]
         if profile: args += ["--auth-profile", profile]
         if budget: args += ["--budget-usd", budget]
-        with mock.patch.object(se, "live_exec", fake), mock.patch.object(approvals, "is_tty", lambda fd: tty):
+        with mock.patch.object(se, "live_exec", fake):
             rc, out, err = cli(*(args + list(argv)))
         self.assertEqual(rc, 2, out + err)
         self.assertEqual((fake.calls, fake.grader_calls), ([], []))
@@ -571,12 +570,11 @@ class TestLiveRefusals(AgentBase):
         self.assertFalse(se._LIVE["on"])
         return err
 
-    def test_refusals_before_signing(self):
+    def test_refusals_before_recording(self):
         self.assertIn(se.NO_BUDGET, self.refused("--engines", "claude", budget=None))
         self.assertIn(se.PROFILE_REQUIRED, self.refused("--engines", "claude", profile=None))
         self.assertIn("refused in API-key mode", self.refused("--engines", "claude", profile="company"))
         self.assertIn("--strict-budget (default)", self.refused("--engines", "codex", "--price", "codex=1,10"))
-        self.assertIn("is not a TTY", self.refused("--engines", "claude", tty=False))
         self.assertIn("exceeds budget", self.refused("--engines", "claude", budget="0.1"))
 
     def test_extra_args_may_not_pick_another_agent(self):

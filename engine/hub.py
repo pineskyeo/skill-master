@@ -4,7 +4,7 @@ five the escaper writes, no JSON or CSS escape, no local path, no URL, no script
 the site), and writes the site only when the scan found nothing. Standard library only; no import of eva or skill_eval; no process, socket or git."""
 import os, posixpath, re
 
-from engine import registry
+from engine import approvals, registry
 from engine.primitives import script_denylist
 
 TEMPLATES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hub_templates")
@@ -115,7 +115,7 @@ def machine_waiver_html(view):
     rec = mw.get("record") if isinstance(mw, dict) else None
     if not isinstance(rec, dict): return "<li>none</li>"
     return ('<li data-machine-waiver="%s">machine waiver <code>%s</code> by %s, tools %s, expires %s: %s</li>'
-            % (esc(str(mw.get("sha256"))), esc(str(mw.get("sha256"))), esc(shown(rec.get("principal"), "principal")),
+            % (esc(str(mw.get("sha256"))), esc(str(mw.get("sha256"))), esc(shown(approvals.decided_by(rec), "principal")),
                esc(",".join(str(t) for t in rec.get("tools") or [])), esc(str(rec.get("expires"))),
                esc(shown(rec.get("reason"), "reason"))))
 

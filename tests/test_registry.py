@@ -2,9 +2,11 @@
 SemVer version and a path relative to its own folder; `registration_state` verifies it now; `eva.py index` writes
 registry.json only from registrations that verify and lists every unit in INDEX.md with its registration state.
 
-Signing uses only the throwaway test key of tests/test_skill_eval.py under /tmp; subprocess is patched for the whole
-module and only that key's runner starts /usr/bin/ssh-keygen. register is reached only as a Python call on temp
-fixtures with fake engines. Every record fixture is built here in a temp folder. ASCII only."""
+Approvals are recorded by the test approver of tests/test_skill_eval.py, which starts no process; subprocess is patched
+for the whole module. register is reached only as a Python call on temp fixtures with fake engines. Every record
+fixture is built here in a temp folder. The registration schema is checked as the engine applies it
+(skill_eval.registration_schema_errors: a recorded record in a record slot is checked by engine/approvals.py). ASCII
+only."""
 import contextlib, importlib, inspect, io, json, os, random, shutil, subprocess, sys, unittest
 from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -87,7 +89,8 @@ class Reg(C.Cov):
     def refused(self):
         del self.events[:]
         with self.assertRaises(se.EvalError) as cm: se.register(self.spec, self.ws)
-        self.assertEqual(self.asked("challenge"), [], "refused before the challenge")
+        self.assertFalse([e for e in self.events if e[0] == "show" and e[1].startswith("register: gate ")],
+                         "refused before the record")
         return str(cm.exception)
 
 
@@ -145,7 +148,7 @@ class TestRecord(Reg):
         self.assertEqual(rec["benchmark_sha256"], se.gate_hash("iteration-1", self.spec, self.ws))
         self.assertEqual(rec["eval_set_sha256"], se.gate_hash("eval_set", self.spec, self.ws))
         self.assertEqual(rec["skill_sha256"], se.skill_tree_hash(self.d))
-        self.assertEqual(errors(REGISTRATION_SCHEMA, rec), [])
+        self.assertEqual(se.registration_schema_errors(rec), [])
         self.assertEqual(set(se.REGISTRATION_SIGNED), set(rec) - {"signed"}, "every field but the signature is signed")
         self.assertEqual(self.state(), ("registered", "", rec))
 
@@ -322,15 +325,19 @@ class TestVersionRefusals(Reg):
 class TestSchemas(Reg):
     def test_the_registration_schema_is_closed_and_refuses_absolute_paths_and_bad_versions(self):
         rec = self.registered()
-        self.assertEqual(errors(REGISTRATION_SCHEMA, rec), [])
-        self.assertEqual(errors(REGISTRATION_SCHEMA, {k: v for k, v in rec.items() if k != "signed"}), [])
+        check = se.registration_schema_errors
+        self.assertEqual(check(rec), [])
+        self.assertEqual(check({k: v for k, v in rec.items() if k != "signed"}), [])
+        waiver = rec["approvals"]["coverage_waiver:hermes"]
         for bad in (dict(rec, skill_path="/abs/branch-setup"), dict(rec, skill_path="~/branch-setup"),
                     dict(rec, version="v1.0.0"), dict(rec, version="1.0"), dict(rec, registration_format=1),
                     dict(rec, kind="tool"), dict(rec, extra=1), dict(rec, approvals={"eval_set": rec["signed"]}),
                     dict(rec, approvals={"coverage_waiver:hermes": rec["signed"]}),
+                    dict(rec, approvals={"coverage_waiver:opencode": waiver}), dict(rec, signed=waiver),
+                    dict(rec, approval=dict(rec["signed"])), dict(rec, signed=dict(rec["signed"], principal="x")),
                     {k: v for k, v in rec.items() if k != "approvals"},
                     {k: v for k, v in rec.items() if k != "version"}):
-            self.assertTrue(errors(REGISTRATION_SCHEMA, bad), bad)
+            self.assertTrue(check(bad), bad)
 
     def test_the_registry_schema_validates_the_index_output_and_is_closed(self):
         self.registered()

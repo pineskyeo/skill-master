@@ -1,7 +1,9 @@
 """skill_eval.py tests. Every engine and grader here is mocked: subprocess is patched to fail for the whole module,
-so no claude/codex CLI and no model is ever called. The human gate signs with a throwaway test key through
-keygen_runner, which starts only /usr/bin/ssh-keygen on files under the test-key folder."""
-import atexit, contextlib, io, json, os, re, shutil, subprocess, sys, tempfile, unittest
+so no claude/codex CLI and no model is ever called. The test approver records unsigned approvals from an empty home
+(no approver key, no signers file) with a runner that refuses every process. Only signed records from before unit N1
+are made with a throwaway test key, through keygen_runner, which starts only /usr/bin/ssh-keygen on files under the
+test-key folder."""
+import atexit, contextlib, io, json, os, shutil, subprocess, sys, tempfile, unittest
 from unittest import mock
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -15,10 +17,10 @@ def _forbidden(*a, **k):
 
 TEST_PRINCIPAL = "test-approver"
 TEST_PASSPHRASE = "throwaway-test-passphrase"
-TEST_START_PID = 4242
-TEST_PROCS = {TEST_START_PID: (1, "python3", "/usr/bin/python3"), 1: (0, "launchd", "/sbin/launchd")}
-NO_IDENTITIES = (1, b"The agent has no identities.\n", b"")
-AGENT_ENV = {"SSH_AUTH_SOCK": "/tmp/gate-test-agent.sock"}  # never a real socket: ssh_add is always faked
+OLD_AT = "2026-10-20T09:41:00Z"
+
+def no_process(argv, input=None, new_session=True, timeout=30, env=None):
+    raise AssertionError("the approver started %r; a recorded approval starts no process" % (argv[:1],))
 
 def keygen_runner(root, calls=None):
     """The approver's runner in tests: /usr/bin/ssh-keygen only, every -f inside root, started with the Popen captured
@@ -67,13 +69,32 @@ def shared_keys():
         _KEYS.update(dir=d, key=key, pub=pub, signers=signers)
     return _KEYS
 
+def sign_bytes(key, data, passphrase=TEST_PASSPHRASE):
+    """The ssh-keygen -Y sign signature over data in the approval namespace, as signed records carried before N1."""
+    from engine import approvals
+    k = shared_keys()
+    path = os.path.join(tempfile.mkdtemp(dir=k["dir"]), "payload")
+    with open(path, "wb") as f: f.write(data)
+    rc, _, err = keygen_runner(k["dir"])([approvals.SSH_KEYGEN, "-Y", "sign", "-n", approvals.NAMESPACE, "-f", key, path],
+                                         input=(passphrase + "\n").encode("ascii"))
+    if rc != 0: raise AssertionError("ssh-keygen could not sign: %r" % err)
+    return read(path + ".sig")
+
+def signed_record(kind, gate, unit, sha256, rules, at=OLD_AT, budget_usd=None, reason=None, key=None,
+                  principal=TEST_PRINCIPAL):
+    """A method ssh-sig record signed with the throwaway key (or key), the record form every gate wrote before N1."""
+    from engine import approvals
+    data = approvals.payload(kind, gate, unit, sha256, rules, at, budget_usd, reason)
+    rec = {"format": 1, "method": "ssh-sig", "sha256": sha256, "ruleset_sha256": rules, "principal": principal, "at": at,
+           "signature": sign_bytes(key or shared_keys()["key"], data)}
+    if reason is not None: rec["reason"] = reason
+    return rec
+
 TEST_REASON = "test fixture: this tool has no engine in the test"
 
-def type_challenge(prompt):
+def type_reason(prompt):
     from engine import approvals
-    if prompt == approvals.REASON_PROMPT: return TEST_REASON + "\n"
-    m = re.search(r"type ([A-Z0-9]{6}) to sign", prompt)
-    return m.group(1) + "\n" if m else "\n"
+    return TEST_REASON + "\n" if prompt == approvals.REASON_PROMPT else "\n"
 
 def coverage_missing(tool, status, waiver="missing"):
     return "coverage-missing:%s: dynamic eval %s, waiver %s" % (tool, status, waiver)
@@ -88,21 +109,33 @@ NO_COVERAGE_MISSING = [coverage_missing(t, NO_COVERAGE_ENTRY) for t in eva.TOOLS
 def waive_coverage(spec, ws, tools=tuple(t for t in eva.TOOLS if t != "claude")):
     for t in tools: se.approve("coverage_waiver:" + t, spec, ws)
 
+_EMPTY = {}
+
+def empty_home():
+    """An empty temp folder as the approver's home (no approver key, no signers file), removed at exit."""
+    if not _EMPTY:
+        _EMPTY["dir"] = tempfile.mkdtemp(prefix="gate-home-")
+        atexit.register(shutil.rmtree, _EMPTY["dir"], True)
+    return _EMPTY["dir"]
+
 def gate_approver(**kw):
+    """The test approver: records approvals by TEST_PRINCIPAL from an empty home; any process start fails the test."""
     from engine import approvals
-    k = shared_keys()
-    args = dict(signers=k["signers"], key=k["key"], home=k["dir"], environ=AGENT_ENV, read_proc=approvals.table_reader(TEST_PROCS),
-                start_pid=TEST_START_PID, ssh_add=lambda: NO_IDENTITIES, read_line=type_challenge, write=lambda s: None,
-                run=keygen_runner(k["dir"]), passphrase=TEST_PASSPHRASE)
+    home = empty_home()
+    args = dict(signers=os.path.join(home, ".config", "skill-master", "approvers.allowed_signers"), home=home,
+                run=no_process, read_line=type_reason, write=lambda s: None, recorded_by=TEST_PRINCIPAL)
     args.update(kw)
     return approvals.Approver(**args)
 
+def signed_approver(**kw):
+    """gate_approver that can verify signed records: the throwaway signers file and the ssh-keygen runner."""
+    k = shared_keys()
+    return gate_approver(**dict(dict(signers=k["signers"], home=k["dir"], run=keygen_runner(k["dir"])), **kw))
+
 def install_test_approver(case, **kw):
-    """Every in-process approve, register and --live start in this case signs with the test key; the TTY probe reads true."""
-    from engine import approvals
-    for pt in (mock.patch.object(approvals, "is_tty", lambda fd: True),
-               mock.patch.dict(se.APPROVER, {"it": gate_approver(**kw)})):
-        pt.start(); case.addCleanup(pt.stop)
+    """Every in-process approve, register and --live start in this case records through gate_approver(**kw)."""
+    pt = mock.patch.dict(se.APPROVER, {"it": gate_approver(**kw)})
+    pt.start(); case.addCleanup(pt.stop)
 
 def setUpModule():
     for name in ("run", "Popen", "call", "check_call", "check_output"):
@@ -673,7 +706,7 @@ class TestApprovalsAndRegistration(Base):
         spec = self.run_report(True)
         with self.assertRaises(se.EvalError): se.register(spec, self.ws)
         se.approve("registration", spec, self.ws)
-        self.assertEqual(se.register(spec, self.ws)["approval"]["principal"], TEST_PRINCIPAL)
+        self.assertEqual(se.register(spec, self.ws)["approval"]["recorded_by"], TEST_PRINCIPAL)
 
 class TestLoop(Base):
     def spec(self, **kw):

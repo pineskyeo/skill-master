@@ -158,7 +158,7 @@ The validator supports a subset of JSON Schema 2020-12 and fails closed. It refu
 
 Each label is hashed with the file's bytes. Labels are relative, so one bundle hashes the same in any folder. The hash moves when any byte of a hashed file changes, and when a file in a hashed tree is added, removed or renamed. It does not move for `eva.py`, `skill_eval.py`, `engine/`, `tests/` or the other `policy/` files, such as `policy/auth-profiles.json` and `policy/install.json`. With `--rules DIR`, the files of DIR take the place of `rules/` in the hash.
 
-`skill_eval.ruleset_sha256` computes the same hash on every call. Approval signatures cover it, so a change of the hash makes existing approvals read stale ([Approval gates](approval-gates.md)). The loop stops with `rules-changed` when a builder call moves it, and `drift` lists units recorded under an older hash ([Install, versions and drift](install.md)).
+`skill_eval.ruleset_sha256` computes the same hash on every call. Every approval record binds it, so a change of the hash makes existing approvals read stale ([Approval gates](approval-gates.md)). The loop stops with `rules-changed` when a builder call moves it, and `drift` lists units recorded under an older hash ([Install, versions and drift](install.md)).
 
 ## The English-only rule
 
@@ -184,7 +184,7 @@ Each tool's permission row has its own limit:
 - OpenCode (gates.md G3): the recorded permission key list stays `complete: false` in `targets/opencode.json`. A wrapper that grants exactly the needed capabilities still gets needs-review, never PASS.
 - Hermes Agent (gates.md G4): no verified per-agent permission format exists, so `targets/hermes.json` sets `fixed: fail`. `parity-permissions-hermes` fails for every agent. The rule has severity `fail`, so the row is must and every agent's verdict is FAIL under the default bundle. `eva.py generate` writes only `SOUL.md` for Hermes, because the `config.yaml` keys are UNVERIFIED.
 
-Only `claude` and `codex` have an engine in `skill_eval.py`. Registration therefore needs signed coverage waivers for OpenCode and Hermes ([Approval gates](approval-gates.md)).
+Only `claude` and `codex` have an engine in `skill_eval.py`. Registration therefore needs recorded coverage waivers for OpenCode and Hermes ([Approval gates](approval-gates.md)).
 
 ## Scoring and the category floor
 

@@ -1,15 +1,16 @@
 """B4: `skill_eval.py agent loop` improves an AGENT.md v2 agent with a builder that may change only AGENT.md. The hook
 cases run the exact command the agent builder's --settings object names, as a subprocess with the payload on stdin.
 Builders, engines and graders are fakes (plain callables, or AgentBuilder and the engines with a fake exec_fn); no
-claude, codex, opencode or hermes CLI is started. The ruleset root is a temp copy of the bundle, and the human gate signs
-with the throwaway test key of tests/test_skill_eval.py. This file stays ASCII: the Korean input is built from escapes."""
+claude, codex, opencode or hermes CLI is started. The ruleset root is a temp copy of the bundle, and approvals are
+recorded by the test approver of tests/test_skill_eval.py. This file stays ASCII: the Korean input is built from
+escapes."""
 import contextlib, io, json, os, re, shutil, subprocess, sys, unittest
 from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import eva, skill_eval as se
 import test_skill_eval as T
 import test_agent_eval as AE
-from engine import approvals, generate, writable
+from engine import generate, writable
 
 ROOT = T.ROOT
 GATE = os.path.join(ROOT, "claude_bash_gate.py")
@@ -700,9 +701,9 @@ class Cli(Base):
             def __getattr__(self, k):
                 return getattr(real, k)
 
-            def sign(self, kind, gate, prepare, budget_usd=None):
+            def sign(self, kind, gate, prepare, budget_usd=None, reason=None):
                 if kind != "live":
-                    return real.sign(kind, gate, prepare, budget_usd=budget_usd)
+                    return real.sign(kind, gate, prepare, budget_usd=budget_usd, reason=reason)
                 if not after:
                     change()
                 grant = real.sign(kind, gate, prepare, budget_usd=budget_usd)
@@ -733,11 +734,10 @@ class LoopExec(AE.FakeAgentExec):
 
 
 class TestCliRefusals(Cli):
-    def refused(self, *extra, tty=True, **kw):
+    def refused(self, *extra, **kw):
         fake = LoopExec(allowed)
         before = tree(self.agent)
-        with mock.patch.object(approvals, "is_tty", lambda fd: tty):
-            rc, out, err = self.live(fake, *extra, **kw)
+        rc, out, err = self.live(fake, *extra, **kw)
         self.assertEqual(rc, 2, out + err)
         self.assertEqual((fake.calls, fake.grader_calls, fake.builder_calls), ([], [], []))
         self.assertFalse(os.path.exists(self.ws))
@@ -745,11 +745,10 @@ class TestCliRefusals(Cli):
         self.assertEqual(tree(self.agent), before)
         return err
 
-    def test_refusals_before_signing(self):
+    def test_refusals_before_recording(self):
         self.assertIn(se.NO_BUDGET, self.refused(budget=None))
         self.assertIn(se.PROFILE_REQUIRED, self.refused(profile=None))
         self.assertIn("claude builder: refused in API-key mode", self.refused(profile="company"))
-        self.assertIn("is not a TTY", self.refused(tty=False))
 
     def test_a_link_that_leaves_the_agent_folder_is_refused(self):
         write(os.path.join(self.tmp, "outside.md"), "x\n")
@@ -787,7 +786,7 @@ class TestCliRefusals(Cli):
             rc, out, err = self.live(fake)
         self.assertEqual(rc, 2, out + err)
         self.assertIn("--builder-prompt %s changed since it was read" % self.prompt, err)
-        self.assertNotIn("signed agent loop", err)
+        self.assertNotIn("recorded agent loop", err)
         self.assertEqual((fake.calls, fake.builder_calls), ([], []))
 
 
@@ -816,7 +815,7 @@ class TestCliSigned(Cli):
         self.assertEqual(rc, 3, out + err)
         r = json.loads(out.strip().splitlines()[-1])
         self.assertEqual((r["status"], r["iteration"], r["problems"]), ("builder-wrote-outside", 1, [SCENARIO]))
-        self.assertIn("signed agent loop --live", err)
+        self.assertIn("recorded agent loop --live by %s" % T.TEST_PRINCIPAL, err)
         self.assertEqual(len(fake.calls), 1)
         self.assertEqual(len(fake.grader_calls), 1)
         (call,) = fake.builder_calls
@@ -867,7 +866,7 @@ class TestCliSigned(Cli):
         with self.before_signing(edit_and_approve):
             rc, out, err = self.live(fake, "--max-iterations", "1")
         self.assertEqual(rc, 3, out + err)
-        self.assertIn("signed agent loop --live", err)
+        self.assertIn("recorded agent loop --live", err)
         cmd = fake.calls[0]["cmd"]
         self.assertTrue(any(new_text in x for x in cmd), cmd)
         self.assertFalse(any(old_text in x for x in cmd), cmd)

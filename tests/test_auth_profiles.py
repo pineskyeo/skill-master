@@ -672,13 +672,13 @@ class TestBindingAndHashes(Profiled):
         self.edit_profiles(lambda d: d["profiles"]["company"].update(label="Company, edited"))
         self.assertNotEqual(se.live_plan_hash(a, spec, self.ws), before)
 
-    def test_a_profile_edit_between_signing_and_start_refuses(self):
+    def test_a_profile_edit_between_recording_and_start_refuses(self):
         """spend.API_KEY_REFUSED is patched to () so the stub Claude stands in for a capped engine: a company start that
-        gets signed has no route but the CLI."""
-        def edit_then_type(prompt):
-            self.edit_profiles(lambda d: d["profiles"]["company"].update(label="Company, edited"))
-            return T.type_challenge(prompt)
-        T.install_test_approver(self, read_line=edit_then_type)
+        gets recorded has no route but the CLI. The edit lands when the approver prints the --live summary."""
+        def edit_on_summary(line):
+            if " --live: gate " in line:
+                self.edit_profiles(lambda d: d["profiles"]["company"].update(label="Company, edited"))
+        T.install_test_approver(self, write=edit_on_summary)
         with mock.patch.object(spend, "API_KEY_REFUSED", ()), mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": KEY}), \
                 mock.patch.object(se, "live_exec", T._forbidden):
             rc, _, err = self.cli("run", self.d, "--workspace", self.ws, "--live", "--auth-profile", "company",

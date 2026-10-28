@@ -3,8 +3,9 @@ current requirements and eval_set approvals) and a current rule_review decision 
 prints those gates; and the agent parts B6 and S1 built (coverage waivers, the machine waiver, the registration approval
 that names the report problems, the format-2 kind agent record, pending and the batch) are pinned.
 
-Every signature uses the throwaway test key of tests/test_skill_eval.py, HOME is the temp HOME of its Base, the machine id
-is a fake, subprocess is patched for the whole module, and every engine, grader and builder is a fake. ASCII only."""
+Every approval is recorded by the test approver of tests/test_skill_eval.py, HOME is the temp HOME of its Base, the
+machine id is a fake, subprocess is patched for the whole module, and every engine, grader and builder is a fake. ASCII
+only."""
 import contextlib, io, json, os, re, shutil, subprocess, sys, tempfile, unittest
 from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -111,7 +112,7 @@ class TestLiveGate(Gates):
         rc, out, err, fake = self.run_live()
         self.assertEqual(rc, 2, out + err)
         self.refused(err, "agent run --live refused: ", NO_REVIEW, NO_APPROVALS)
-        self.assertNotIn("signed agent run", err)
+        self.assertNotIn("recorded agent run", err)
         self.assertEqual(fake.calls, [])
         self.assertFalse(se._LIVE["on"])
 
@@ -232,10 +233,9 @@ class TestLiveGate(Gates):
         path = os.path.join(self.ws, "approvals.json")
         data = rjson(path)
         rec = data[COMBINED]
-        signed = A.payload("approve", COMBINED, NAME, rec["sha256"], rec["ruleset_sha256"], rec["at"])
-        data[COMBINED] = dict(rec, signature=A.sign_payload(T.keygen_runner(k["dir"]), other, signed,
-                                                            passphrase=T.TEST_PASSPHRASE))
+        data[COMBINED] = T.signed_record("approve", COMBINED, NAME, rec["sha256"], rec["ruleset_sha256"], key=other)
         wjson(path, data)
+        T.install_test_approver(self, signers=k["signers"], run=T.keygen_runner(k["dir"]))
         self.assertEqual(self.verdict(COMBINED), "invalid")
         rc, out, err, fake = self.run_live()
         self.assertEqual(rc, 2, out + err)
@@ -348,12 +348,12 @@ class TestPlan(Gates):
         self.assertEqual(line(out, GATES_LINE), GATES_LINE + "rule-review: fail: rule_review missing (2 finding(s)); "
                          "approvals: fail: requirements_eval_set missing, requirements missing, eval_set missing")
 
-    def test_the_plan_reads_approved_after_signing_and_keeps_every_earlier_line_first(self):
+    def test_the_plan_reads_approved_after_recording_and_keeps_every_earlier_line_first(self):
         self.requirements()
         self.approve(COMBINED, "rule_review", "coverage_waiver:codex")
         out = self.plan()
         self.assertIn("combined approval gate: requirements_eval_set=approved by %s" % T.TEST_PRINCIPAL, out)
-        self.assertIn("rule review (English-only / parity needs-review findings): RECORDED (signed by %s)"
+        self.assertIn("rule review (English-only / parity needs-review findings): RECORDED (by %s)"
                       % T.TEST_PRINCIPAL, out)
         self.assertIn("codex=approved by %s" % T.TEST_PRINCIPAL, line(out, "coverage waivers: "))
         self.assertEqual(line(out, GATES_LINE), GATES_LINE + "rule-review: pass; approvals: pass")
@@ -563,7 +563,7 @@ class TestRegistration(Gates):
         self.assertIn("registration needs `approve --gate registration` (stale", err)
         self.assertFalse(os.path.exists(os.path.join(self.ws, "registration.json")))
 
-    def test_the_record_command_refuses_without_a_signature(self):
+    def test_the_record_command_refuses_without_a_recorded_registration_approval(self):
         self.named_iteration()
         rc, out, err = AE.cli("register", self.agent)
         self.assertEqual(rc, 2, out + err)
@@ -573,12 +573,6 @@ class TestRegistration(Gates):
         rc, out, err = AE.cli("register", self.agent)
         self.assertEqual(rc, 2, out + err)
         self.assertIn("(unsigned", err)
-        os.remove(os.path.join(self.ws, "approvals.json"))
-        self.approve("registration")
-        with mock.patch.object(A, "is_tty", lambda fd: False):
-            rc, out, err = AE.cli("register", self.agent)
-        self.assertEqual(rc, 2, out + err)
-        self.assertIn("is not a TTY", err)
         self.assertFalse(os.path.exists(os.path.join(self.ws, "registration.json")))
 
     def test_a_kind_agent_record_verifies_and_reads_stale_after_an_agent_md_edit(self):

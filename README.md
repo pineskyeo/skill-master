@@ -7,7 +7,7 @@ Skill Master checks, evaluates and installs agent skills and agents built for fo
 - `eva.py` runs the static checks. `check` grades one unit against the rule bundle in `rules/`, prints one row per check and the verdict, and ends with the `ruleset_sha256` line. `check-all` prints one verdict line per unit under a folder. `check --transcript` grades one agent run transcript. `feedback` writes `FEEDBACK.md` and `FEEDBACK.json` into a unit, `index` writes `INDEX.md` and `registry.json`, `generate` renders an agent's four tool files or a skill's invocation metadata, and `schema-check` validates a JSON file against a schema.
 - `skill_eval.py` is the eval harness and the unit lifecycle. It validates an eval set, plans and estimates a run, runs a skill with and without itself (or against an older version), grades, reports and loops. The `agent` subcommands do the same for AGENT.md v2 agents per tool. `install`, `version bump`, `deprecate` and `drift` manage releases, and `hub build` writes the static registry site. Without `--live`, the eval commands `plan`, `run`, `grade`, `calibrate` and `loop` start no model and no tool CLI: `plan`, `run`, `calibrate` and `loop` print the plan and the estimated cost, and `grade` grades only the static and human items. The exception is `check-builtin-plugins`, which starts the `claude` CLI without `--live` to list its plugins and makes no model call.
 
-`approve`, `register`, every `--live` start and `install --scope user` need a person at a real terminal and an ssh signature. They are human-only. [Approval gates](references/approval-gates.md) explains the gate.
+`approve`, `register`, every `--live` start and `install --scope user` write an unsigned recorded approval bound to the gated files, the unit and the rule bundle hash. No key, passphrase, terminal or session is needed. [Approval gates](references/approval-gates.md) explains the records.
 
 ## Folder layout
 
@@ -34,7 +34,7 @@ The top level also holds `loop.py`, the builder and check loop of [LOOP.md](LOOP
 - [Command reference](references/engine-cli.md): every `eva.py` and `skill_eval.py` subcommand with its flags.
 - [Eval set format](references/eval-set-format.md): `evals/evals.json`, `evals/trigger_evals.json`, assertion checks, agent scenarios and transcripts.
 - [Rules](references/rules.md): rule files, the bundle hash, the English-only rule, multi-tool parity, scoring and fixtures.
-- [Approval gates](references/approval-gates.md): the human gate behind `approve`, `register` and `--live`.
+- [Approval gates](references/approval-gates.md): the recorded approvals behind `approve`, `register` and `--live`.
 - [Auth profiles and cost](references/auth-and-cost.md): the two auth profiles, the hard cap and the spend ledger.
 - [Install, versions and drift](references/install.md): `install`, `version bump`, `deprecate` and `drift`.
 - [Feedback loop protocol](LOOP.md): the builder and check loop of `loop.py` and the citation rules for transcripts.

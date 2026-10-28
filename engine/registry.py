@@ -150,7 +150,9 @@ def label(state, reason, rec):
 
 
 def entry(root, row):
-    """The registry entry of a registered build_index row; paths relative to root."""
+    """The registry entry of a registered build_index row; paths relative to root. registered_by and each principal
+    are approvals.decided_by of the record (recorded_by, or the principal of a record signed before unit N1)."""
+    from engine import approvals
     rec = row["record"]
     out = {"kind": rec["kind"], "name": rec["skill_name"], "version": rec["version"],
            "path": row["path"].replace(os.sep, "/"),
@@ -158,8 +160,9 @@ def entry(root, row):
            "workspace": posix_rel(row["workspace"], root) if rec["kind"] == "agent" else
                         os.path.relpath(row["workspace"], root).replace(os.sep, "/"),
            "iteration": rec["iteration"], "registered_at": rec["registered_at"],
-           "registered_by": rec["signed"]["principal"],
-           "approvals": [dict({"gate": g, "principal": a["principal"]}, **({"reason": a["reason"]} if "reason" in a else {}))
+           "registered_by": approvals.decided_by(rec["signed"]),
+           "approvals": [dict({"gate": g, "principal": approvals.decided_by(a)},
+                              **({"reason": a["reason"]} if "reason" in a else {}))
                          for g, a in sorted(rec["approvals"].items())]}
     out.update((k, rec[k]) for k in RECORD_HASHES)
     return out

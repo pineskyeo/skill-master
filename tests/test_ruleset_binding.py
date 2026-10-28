@@ -11,7 +11,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_skill_eval as T
 from test_skill_eval import se, eva, evals_doc, make_skill, write, wjson, rjson, quiet, FakeClaude
-from engine import approvals as A, rule_runner as RR, schema as S
+from engine import approvals as A, rule_runner as RR
 
 ROOT = T.ROOT
 BUNDLE_DIRS = ("rules", "schemas", "targets", "policy")
@@ -69,7 +69,9 @@ def declared(root=ROOT):
 
 
 def schema_errors(instance):
-    return S.compile_schema(S.load(REGISTRATION_SCHEMA)).validate(instance)
+    """The registration schema as the engine applies it: since unit N1 a recorded record in a record slot is checked by
+    engine/approvals.py, because the schema file is part of the ruleset hash and names only signed records."""
+    return se.registration_schema_errors(instance)
 
 
 class Bound(T.Base):
@@ -238,10 +240,20 @@ class TestSignedPayload(Bound):
                 with self.subTest(kind=kind, bad=bad), self.assertRaises(ValueError):
                     A.payload(kind, "g", "u", SHA, bad, AT, budget_usd=budget)
 
-    def test_the_record_carries_the_ruleset_and_a_swapped_one_fails_the_verify(self):
+    def test_the_record_carries_the_ruleset_and_reads_stale_under_another_one(self):
         rec = se.approve("eval_set", self.spec, self.ws)
         ap, h, now = se.APPROVER["it"], se.gate_hash("eval_set", self.spec, self.ws), se.ruleset_sha256()
-        self.assertEqual(set(rec), {"format", "method", "sha256", "ruleset_sha256", "principal", "at", "signature"})
+        self.assertEqual(set(rec), {"format", "method", "kind", "gate", "unit", "sha256", "ruleset_sha256", "recorded_by",
+                                    "at"})
+        self.assertEqual(rec["ruleset_sha256"], now)
+        self.assertEqual(ap.verdict(rec, "approve", "eval_set", "branch-setup", h, now).status, "approved")
+        self.assertEqual(ap.verdict(rec, "approve", "eval_set", "branch-setup", h, OTHER),
+                         A.Verdict("stale", T.TEST_PRINCIPAL, RULES))
+
+    def test_a_signed_record_with_a_swapped_ruleset_fails_the_verify(self):
+        h, now = se.gate_hash("eval_set", self.spec, self.ws), se.ruleset_sha256()
+        rec = T.signed_record("approve", "eval_set", "branch-setup", h, now)
+        ap = T.signed_approver()
         self.assertEqual(ap.verdict(rec, "approve", "eval_set", "branch-setup", h, now).status, "approved")
         v = ap.verdict(dict(rec, ruleset_sha256=OTHER), "approve", "eval_set", "branch-setup", h, OTHER)
         self.assertEqual(v.status, "invalid", v)
@@ -254,15 +266,15 @@ class TestSignedPayload(Bound):
             with self.subTest(bad=bad):
                 v = se.APPROVER["it"].verdict(dict(rec, ruleset_sha256=bad), "approve", "eval_set", "branch-setup", h,
                                               se.ruleset_sha256())
-                self.assertEqual((v.status, v.reason), ("invalid", "field ruleset_sha256 is missing or malformed"))
+                self.assertEqual(v.status, "invalid"); self.assertIn("ruleset_sha256", v.reason)
 
     def test_an_h1_shape_signed_record_reads_stale_and_starts_no_ssh_keygen(self):
         k, calls = T.shared_keys(), []
-        T.install_test_approver(self, run=T.keygen_runner(k["dir"], calls))
+        T.install_test_approver(self, signers=k["signers"], run=T.keygen_runner(k["dir"], calls))
         h = se.gate_hash("eval_set", self.spec, self.ws)
         h1 = ("skill-master-approval v1\nkind approve\ngate eval_set\nunit branch-setup\nsha256 %s\nat %s\n"
               % (h, AT)).encode("ascii")
-        sig = A.sign_payload(T.keygen_runner(k["dir"]), k["key"], h1, passphrase=T.TEST_PASSPHRASE)
+        sig = T.sign_bytes(k["key"], h1)
         self.assertIsNone(se.APPROVER["it"].verify(h1, sig, T.TEST_PRINCIPAL), "control: the H1 signature is real")
         del calls[:]
         wjson(self.approvals, {"eval_set": {"format": 1, "method": "ssh-sig", "sha256": h,
@@ -288,22 +300,23 @@ class TestSignedPayload(Bound):
         rec = se.approve("eval_set", self.spec, self.ws)
         ap, h, now = se.APPROVER["it"], se.gate_hash("eval_set", self.spec, self.ws), se.ruleset_sha256()
         verdict = lambda r, sha, rules, ap=ap: ap.verdict(r, "approve", "eval_set", "branch-setup", sha, rules)
-        no_rules = {k: v for k, v in rec.items() if k != "ruleset_sha256"}
+        signed = T.signed_record("approve", "eval_set", "branch-setup", h, now)
         missing = T.gate_approver(signers=os.path.join(self.tmp, "no-signers"))
         cases = ((verdict(None, h, now), ("missing", "no record")),
-                 (verdict(dict(rec, ruleset_sha256="x"), OTHER, OTHER), ("invalid", "field ruleset_sha256 is missing or "
-                                                                                    "malformed")),
-                 (missing.verdict(rec, "approve", "eval_set", "branch-setup", OTHER, OTHER),
+                 (verdict(dict(rec, ruleset_sha256="x"), OTHER, OTHER), ("invalid", "ruleset_sha256 'x' is not valid")),
+                 (verdict(dict(rec, gate="requirements"), OTHER, OTHER),
+                  ("invalid", "the record names gate 'requirements', not 'eval_set'")),
+                 (missing.verdict(signed, "approve", "eval_set", "branch-setup", OTHER, OTHER),
                   ("invalid", "approvers file missing: %s" % os.path.join(self.tmp, "no-signers"))),
                  (verdict(rec, OTHER, OTHER), ("stale", "the gated files changed since signing")),
                  (verdict(rec, None, OTHER), ("stale", "the gated files are missing")),
                  (verdict(rec, h, OTHER), ("stale", RULES)),
-                 (verdict(no_rules, h, now), ("stale", RULES)),
                  (verdict(rec, h, now), ("approved", "")))
         for got, want in cases:
             self.assertEqual((got.status, got.reason), want)
+        self.assertEqual(verdict({k: v for k, v in rec.items() if k != "ruleset_sha256"}, h, now).status, "invalid")
 
-    def test_approve_register_and_the_live_start_show_the_ruleset_they_sign(self):
+    def test_approve_register_and_the_live_start_show_the_ruleset_they_record(self):
         shown = []
         T.install_test_approver(self, write=shown.append)
         se.approve("requirements", self.spec, self.ws); se.approve("eval_set", self.spec, self.ws)
@@ -314,11 +327,14 @@ class TestSignedPayload(Bound):
         rec = se.register(self.spec, self.ws)
         self.assertIn("register ruleset_sha256=" + rec["ruleset_sha256"], shown)
         del shown[:]
-        T.install_test_approver(self, write=shown.append, read_line=lambda p: "\n")
-        with mock.patch.object(se, "live_exec", T._forbidden):
-            rc, _, err = self.cli("run", self.d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "100", "--engines",
-                                  "claude", "--runs", "1")
-        self.assertEqual(rc, 2, err); self.assertIn("challenge mismatch", err)
+        class Stop(Exception): pass
+        def stop_at_summary(line):
+            shown.append(line)
+            if " --live: gate " in line: raise Stop()
+        T.install_test_approver(self, write=stop_at_summary)
+        with mock.patch.object(se, "live_exec", T._forbidden), self.assertRaises(Stop):
+            self.cli("run", self.d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd",
+                     "100", "--engines", "claude", "--runs", "1")
         self.assertIn("ruleset_sha256 " + se.ruleset_sha256(), shown)
 
 
@@ -332,7 +348,7 @@ class TestRecordedHashes(Bound):
         self.assertEqual(plan["policy_sha256"], {"pricing": file_sha(os.path.join(pol, "pricing.json")),
                                                  "models": file_sha(os.path.join(pol, "models.json")),
                                                  "auth_profiles": file_sha(os.path.join(pol, "auth-profiles.json")),
-                                                 "allowed_signers": file_sha(T.shared_keys()["signers"])})
+                                                 "allowed_signers": None})
         write(os.path.join(pol, "auth-profiles.json"), "{}\n")
         n = se.run_iteration(self.spec, self.ws, [se.ClaudeCodeEngine("claude-opus-5-5", exec_fn=FakeClaude())], runs=1,
                              log=quiet)

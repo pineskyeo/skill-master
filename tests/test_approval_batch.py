@@ -1,9 +1,10 @@
-"""S1 method 1: `pending` lists every missing or stale approval of the given units and signs nothing; `approve --batch`
-runs presence and approver-check once, asks one challenge and one passphrase, and signs each item as its own record
-through _approve_with and store_approval, the format a single approve writes.
+"""S1 method 1: `pending` lists every missing or stale approval of the given units and records nothing; `approve
+--batch` reads one reason line per coverage waiver item and records each item as its own unsigned record through
+_approve_with and store_approval, the format a single approve writes (unit N1: no presence check, challenge or
+passphrase).
 
-Every case runs in the temp HOME of tests/test_skill_eval.py Base and signs with its throwaway test key; subprocess is
-patched for the whole module and only that key runner starts /usr/bin/ssh-keygen. ASCII only."""
+Every case runs in the temp HOME of tests/test_skill_eval.py Base with the test approver, which starts no process;
+subprocess is patched for the whole module. ASCII only."""
 import contextlib, hashlib, io, json, os, re, subprocess, sys, unittest
 from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -45,26 +46,18 @@ def result_row(charged):
     return json.dumps(row) + "\n"
 
 
-def payload_lines(rec, gate, unit):
-    return [x for x in A.payload("approve", gate, unit, rec["sha256"], rec["ruleset_sha256"], rec["at"]).decode()
-            .splitlines() if not x.startswith("at ")]
-
-
 class Batch(T.Base):
     def setUp(self):
         T.Base.setUp(self)
-        self.shown, self.asked, self.secrets = [], [], []
+        self.shown, self.asked = [], []
         self.install()
         self.units = {n: make_unit(self.tmp, n) for n in ("alpha", "beta", "gamma")}
 
     def install(self, **kw):
         def read(prompt):
             self.asked.append(prompt)
-            return T.type_challenge(prompt)
-        def secret(prompt):
-            self.secrets.append(prompt)
-            return T.TEST_PASSPHRASE
-        args = dict(read_line=read, write=self.shown.append, passphrase=None, read_secret=secret)
+            return T.type_reason(prompt)
+        args = dict(read_line=read, write=self.shown.append)
         args.update(kw)
         T.install_test_approver(self, **args)
 
@@ -110,7 +103,7 @@ class TestPending(Batch):
         self.assertEqual((items[0]["spend_usd"], items[1]["spend_usd"]), (0.75, 0.0))
         self.assertEqual(self.files(), before)
 
-    def test_the_cli_lists_every_field_and_signs_nothing(self):
+    def test_the_cli_lists_every_field_and_records_nothing(self):
         before = self.files()
         rc, out, err = self.cli("pending", *self.argv(("alpha", "beta", "gamma")))
         self.assertEqual(rc, 0, err)
@@ -118,9 +111,9 @@ class TestPending(Batch):
         for word in ("status missing", "sha256 ", "ruleset_sha256 " + se.ruleset_sha256(), "spend so far $0.00",
                      "plan estimate $", "summary "):
             self.assertIn(word, out)
-        self.assertIn("3 pending approval(s); nothing was signed", out)
+        self.assertIn("3 pending approval(s); nothing was recorded", out)
         self.assertEqual(self.files(), before)
-        self.assertEqual(self.asked, []); self.assertEqual(self.secrets, [])
+        self.assertEqual(self.asked, [])
 
     def test_pending_escapes_agent_written_text(self):
         write(os.path.join(self.wsp("alpha"), "requirements.md"), "goal \x1b[2J\r")
@@ -210,48 +203,62 @@ class TestPendingKinds(Batch):
             self.assertIsNone(item["estimate_usd"])
 
 
-class TestBatchSigning(Batch):
-    def test_the_passphrase_is_read_once_and_each_item_is_its_own_record(self):
+class TestBatchRecording(Batch):
+    def waivers(self, name):
+        """An iteration of unit name where opencode and hermes did not run: two coverage waiver items."""
+        it = os.path.join(self.wsp(name), "iteration-1"); os.makedirs(it)
+        gate = {"needs_approval": False, "problems": []}
+        wjson(os.path.join(it, "gate.json"), gate)
+        cov = {"claude": RAN, "codex": RAN, "opencode": NOT_RUN, "hermes": NOT_RUN}
+        wjson(os.path.join(it, "benchmark.json"), {"tool_coverage": cov, "gate": gate})
+
+    def test_each_item_is_its_own_record_and_nothing_is_asked(self):
         rc, out, err = self.cli("approve", "--batch", *self.argv(("alpha", "beta", "gamma")))
         self.assertEqual(rc, 0, err + "".join(self.shown))
-        self.assertEqual(len(self.secrets), 1)
-        self.assertEqual(len([p for p in self.asked if "to sign" in p]), 1)
+        self.assertEqual(self.asked, [])
         for n in ("alpha", "beta", "gamma"):
             recs = rjson(os.path.join(self.wsp(n), "approvals.json"))
             self.assertEqual(sorted(recs), [COMBINED])
+            self.assertEqual((recs[COMBINED]["method"], recs[COMBINED]["unit"]), ("recorded", n))
             self.assertEqual(se.approval_verdict(COMBINED, self.spec(n), self.wsp(n)).status, "approved")
-        self.assertEqual(len(re.findall(r"^signed \S+ requirements_eval_set", out, re.M)), 3, out)
+        self.assertEqual(len(re.findall(r"^recorded \S+ requirements_eval_set sha256 \S+ by test-approver$", out, re.M)),
+                         3, out)
 
-    def test_a_batch_record_verifies_exactly_like_a_single_record(self):
+    def test_a_batch_record_equals_a_single_record(self):
         twin = make_unit(os.path.join(self.tmp, "twin"), "alpha")
         single = se.approve(COMBINED, self.spec("alpha"), self.wsp("alpha"))
         rc, out, err = self.cli("approve", "--batch", "--unit", twin[0], "--workspace", twin[1])
         self.assertEqual(rc, 0, err)
         batch = rjson(os.path.join(twin[1], "approvals.json"))[COMBINED]
-        self.assertEqual(sorted(single), sorted(batch))
-        self.assertEqual({k: v for k, v in single.items() if k not in ("at", "signature")},
-                         {k: v for k, v in batch.items() if k not in ("at", "signature")})
-        self.assertEqual(payload_lines(single, COMBINED, "alpha"), payload_lines(batch, COMBINED, "alpha"))
+        self.assertEqual(dict(single, at=None), dict(batch, at=None))
         self.assertEqual(se.approval_verdict(COMBINED, se.load_eval_set(twin[0])[0], twin[1]).status, "approved")
 
-    def test_a_challenge_mismatch_signs_nothing(self):
-        self.install(read_line=lambda p: "WRONG1\n")
+    def test_one_reason_line_per_waiver_item(self):
+        se.approve(COMBINED, self.spec("alpha"), self.wsp("alpha"))
+        self.waivers("alpha")
+        answers = iter(["first reason\n", "second reason\n"])
+        self.install(read_line=lambda p: self.asked.append(p) or next(answers))
+        rc, out, err = self.cli("approve", "--batch", *self.argv(("alpha",)))
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(self.asked, [A.REASON_PROMPT, A.REASON_PROMPT])
+        recs = rjson(os.path.join(self.wsp("alpha"), "approvals.json"))
+        self.assertEqual((recs["coverage_waiver:opencode"]["reason"], recs["coverage_waiver:hermes"]["reason"]),
+                         ("first reason", "second reason"))
+        for g in ("coverage_waiver:opencode", "coverage_waiver:hermes"):
+            self.assertEqual(se.approval_verdict(g, self.spec("alpha"), self.wsp("alpha")).status, "approved", g)
+
+    def test_a_refused_reason_records_nothing(self):
+        self.waivers("alpha")
+        answers = iter(["first reason\n", "\n"])
+        self.install(read_line=lambda p: next(answers))
         before = self.files()
         rc, out, err = self.cli("approve", "--batch", *self.argv(("alpha", "beta")))
         self.assertEqual(rc, 2)
-        self.assertIn("approve --batch: challenge mismatch: nothing was signed", err)
+        self.assertIn("approve --batch: reason refused for coverage_waiver:hermes of alpha: it is empty; nothing was "
+                      "recorded", err)
         self.assertEqual(self.files(), before)
-        self.assertEqual(self.secrets, [])
 
-    def test_a_batch_refused_at_presence(self):
-        before = self.files()
-        with mock.patch.object(A, "is_tty", lambda fd: fd != 0):
-            rc, out, err = self.cli("approve", "--batch", *self.argv(("alpha",)))
-        self.assertEqual(rc, 2)
-        self.assertEqual(err.strip(), "approve --batch needs a human at an interactive terminal (stdin is not a TTY)")
-        self.assertEqual((self.files(), self.asked, self.secrets), (before, [], []))
-
-    def test_an_item_that_changed_after_the_list_is_refused_and_the_others_are_signed(self):
+    def test_an_item_that_changed_after_the_list_is_refused_and_the_others_are_recorded(self):
         real = se.pending_items
         def edited(units):
             items = real(units)
@@ -260,32 +267,19 @@ class TestBatchSigning(Batch):
         with mock.patch.object(se, "pending_items", edited):
             rc, out, err = self.cli("approve", "--batch", *self.argv(("alpha", "beta")))
         self.assertEqual(rc, 2)
-        self.assertIn("not confirmed in this sitting or changed since the list was shown; nothing was signed", out + err)
+        self.assertIn("not recorded beta requirements_eval_set: requirements_eval_set for beta changed since the list "
+                      "was shown; nothing was recorded", out)
         self.assertEqual(sorted(rjson(os.path.join(self.wsp("alpha"), "approvals.json"))), [COMBINED])
         self.assertIsNone(state(os.path.join(self.wsp("beta"), "approvals.json")))
 
     def test_the_batch_and_the_single_forms_parse_and_mixing_them_is_refused(self):
         for argv in (["approve", "--batch"], ["approve", self.units["alpha"][0], "--batch", "--unit", "x"],
-                     ["approve", self.units["alpha"][0]], ["approve", "--gate", "eval_set"]):
+                     ["approve", self.units["alpha"][0]], ["approve", "--gate", "eval_set"],
+                     ["approve", "--batch", "--unit", self.units["alpha"][0], "--reason", "a reason"]):
             with self.subTest(argv):
                 rc, out, err = self.cli(*argv)
                 self.assertEqual(rc, 2, err)
                 self.assertIn("approve: give SKILL and --gate, or --batch with --unit", err)
-
-
-class TestSitting(Batch):
-    def test_a_sitting_signs_only_what_was_confirmed_and_only_once(self):
-        ap = se.APPROVER["it"]
-        s = ap.open_sitting("approve --batch")
-        spec, ws = self.spec("alpha"), self.wsp("alpha")
-        with self.assertRaises(A.Refused):
-            se._approve_with(COMBINED, lambda: (spec, ws), sitting=s)
-        other = A.cli_approver()
-        with self.assertRaises(A.Refused):
-            other.sign("approve", COMBINED, lambda: None, sitting=s)
-        with self.assertRaises(A.Refused):
-            ap.sign("register", "registration", lambda: None, sitting=s)
-        self.assertIsNone(state(os.path.join(ws, "approvals.json")))
 
 
 if __name__ == "__main__":
