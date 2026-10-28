@@ -702,6 +702,23 @@ class TestLiveRun(AgentBase):
             self.assertEqual(states[("drill", tool)], MULTI)
         self.assertFalse(os.listdir(self.runs))
 
+    def test_an_agent_without_pins_or_fixture_keeps_the_n1_launch_and_records(self):
+        """Unit K2: no pins and no fixture keep slash commands off, the plan text, plan.json keys and the isolation
+        record of the N1 head; the transcript gains the work-folder manifest (the wrapper is not listed)."""
+        rc, out, _ = cli("agent", "plan", self.agent, "--workspace", self.ws)
+        self.assertEqual(rc, 0, out)
+        self.assertFalse([l for l in out.splitlines() if l.startswith(("pin ", "fixture ", "agent plan refused"))], out)
+        rc, out, err, fake = self.live("run", "--engines", "claude")
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("--disable-slash-commands", fake.calls[0]["cmd"])
+        plan = rjson(os.path.join(self.ws, "iteration-1", "plan.json"))
+        self.assertFalse({"pins", "fixtures"} & set(plan))
+        run = rjson(os.path.join(self.run_dir(), "run.json"))
+        self.assertNotIn("fixture", run)
+        self.assertEqual(set(run["isolation"]), {"sandbox", "installed", "auth", "env_overrides", "env_removed",
+                                                 "problems"})
+        self.assertEqual(rjson(os.path.join(self.run_dir(), "transcript.json"))["work_manifest"], {})
+
     def test_a_claude_stream_without_the_agent_is_an_error_and_not_graded(self):
         text = read(CLAUDE_STREAM).replace('"Plan","code-reviewer-v2"]', '"Plan"]')
         rc, out, err, _ = self.live("run", "--engines", "claude", fake=FakeAgentExec(claude=text))

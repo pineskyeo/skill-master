@@ -58,6 +58,18 @@ A static check object has a `type` from `skill_eval.STATIC_TYPES`. `skill_eval.l
 | `file_equals_fixture` | `path`, `fixture` (both required) | The output file has the same bytes as the fixture file in the skill folder. |
 | `csv_cleaned` | `path`, `fixture`, `data_rows` (all required, `data_rows` an integer of 0 or more) | The output CSV equals the fixture's records with every cell stripped and repeated records dropped, and it holds exactly `data_rows` + 1 records. |
 | `csv_rows` | `path` (required), `rows`, `min`, `max`, `normalize`, `unique` | Every listed row appears between `min` and `max` times, and with `unique: true` the file has no duplicate record. |
+| `rule_check` | `path`, `rules` (both required, no other key) | Every graded rule of the rule file `rules` gives exactly one row reading `pass` or `n/a` on the output file `workdir/<path>`. |
+
+A `rule_check` runs the rule runner over one output file. These limits apply:
+
+- `rules` is written `rules/<file>.rules.json` and names a rule file of the engine's `rules/` folder that the default bundle loads. `validate` refuses any other value, a missing file included.
+- `path` is relative to the case's output folder. `validate` refuses an absolute path, a `..` component, a backslash or a NUL. At grading, a path that leaves the output folder after symlinks resolve, a symlink and a missing file each fail the check.
+- The output file is copied as the main file (SKILL.md or AGENT.md) of a one-file unit in a fresh temp folder. The folder takes the name of the output file's parent folder, or `unit` for a file directly in the output folder. Other files of the output folder are not copied.
+- A rule whose check uses an op of `skill_eval.RULE_CHECK_UNIT_OPS` reads files beside the main file, so it is not graded. Today that op is `host_scenarios`, which reads `scenarios/*.json`. In `rules/agent-structure.rules.json` it excludes `scenarios-present`, `scenarios-valid`, `scenarios-expected`, `tools-subset` and `multi-turn-scenario`. An excluded rule neither passes nor fails the check, and the evidence names it after `excluded`. A rule file with no rule left to grade fails the check. So a `rule_check` against `rules/agent-structure.rules.json` passes on a well-formed AGENT.md and fails a malformed one on its own row, such as `goal-present` or `frontmatter`. A rule of another file that reads files beside the main file through another op or a selector, such as the parity rules or a `json:evals/evals.json` selector, is still graded and fails on a one-file unit.
+- The unit kind is the one kind the rule file's rules apply to. A rule file with rules for both skills and agents takes the kind from the output file name, which must then be SKILL.md or AGENT.md.
+- A `fail`, `needs-review` or missing row fails the check, and the evidence names those rule ids.
+
+`validate` reports a bad `rule_check` on the check's own path, such as `<case>.check.rules: "rules/nope.rules.json" is not a rule file of the engine's rules/ folder`. The other refusals are `check.rules: "<rules>" is not a loaded rule file of the bundle`, `check.rules: "<rules>" holds no skill or agent rule`, `check.path: "<rules>" holds rules for skills and agents; name the output file SKILL.md or AGENT.md`, and the schema messages for a missing key, an unknown key and a path that is absolute or holds `..`, a backslash or a NUL.
 
 A `csv_rows` check takes only the keys of `skill_eval.CSV_ROWS_KEYS`: `type`, `path`, `rows`, `min`, `max`, `normalize` and `unique`. The schema adds these limits:
 
@@ -109,8 +121,13 @@ An agent holds one scenario per JSON file under `scenarios/`. `schemas/scenario.
 | `must_include` | Required non-empty list of strings that the final answer must contain. |
 | `expected_outcome` | Required non-empty list of typed criterion objects. |
 | `success_criteria` | Optional non-empty list of typed criterion objects. |
+| `fixture` | Optional folder name matching `^[a-z0-9][a-z0-9_-]{0,63}$`. A run copies every file of `fixtures/<fixture>/` in the agent folder into the sandbox work folder at the same relative path. |
+
+A scenario `fixture` is refused, by `agent plan` and before any run starts, when the folder is missing, holds a symlink or a special file, resolves outside the agent folder, or has an entry named `.claude`, `.agents` or `.codex` in any letter case at any depth, such as `sub/.Claude`. Every file under the agent's `fixtures/` folder joins the `eval_set` and `requirements_eval_set` gate hashes, the live start's plan hash and the iteration's `agent_sha256`. `agent plan` lists each fixture with its hash and each of its files with its own hash.
 
 A v1 scenario, with tool names in `expected_tools` or string outcomes, fails the schema. The AGENT.md v2 frontmatter (`schemas/agent-frontmatter.schema.json`) uses the same criterion objects in its `success_criteria`, each written as one single-quoted JSON object per list item. A criterion holds ASCII text only, so a JSON escape of a non-ASCII character is refused too. A `tools` key, a string `success_criteria` or a criterion written as plain text marks the file as AGENT.md v1, which fails `agent-frontmatter-v2`.
+
+The AGENT.md v2 frontmatter may also hold a `skills` key. It is a non-empty list of distinct `"<name>@<semver>"` strings, and each one pins one registered skill at its exact SemVer 2.0.0 version, for example `branch-setup@1.0.0`. The name is 1 to 64 lowercase letters, digits, `.`, `_` or `-`, starts with a letter or digit and holds no `..`. The key needs `skill` in `capabilities`. Without it, the rule `skills-need-skill-capability` fails, and `agent validate`, `agent plan` and the live runs refuse the agent. [Engine CLI](engine-cli.md) describes how a pin resolves and verifies and what the sandbox installs.
 
 `engine/primitives/transcript.py` (`criterion_evidence`) checks each typed criterion on the final answer and the run's tool calls and results:
 
@@ -122,10 +139,17 @@ A v1 scenario, with tool names in `expected_tools` or string outcomes, fails the
 | `max_chars` | `max` (1 or more) | The final answer has at most `max` characters. |
 | `markdown_table` | none | The final answer holds a Markdown table with a header row and a separator row. |
 | `llm` | `text` (non-blank) | Never decided by code. The row is needs-review, so a human or a model grader decides, and the verdict is at best REVIEW. |
+| `command_ran` | `regex` (non-empty, compiles in Python `re`) | A shell command of the run matches `regex` (`re.search`). |
+| `command_absent` | `regex` (non-empty, compiles in Python `re`) | No shell command of the run matches `regex`. |
+| `file_exists` | `path` (relative, no `..` component, no backslash, no NUL) | The run's work-folder manifest lists `path` as a regular file. |
+
+`command_ran` and `command_absent` read only the shell rows. A shell row is a call whose tool maps to the `shell` capability in `rules/data/capabilities.json` (Claude `Bash`, Codex `shell`) and whose input holds a string `command`. The two criteria never read the prompt, the final answer or a tool result. Both fail unless the transcript records `is_error: false`, so a missing, errored or incomplete run is never a pass.
+
+`file_exists` reads the transcript's `work_manifest`, which an agent run writes before the sandbox is removed. The manifest lists every file the run left in the work folder, with its sha256, except the installed wrapper and pinned skill files. A symlink is listed with its target and never followed, and it does not count as a file. A transcript without a manifest fails the criterion.
 
 ## Transcript format
 
-`eva.py check AGENT --transcript FILE` and `skill_eval.py agent grade` read one run transcript. `eva.load_transcript` validates it against `schemas/transcript.schema.json` and returns the scenario, the final answer, the workspace, the tool calls and the tool results.
+`eva.py check AGENT --transcript FILE` and `skill_eval.py agent grade` read one run transcript. `eva.load_transcript` validates it against `schemas/transcript.schema.json` and returns the scenario, the final answer, the workspace, the tool calls and the tool results, plus `is_error` and `work_manifest` (each `None` when the transcript does not record it).
 
 ```json
 {

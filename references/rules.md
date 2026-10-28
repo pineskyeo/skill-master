@@ -20,10 +20,12 @@ A bundle is a folder. Its top-level `rules.json` and `*.rules.json` files are ru
 | `naming.rules.json` | 3 | skill, agent (`name-reserved` skill only) | name format, name equals the folder name, reserved words |
 | `skill-frontmatter.rules.json` | 1 | skill | frontmatter field types |
 | `skill-evals.rules.json` | 1 | skill | `evals/evals.json` shape and `skill_name` |
-| `agent-structure.rules.json` | 12 | agent | AGENT.md v2 frontmatter, goal, success criteria, scenarios, capabilities, sections |
+| `agent-structure.rules.json` | 13 | agent | AGENT.md v2 frontmatter, goal, success criteria, scenarios, capabilities, skill pins, sections |
 | `english-only.rules.json` | 9 | skill, agent, repository | English-only text |
 | `parity-skill.rules.json` | 7 | skill | multi-tool parity of a skill |
 | `parity-agent.rules.json` | 10 | agent | multi-tool parity of an agent and its wrappers |
+
+A skill eval case can run one rule file of the default bundle over one output file with the static check `rule_check` ([Eval set format](eval-set-format.md)).
 
 `schemas/rules.schema.json` validates every rule file. A file holds `ruleset` (a lowercase name), `version` (`MAJOR.MINOR.PATCH`) and a non-empty `rules` list. Each rule has these keys:
 
@@ -80,6 +82,7 @@ The source codes name what the rule follows. S is the agentskills.io specificati
 | `scenarios-valid` [required] | agent | goal | every scenario follows `schemas/scenario.schema.json` | H |
 | `scenarios-expected` | agent | goal | every scenario has an `expected_outcome` | H |
 | `tools-declared` [required] | agent | tool-use | the frontmatter declares its `capabilities` | H |
+| `skills-need-skill-capability` [required] | agent | tool-use | an AGENT.md `skills` key (pinned registered skills) needs `skill` in the capabilities; n/a without the key | H |
 | `tools-subset` | agent | tool-use | every scenario's `expected_tools` are among the capabilities | H |
 | `tools-documented` | agent | tool-use | a Tools section explains the tools | H |
 | `memory-section` | agent | context | a memory, handoff or context section | H |

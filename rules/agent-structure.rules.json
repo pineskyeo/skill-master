@@ -91,6 +91,21 @@
       "fix": "Declare what the agent may do in the frontmatter capabilities: list (read, search, write, shell, web_fetch, web_search, delegate, skill)."
     },
     {
+      "id": "skills-need-skill-capability",
+      "applies_to": ["agent"],
+      "category": "tool-use",
+      "severity": "fail",
+      "protects": ["claude", "codex", "opencode", "hermes"],
+      "source": {"house": "AGENT.md skills pins registered skills that the run installs at project scope, valid only when capabilities holds skill (plan.md:1651, unit K2 D8; no dated record)", "verified": null},
+      "check": {"op": "when",
+                "if": {"op": "any", "of": [{"op": "count", "sel": "frontmatter:#/skills", "min": 0},
+                                           {"op": "regex", "sel": "frontmatter:#/skills", "pattern": "[\\s\\S]*"},
+                                           {"op": "equals", "left": {"sel": "frontmatter:#/skills"}, "right": {"value": null}}]},
+                "then": {"op": "subset", "left": {"value": ["skill"]}, "right": {"sel": "frontmatter:#/capabilities"}}},
+      "message": {"pass": "skills pins with the skill capability", "fail": "skills is set but capabilities lacks skill", "na": "no skills key"},
+      "fix": "Add skill to the AGENT.md capabilities, or remove the skills key: a pinned skill loads only for an agent that may use skills."
+    },
+    {
       "id": "tools-subset",
       "applies_to": ["agent"],
       "category": "tool-use",

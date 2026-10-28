@@ -792,7 +792,7 @@ class TestToolCoverage(T.Base):
         import inspect
         fns = (se.register, se._register_with, se.registration_hash, se.registration_verdict, se.registration_state,
                se.approve, se._approve_with, se.approvals_data, se.approval_record, se.approval_verdict,
-               se.approval_ok, se.store_approval, se.recorded_ruleset)
+               se.approval_ok, se.store_approval, se.recorded_ruleset, se.pin_states)
         assert_record_readers_listed(self, fns)
         for fn in fns:
             src = inspect.getsource(fn)

@@ -197,7 +197,7 @@ REGRESSION_TOLERANCE = _POLICY["REGRESSION_TOLERANCE"]
 HIGH_VARIANCE_STDDEV = _POLICY["HIGH_VARIANCE_STDDEV"]
 RULE_VERIFIED_MAX_DAYS = _POLICY["RULE_VERIFIED_MAX_DAYS"]
 STATIC_TYPES = ("regex", "not_regex", "tool_call", "skill_triggered", "file_exists",
-                "file_equals_fixture", "csv_cleaned", "csv_rows")
+                "file_equals_fixture", "csv_cleaned", "csv_rows", "rule_check")
 CSV_ROWS_KEYS = ("type", "path", "rows", "min", "max", "normalize", "unique")
 
 PRICES = _POLICY["PRICES"]
@@ -357,7 +357,11 @@ def load_eval_set(skill_dir):
                     problems.append("%s: static layer needs a machine check object {\"text\", \"layer\": \"static\", "
                                     "\"check\": {\"type\": ...}} (%r)" % (where, it["text"]))
                 else:
-                    problems += check_object_problems(where, it["check"])
+                    shape = check_object_problems(where, it["check"])
+                    problems += shape
+                    if not shape and it["check"].get("type") == "rule_check":
+                        why = rule_check_target(it["check"])[2]
+                        if why: problems.append("%s.%s" % (where, why))
                     if isinstance(it["check"], dict) and it["check"].get("type") in ("file_equals_fixture", "csv_cleaned"):
                         fixture = it["check"].get("fixture")
                         if isinstance(fixture, str) and fixture not in (c.get("files") or []):
@@ -1224,16 +1228,17 @@ class Engine:
     def auth_record(self):
         """How the run authenticates (names only, never values)."""
         return {}
-    def sandbox_problems(self, root, work, skill_name, with_skill):
-        """Static check of what the engine could discover from this sandbox, before the CLI starts."""
+    def sandbox_problems(self, root, work, skill_name, with_skill, pins=()):
+        """Static check of what the engine could discover from this sandbox, before the CLI starts. pins: the skill
+        names an agent run installs at project scope (K2)."""
         found = sorted(n for n, _ in skills_under(os.path.join(work, self.skills_rel), 1))
-        want = [skill_name] if with_skill else []
+        want = [skill_name] if with_skill else sorted(pins)
         out = [] if found == want else ["project skills in the sandbox are %s, expected %s" % (found, want)]
         for a in ancestors(os.path.dirname(os.path.realpath(root))):
             hits = skills_under(os.path.join(a, self.skills_rel), 3)
             if hits: out.append("ancestor %s has skills %s" % (os.path.join(a, self.skills_rel), sorted(n for n, _ in hits)))
         return out
-    def isolation_problems(self, res, with_skill, skill_name, user_names):
+    def isolation_problems(self, res, with_skill, skill_name, user_names, pins=()):
         """Checks of the finished run's own report of what it loaded (fail closed when it cannot be verified)."""
         return []
     def after_run(self, root):
@@ -1321,12 +1326,15 @@ class ClaudeCodeEngine(Engine):
             return {"billing": p.billing, "method": "API key from %s (auth profile %s; value not recorded)"
                     % (", ".join(p.engines["claude"]["api_key_env"]) or "no listed variable", p.name)}
         return {"billing": BILLING, "method": "claude.ai login of the current user session (Keychain)"}
-    def sandbox_problems(self, root, work, skill_name, with_skill):
+    def sandbox_problems(self, root, work, skill_name, with_skill, pins=()):
         """Before launch: the project skill set (Engine), no auth/provider setting in any source the run can load
         (claude_launch_problems: cwd + ancestors, managed sources, the server-managed cache of the config dir), no
         custom command files in the cwd or an ancestor, and no synced skill that the init check could not see
-        (claude_undetectable_skill_problems)."""
-        out = Engine.sandbox_problems(self, root, work, skill_name, with_skill)
+        (claude_undetectable_skill_problems). A pinned skill may not share a bundled skill name: the launch settings
+        turn every bundled name off."""
+        out = Engine.sandbox_problems(self, root, work, skill_name, with_skill, pins)
+        out += ["pinned skill %r is also a bundled skill name: the launch turns it off and the init check cannot tell "
+                "the two apart" % p for p in pins if p in claude_bundled_skills()["names"]]
         for a in ancestors(work):
             cd = os.path.join(a, ".claude", "commands")
             if os.path.isdir(cd) and any(f.endswith(".md") for _, _, fn in os.walk(cd) for f in fn):
@@ -1338,11 +1346,12 @@ class ClaudeCodeEngine(Engine):
             out.append("skill name %r is also a bundled skill: the launch cannot set it off without hiding the skill "
                        "under test, and the init check cannot tell the two apart" % skill_name)
         return out + claude_launch_problems(work, require_hooks=bool(self.python_script))
-    def isolation_problems(self, res, with_skill, skill_name, user_names):
+    def isolation_problems(self, res, with_skill, skill_name, user_names, pins=()):
         """From the stream-json system/init event: apiKeySource "none" (docs/en/agent-sdk/typescript ApiKeySource:
         "No API key. The session authenticates another way, such as a claude.ai login"), an explicit empty plugin
         list, and a skill set that is exactly {skill under test} (with_skill) or empty (without_skill); any extra
-        skill, recognized or not, is a leak. This runs after the call, as an extra check: init lists user-invocable
+        skill, recognized or not, is a leak. With pins (an agent run, K2) a skill outside the pins is a leak and fewer
+        listed pins is left to skills_loaded. This runs after the call, as an extra check: init lists user-invocable
         skills only, so the sources are enforced before launch (sandbox_problems). Missing fields fail closed."""
         init = res.get("init")
         if not isinstance(init, dict): return ["no system/init event: cannot verify which skills were loaded"]
@@ -1365,12 +1374,12 @@ class ClaudeCodeEngine(Engine):
         elif init["plugins"]:
             ids = [str((p.get("source") or p.get("name")) if isinstance(p, dict) else p) for p in init["plugins"]]
             out.append("plugins loaded: %s" % ", ".join(ids))
-        want = {skill_name} if with_skill else set()
-        if names != want:
+        want = {skill_name} if with_skill else set(pins)
+        if names - want if pins else names != want:
             user = sorted({n.split(":")[-1] for n in names - want} & set(user_names))
-            out.append("skills loaded in %s run are %s, expected exactly %s%s" % (
-                "with_skill" if with_skill else "without_skill", sorted(names), sorted(want),
-                "; user-level skills visible: %s" % user if user else ""))
+            out.append("skills loaded in %s run are %s, expected %s %s%s" % (
+                "pinned" if pins else "with_skill" if with_skill else "without_skill", sorted(names),
+                "only the pins" if pins else "exactly", sorted(want), "; user-level skills visible: %s" % user if user else ""))
         return out
     def parse(self, stdout):
         r, texts = new_result(), []
@@ -1439,8 +1448,8 @@ class CodexEngine(Engine):
     def auth_record(self):
         return {"billing": current_billing(), "method": "ChatGPT login (auth_mode chatgpt), read-only copy of auth.json (readable "
                 "by the agent under test), removed after the run"}
-    def sandbox_problems(self, root, work, skill_name, with_skill):
-        out = Engine.sandbox_problems(self, root, work, skill_name, with_skill)
+    def sandbox_problems(self, root, work, skill_name, with_skill, pins=()):
+        out = Engine.sandbox_problems(self, root, work, skill_name, with_skill, pins)
         for label, d in (("sandbox HOME", os.path.join(root, "home", ".agents", "skills")),
                          ("sandbox CODEX_HOME", os.path.join(root, "codex_home", "skills")),
                          ("admin", CODEX_ADMIN_SKILLS)):
@@ -2360,7 +2369,9 @@ def agent_scenario_files(agent_dir):
         if os.path.isdir(d) else []
 
 def unit_eval_files(spec):
-    return agent_scenario_files(spec["skill_dir"]) if spec.get("kind") == "agent" else eval_set_files(spec["skill_dir"])
+    if spec.get("kind") == "agent":
+        return agent_scenario_files(spec["skill_dir"]) + agent_fixture_files(spec["skill_dir"])
+    return eval_set_files(spec["skill_dir"])
 
 APPROVER ={"it": approvals.cli_approver()}  # recorded approvals (engine/approvals.py); in-process tests replace it
 POLICY_HASHED = (("pricing", "pricing.json"), ("models", "models.json"), ("auth_profiles", "auth-profiles.json"))
@@ -3034,7 +3045,87 @@ def static_check(chk, t, workdir, fixture_root=None):
     if t_ == "csv_rows":
         ok, evidence = _csv_rows_result(chk, workdir)
         return ok, evidence[:200]
+    if t_ == "rule_check":
+        return rule_check_result(chk, workdir)
     return False, "unknown check type"
+
+def rule_check_target(chk):
+    """(rule file name, unit kind, None) of a rule_check object, or (None, None, why). The rule file must be a loaded
+    rule file of the engine's rules/ folder (the default bundle under RULESET_ROOT). The kind is the one unit kind the
+    file's rules apply to; a file with rules for both kinds takes it from the output file name (SKILL.md or AGENT.md)."""
+    import eva  # installs the host ops the bundle's rules compile against
+    from engine import rule_runner
+    rules, path = chk.get("rules"), chk.get("path")
+    top = os.path.realpath(os.path.join(RULESET_ROOT, "rules"))
+    name = rules[len("rules/"):] if isinstance(rules, str) and rules.startswith("rules/") else None
+    full = os.path.join(top, name) if name and "/" not in name and "\\" not in name and name not in (".", "..") else None
+    if full is None or os.path.dirname(os.path.realpath(full)) != top or not os.path.isfile(full):
+        return None, None, "check.rules: %s is not a rule file of the engine's rules/ folder" % json.dumps(rules)
+    try:
+        bundle = rule_runner.default_bundle(RULESET_ROOT)
+    except rule_runner.BundleError as ex:
+        return None, None, "check.rules: the rule bundle does not load (%s)" % ex
+    if name not in bundle.files():
+        return None, None, "check.rules: %s is not a loaded rule file of the bundle" % json.dumps(rules)
+    kinds = sorted({k for r in bundle.rules if r.file == name for k in r.applies_to} & set(rule_runner.MAIN_FILE))
+    base = path.replace("\\", "/").rsplit("/", 1)[-1] if isinstance(path, str) else ""
+    by_name = {v: k for k, v in rule_runner.MAIN_FILE.items()}
+    if len(kinds) == 1: return name, kinds[0], None
+    if kinds and base in by_name: return name, by_name[base], None
+    if kinds:
+        return None, None, ("check.path: %s holds rules for skills and agents; name the output file SKILL.md or "
+                            "AGENT.md" % json.dumps(rules))
+    return None, None, "check.rules: %s holds no skill or agent rule" % json.dumps(rules)
+
+RULE_CHECK_UNIT_OPS = ("host_scenarios",)
+
+def _rule_ops(node):
+    if isinstance(node, dict):
+        if isinstance(node.get("op"), str): yield node["op"]
+        for v in node.values(): yield from _rule_ops(v)
+    elif isinstance(node, list):
+        for v in node: yield from _rule_ops(v)
+
+def rule_check_result(chk, workdir):
+    """A rule_check over one output file: the file becomes the main file of a one-file unit in a fresh temp folder
+    (named after the output file's parent folder, `unit` for a file directly in the output folder) and the rule file's
+    rows grade it; it passes only when every graded rule gives exactly one row reading pass or n/a. A rule whose check
+    uses an op of RULE_CHECK_UNIT_OPS reads files beside the main file that a one-file unit never has: it is not graded
+    and the evidence names it."""
+    import eva
+    from engine import rule_runner, schema
+    name, kind, why = rule_check_target(chk)
+    if why: return False, "rule_check %s" % why
+    rel = chk["path"]
+    src = os.path.join(workdir, *rel.split("/"))
+    if schema.path_problem(rel) or "\0" in rel or not schema.inside(os.path.realpath(workdir), src):
+        return False, "%s leaves the output folder" % rel
+    if os.path.islink(src) or not os.path.isfile(src):
+        return False, "%s is not a regular file in the output folder" % rel
+    parent = rel.rsplit("/", 2)[-2] if "/" in rel else "unit"
+    tmp = tempfile.mkdtemp(prefix="rule-check-")
+    try:
+        unit = os.path.join(tmp, parent if safe_name(parent) else "unit")
+        os.makedirs(unit)
+        shutil.copyfile(src, os.path.join(unit, rule_runner.MAIN_FILE[kind]))
+        report = eva.Report(unit, kind)
+        bundle = rule_runner.default_bundle(RULESET_ROOT)
+        rule_runner.apply_families(report, [name], bundle)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    rules = [r for r in bundle.rules if r.file == name and kind in r.applies_to]
+    excluded = [r.id for r in rules if set(_rule_ops(r.node)) & set(RULE_CHECK_UNIT_OPS)]
+    want = [r.id for r in rules if r.id not in excluded]
+    got = {}
+    for c in report.checks: got.setdefault(c["id"], []).append(c["status"])
+    bad = ["%s %s" % (i, "/".join(got[i])) for i in want if i in got and (len(got[i]) != 1 or got[i][0] not in ("pass", "n/a"))]
+    missing = [i for i in want if i not in got]
+    ok = bool(want) and not bad and not missing
+    detail = "; ".join(bad + (["missing %s" % ", ".join(missing)] if missing else []))
+    if ok: detail = "%d row(s) pass or n/a" % len(want)
+    elif not want: detail = "no rule of the file can be graded on one file"
+    tail = "; excluded, they read files beside %s: %s" % (rule_runner.MAIN_FILE[kind], ", ".join(excluded)) if excluded else ""
+    return ok, ("rule_check %s on %s (%s unit): %s" % (chk["rules"], rel, kind, detail))[:200] + tail
 
 def walk_runs(it_dir):
     """Yields (engine, case_dir, config, run_dir) for eval runs (not trigger runs)."""
@@ -3792,6 +3883,9 @@ def registration_record(spec, ws, shown=None):
         if not m.get("agent_sha256") or m["agent_sha256"] != tested:
             raise EvalError("iteration-%d tested other agent files (AGENT.md, scenarios or wrappers) than the ones on "
                             "disk; re-run the eval before registering" % n)
+        why = pin_binding_problem(spec["skill_dir"], m.get("pins", []))
+        if why:
+            raise EvalError("iteration-%d: %s; re-run the eval before registering" % (n, why))
         unnamed = [p for p in agent_parity_problems(spec["skill_dir"]) if p not in gate["problems"]]
         if unnamed:
             raise EvalError("iteration-%d gate does not name the agent's parity FAIL row(s) (%s); re-run `agent report`, "
@@ -3947,7 +4041,13 @@ def registration_state(unit_dir, ws=None):
         yield "version", registry.version_of(meta)
     def approval(gate, copy):
         return APPROVER["it"].verdict(copy, "approve", gate, spec["skill_name"], gate_hash(gate, spec, ws), ruleset())
-    return registry.classify(kind, ws, unit_dir, registration_schema_errors, signature, current, approval)
+    def pinned(rec):
+        bench = rjson(os.path.join(ws, "iteration-%d" % rec["iteration"], "benchmark.json"), {})
+        recorded = (bench.get("metadata") or {}).get("pins", []) if isinstance(bench, dict) else []
+        if not meta.get("skills") and not recorded: return None
+        return pin_binding_problem(unit_dir, recorded)
+    return registry.classify(kind, ws, unit_dir, registration_schema_errors, signature, current, approval,
+                             pinned if kind == "agent" else None)
 
 def view_coverage(row):
     """({tool: status}, iteration) for the hub: recomputed with bench_coverage from the runs and planned engines of one
@@ -4263,14 +4363,16 @@ class _AgentStream(object):
 
 class AgentClaudeEngine(_AgentStream, ClaudeCodeEngine):
     """`claude -p --agent <name>` (agent_eval.LAUNCH) with the executor's isolation args and per-call cap; the agent is
-    the generated wrapper at .claude/agents/<name>.md of the sandbox. Slash commands (skills) stay off."""
+    the generated wrapper at .claude/agents/<name>.md of the sandbox. Slash commands (skills) stay off unless the agent
+    pins skills (with_skill: the pinned skills are installed at project scope, K2)."""
     def command(self, prompt, with_skill, budget_usd=None, skill_name=None):
         from engine import agent_eval
         extra = claude_isolation_args()
         if self.model: extra += ["--model", self.model]
         if self.effort: extra += ["--effort", self.effort]
         if budget_usd is not None: extra += ["--max-budget-usd", "%.2f" % budget_usd]
-        return agent_eval.launch_argv("claude", skill_name, prompt, extra + ["--disable-slash-commands"] + self.extra_args)
+        off = [] if with_skill else ["--disable-slash-commands"]
+        return agent_eval.launch_argv("claude", skill_name, prompt, extra + off + self.extra_args)
 
 class AgentCodexEngine(_AgentStream, CodexEngine):
     """`codex exec --json` with the agent asked for by name (agent_eval.LAUNCH, UNVERIFIED house choice); the agent is
@@ -4299,14 +4401,168 @@ class Agent(object):
         self.name = registry.agent_name(self.dir, info)
         self.scenarios = agent_eval.scenarios(eva.load_scenarios(self.dir))
     def files(self, tools):
-        """(label, path) of AGENT.md, every scenarios/*.json and the wrappers of tools: what a live start binds."""
+        """(label, path) of AGENT.md, every scenarios/*.json, every fixture file and the wrappers of tools: what a live
+        start binds."""
         from engine import agent_eval
-        rels = ["AGENT.md"] + [label for label, _ in agent_scenario_files(self.dir)]
+        rels = ["AGENT.md"] + [label for label, _ in agent_scenario_files(self.dir) + agent_fixture_files(self.dir)]
         rels += [agent_eval.wrapper_rel(t, self.name) for t in tools]
         return [(r, os.path.join(self.dir, *r.split("/"))) for r in rels]
     def wrapper(self, tool):
         from engine import agent_eval
         return ensure_inside(self.dir, os.path.join(self.dir, *agent_eval.wrapper_rel(tool, self.name).split("/")))
+    @property
+    def pins(self):
+        from engine import agent_eval
+        return agent_eval.pins_of(self.meta)
+
+FIXTURE_CONTROL_DIRS = (".claude", ".agents", ".codex")
+
+def control_name(name):
+    """True for a name a case-insensitive filesystem (macOS) resolves to a sandbox install folder."""
+    return name.casefold() in FIXTURE_CONTROL_DIRS
+
+def skills_root(agent_dir):
+    """The repository root a pin resolves in: the parent of the folder that holds the agent folder (realpath), so
+    agents/<agent>/ pins <root>/skills/<name>/."""
+    return os.path.dirname(os.path.dirname(os.path.realpath(agent_dir)))
+
+def pin_states(agent):
+    """One dict per AGENT.md skills entry, in order: pin, name, version, skill_dir, ok, reason, registration_sha256.
+    ok only when <root>/skills/<name>/ holds SKILL.md named <name>, its registration verifies now (registration_state
+    reads registered), the record is of kind skill with exactly that name and version, the skill is user-invocable (the
+    load check reads the init skills list), and its workspace marks that version not deprecated; registration_sha256
+    is the sha256 of its registration.json bytes."""
+    from engine import agent_eval, lifecycle
+    parsed = [agent_eval.parse_pin(p) for p in agent.pins]
+    names = [p[0] for p in parsed if p]
+    out = []
+    for pin, got in zip(agent.pins, parsed):
+        st = {"pin": pin, "name": None, "version": None, "skill_dir": None, "ok": False, "reason": "",
+              "registration_sha256": None}
+        out.append(st)
+        if got is None:
+            st["reason"] = "not <name>@<semver>"; continue
+        name, version = got
+        d = os.path.join(skills_root(agent.dir), "skills", name)
+        st.update(name=name, version=version, skill_dir=d)
+        if names.count(name) > 1:
+            st["reason"] = "skill %s is pinned twice" % name; continue
+        if not os.path.isfile(os.path.join(d, "SKILL.md")):
+            st["reason"] = ("%s is not a skill folder (no SKILL.md)" % d if os.path.isdir(d) else
+                            "unregistered: no skill folder %s" % d); continue
+        spec, meta = unit_spec(d)
+        state, why, rec = registration_state(d)
+        if spec["skill_name"] != name:
+            st["reason"] = "the SKILL.md name is %r, not %r" % (spec["skill_name"], name)
+        elif state != "registered":
+            st["reason"] = "%s: %s" % (state, why) if why else state
+        elif rec.get("kind") != "skill" or rec.get("skill_name") != name:
+            st["reason"] = "the record is of kind %r for %r, not a skill named %r" % (rec.get("kind"), rec.get("skill_name"), name)
+        elif rec.get("version") != version:
+            st["reason"] = "registered version is %s, the pin asks %s" % (rec.get("version"), version)
+        elif _not_user_invocable(d):
+            st["reason"] = ("user-invocable: false (or an unreadable SKILL.md): the init event never lists such a skill, "
+                            "so the run could not verify that it loaded")
+        else:
+            ws = registry.unit_workspace(d, meta)
+            try: deprecated = lifecycle.deprecated_reason(rjson(os.path.join(ws, "deprecations.json")), version)
+            except ValueError: deprecated = "deprecations.json is not readable JSON"
+            if deprecated: st["reason"] = "deprecated: %s" % deprecated
+            else: st.update(ok=True, registration_sha256=file_sha256(os.path.join(ws, "registration.json")))
+    return out
+
+def pin_problems(agent):
+    return ["pin %s does not verify: %s" % (s["pin"], s["reason"]) for s in pin_states(agent) if not s["ok"]]
+
+def pin_record(states):
+    return [{"pin": s["pin"], "name": s["name"], "version": s["version"], "registration_sha256": s["registration_sha256"]}
+            for s in states]
+
+def pin_binding_problem(agent_dir, recorded):
+    """Why the agent's pins no longer verify at the registration hashes an iteration recorded (recorded: plan.json
+    pins), or None. An agent without pins and without recorded pins has none."""
+    now = pin_states(Agent(agent_dir))
+    bad = [s for s in now if not s["ok"]]
+    if bad: return "pin %s does not verify: %s" % (bad[0]["pin"], bad[0]["reason"])
+    want = [(p.get("pin"), p.get("registration_sha256")) for p in recorded if isinstance(p, dict)] \
+        if isinstance(recorded, list) else None
+    got = [(s["pin"], s["registration_sha256"]) for s in now]
+    if got == want: return None
+    changed = [p for p in got if p not in (want or [])] or (want or [])
+    return "pin %s changed since the iteration recorded it" % ", ".join(sorted({str(p) for p, _ in changed}))
+
+def agent_fixture_files(agent_dir):
+    """[(label, path)] of every file under the agent's fixtures/ folder, labeled fixtures/<slug>/<rel>, sorted: the
+    files the eval_set gate and the live record bind besides the scenarios ([] without the folder)."""
+    top = os.path.join(agent_dir, "fixtures")
+    out = []
+    for dp, dn, fn in os.walk(top):
+        out += [("fixtures/" + os.path.relpath(os.path.join(dp, n), top).replace(os.sep, "/"), os.path.join(dp, n))
+                for n in fn]
+    return sorted(out)
+
+def fixture_files(agent_dir, slug):
+    """([(rel, path)], problems) of the fixture folder fixtures/<slug>/ of an agent: every regular file, rel relative to
+    that folder. A missing folder, a symlink anywhere in it, a special file, a path whose realpath leaves the agent
+    folder and an entry at any depth named like a sandbox install folder in any letter case (.claude, .agents, .codex;
+    a tool may discover skills in a nested one) are problems."""
+    base = os.path.join(agent_dir, "fixtures", slug)
+    where = "fixtures/%s" % slug
+    if os.path.islink(base): return [], ["%s is a symlink" % where]
+    if not os.path.isdir(base): return [], ["%s is not a folder of the agent" % where]
+    real = os.path.realpath(agent_dir)
+    files, probs = [], []
+    for dp, dn, fn in os.walk(base):
+        dn.sort()
+        for n in sorted(dn + fn):
+            p = os.path.join(dp, n)
+            rel = os.path.relpath(p, base).replace(os.sep, "/")
+            if os.path.islink(p):
+                probs.append("%s/%s is a symlink" % (where, rel))
+            elif control_name(n):
+                probs.append("%s/%s is a sandbox install folder name" % (where, rel))
+            elif os.path.realpath(p) != real and not os.path.realpath(p).startswith(real + os.sep):
+                probs.append("%s/%s resolves outside the agent folder" % (where, rel))
+            elif os.path.isfile(p):
+                files.append((rel, p))
+            elif not os.path.isdir(p):
+                probs.append("%s/%s is not a regular file" % (where, rel))
+        dn[:] = [d for d in dn if not os.path.islink(os.path.join(dp, d)) and not control_name(d)]
+    return (sorted(files), []) if not probs else ([], probs)
+
+def scenario_fixture(agent, scenario):
+    """(slug, files, problems) of a scenario's fixture; (None, [], []) when the scenario names none."""
+    slug = scenario["data"].get("fixture")
+    if slug is None: return None, [], []
+    files, probs = fixture_files(agent.dir, slug)
+    return slug, files, ["fixture %s of scenario %s: %s" % (slug, scenario["id"], p) for p in probs]
+
+def fixture_record(slug, files):
+    return {"slug": slug, "sha256": sha256_labeled(files), "files": [[r, file_sha256(p)] for r, p in files]}
+
+def agent_input_lines(agent):
+    """The plan lines of the inputs K2 adds: each pin with its state, each scenario fixture with its hash and files."""
+    L = []
+    for s in pin_states(agent):
+        L.append("pin %s: registered, registration sha256 %s (%s)" % (s["pin"], s["registration_sha256"], s["skill_dir"])
+                 if s["ok"] else "pin %s: REFUSED (%s)" % (s["pin"], s["reason"]))
+    for sc in agent.scenarios:
+        slug, files, probs = scenario_fixture(agent, sc)
+        if slug is None or probs: continue
+        L.append("fixture %s %s: sha256 %s, %d file(s)" % (sc["id"], slug, sha256_labeled(files), len(files)))
+        L += ["fixture file %s %s/%s: sha256 %s" % (sc["id"], slug, r, file_sha256(p)) for r, p in files]
+    return L
+
+def agent_input_problems(agent):
+    """The K2 refusals of agent plan, run, grade --live and loop: the skills key without the skill capability, a pin
+    that does not verify, a scenario fixture that cannot be copied."""
+    out = []
+    if agent.pins and "skill" not in (agent.meta or {}).get("capabilities", []):
+        out.append("skills-need-skill-capability: skills is set but capabilities lacks skill")
+    out += pin_problems(agent)
+    for sc in agent.scenarios:
+        out += scenario_fixture(agent, sc)[2]
+    return out
 
 AGENT_ROWS = (("AGENT.md v2", ("agent-frontmatter-v2",), True), ("scenario schema", ("scenarios-valid",), True),
               ("scenarios present", ("scenarios-present",), False), ("tool subset", ("tools-subset",), True),
@@ -4324,6 +4580,9 @@ def agent_rows(agent):
         ok = all(r is not None and r["status"] == "pass" for r in got)
         reason = "; ".join("%s: %s" % (i, r["reason"] if r else "row missing") for i, r in zip(ids, got))
         out.append((label, ok, reason, hard))
+    pins = rows.get("skills-need-skill-capability")
+    if pins is not None and pins["status"] != "n/a":
+        out.append(("skills capability", pins["status"] == "pass", "%s: %s" % (pins["id"], pins["reason"]), True))
     reserved = agent_eval.reserved_agent_name(agent.name)
     name_reason = ("reserved agent name: Claude lists %r in the init agents of every session (or a colon names a "
                    "plugin agent), so a run could not show the wrapper was loaded; rename the agent" if reserved else
@@ -4417,7 +4676,7 @@ def agent_plan_text(a, agent, old, ws, engines, cells, prices, tokens):
     calls = a.runs * agent_configs(old)
     L = ["agent: %s (%s)" % (agent.name, agent.dir), "workspace: %s" % ws,
          "scenarios: %d valid (%s)" % (len(agent.scenarios), ", ".join("%s: %s, %d turn(s)" % (s["file"], s["id"], s["turns"])
-                                                                    for s in agent.scenarios)),
+                                                                    for s in agent.scenarios))] + agent_input_lines(agent) + [
          "engines: %s | runs per cell: %d | baseline: %s" % (
              ", ".join(e.label() for e in engines), a.runs,
              "previous version %s (%s)" % (old.name, old.dir) if old else
@@ -4496,16 +4755,28 @@ def agent_gate_lines(agent, ws):
 
 class AgentSandbox(object):
     """One fresh temp folder per agent run: <run_root>/agent-eval-<engine>-XXXX/{work, home, codex_home}. work holds
-    exactly the generated wrapper at project scope; the agent folder and its scenarios stay outside. Removed after the
-    run."""
-    def __init__(self, engine, wrapper, rel, run_root):
+    exactly the generated wrapper at project scope, the scenario's fixture files (fixture: [(rel, path)]) and the
+    pinned skills copied at project scope (pins: [(name, skill folder)], K2); the agent folder and its scenarios stay
+    outside. Removed after the run."""
+    def __init__(self, engine, wrapper, rel, run_root, fixture=(), pins=()):
+        import eva
         self.engine, self.run_root, self.rel = engine, os.path.realpath(run_root), rel
+        self.pins, self.installed = [n for n, _ in pins], [rel]
+        self.expected = [rel]
         self.root = tempfile.mkdtemp(prefix="agent-eval-%s-" % engine.name, dir=self.run_root)
         try:
             self.work = os.path.join(self.root, "work"); os.makedirs(self.work)
             dst = ensure_inside(self.work, os.path.join(self.work, *rel.split("/")))
             os.makedirs(os.path.dirname(dst))
             shutil.copyfile(wrapper, dst)
+            for frel, src in fixture:
+                to = ensure_inside(self.work, os.path.join(self.work, *frel.split("/")))
+                os.makedirs(os.path.dirname(to), exist_ok=True)
+                shutil.copyfile(src, to)
+            for name, skill_dir in pins:
+                engine.install_skill(self.work, skill_dir, name)
+                self.installed += ["%s/%s/%s" % (engine.skills_rel, name, f) for f in eva.unit_tree(skill_dir).files]
+            self.expected = sorted(self.installed + [frel for frel, _ in fixture])
             self.env = engine.sandbox_env(self.root)
         except BaseException as ex:
             left = "; ".join(remove_sandbox(engine, self.run_root, self.root))
@@ -4513,20 +4784,35 @@ class AgentSandbox(object):
             if left: print("WARNING: " + left, file=sys.stderr)
             raise
     def problems(self):
-        out = self.engine.sandbox_problems(self.root, self.work, None, False)
+        out = self.engine.sandbox_problems(self.root, self.work, None, False, pins=self.pins)
         found = sorted(os.path.relpath(os.path.join(dp, f), self.work).replace(os.sep, "/")
                        for dp, _, fn in os.walk(self.work) for f in fn)
-        if found != [self.rel]:
-            out.append("the sandbox work folder holds %s, expected exactly %s" % (found, [self.rel]))
+        if found != self.expected:
+            out.append("the sandbox work folder holds %s, expected exactly %s" % (found, self.expected))
+        ctl = [f for f in found if f not in self.installed and any(control_name(c) for c in f.split("/"))]
+        if ctl: out.append("the sandbox work folder holds %s under a sandbox install folder name" % ctl)
         for a in ancestors(os.path.dirname(self.root)):
             for d in AGENT_CONTROL_DIRS:
                 p = os.path.join(a, d)
                 if os.path.isdir(p) and os.listdir(p): out.append("ancestor %s is not empty; every run would see it" % p)
         return out
     def record(self):
-        return {"sandbox": self.root, "installed": self.rel, "auth": self.engine.auth_record(),
-                "env_overrides": sorted(k for k in self.env if os.environ.get(k) != self.env[k]),
-                "env_removed": sorted(k for k in os.environ if k not in self.env)}
+        rec = {"sandbox": self.root, "installed": self.rel, "auth": self.engine.auth_record(),
+               "env_overrides": sorted(k for k in self.env if os.environ.get(k) != self.env[k]),
+               "env_removed": sorted(k for k in os.environ if k not in self.env)}
+        if self.pins: rec["pinned_skills"] = list(self.pins)
+        return rec
+    def manifest(self):
+        """{rel: {"sha256"} | {"link"}} of what the run left in work, the wrapper and the pinned skill files left out;
+        a link is recorded with its target and never followed."""
+        out, skip = {}, set(self.installed)
+        for dp, dn, fn in os.walk(self.work):
+            for n in dn + fn:
+                p = os.path.join(dp, n)
+                rel = os.path.relpath(p, self.work).replace(os.sep, "/")
+                if os.path.islink(p): out[rel] = {"link": os.readlink(p)}
+                elif n in fn and rel not in skip and os.path.isfile(p): out[rel] = {"sha256": file_sha256(p)}
+        return out
     def cleanup(self):
         problems = []
         try:
@@ -4535,19 +4821,38 @@ class AgentSandbox(object):
             problems += remove_sandbox(self.engine, self.run_root, self.root)
         return problems
 
-def agent_isolated_run(eng, prompt, agent, run_root, cap, user_names, ticket=None):
-    """One CLI call in a fresh AgentSandbox: (result, fatal problems), as isolated_run for skills."""
+def skills_loaded(res, pins):
+    """verified when the run's init event lists exactly the pinned skills, else unverified (an empty list, a subset,
+    or no init event: Codex has none), never a pass."""
+    init = res.get("init")
+    skills = init.get("skills") if isinstance(init, dict) else None
+    names = {str(s.get("name") if isinstance(s, dict) else s) for s in skills} if isinstance(skills, list) else None
+    return "verified" if names == set(pins) else "unverified"
+
+def agent_isolated_run(eng, prompt, agent, run_root, cap, user_names, ticket=None, fixture=(), pins=None):
+    """One CLI call in a fresh AgentSandbox: (result, fatal problems), as isolated_run for skills. fixture: the
+    scenario's fixture files; pins: the pin states the iteration recorded for this agent, which the pins must still
+    match (refused before the sandbox is built, nothing spent)."""
     from engine import agent_eval
-    sb = AgentSandbox(eng, agent.wrapper(eng.name), agent_eval.install_rel(eng.name, agent.name), run_root)
+    states = pin_states(agent)
+    bad = [s for s in states if not s["ok"]]
+    if bad: raise EvalError("pin %s does not verify: %s" % (bad[0]["pin"], bad[0]["reason"]))
+    if pins is not None and pin_record(states) != pins:
+        raise EvalError("a pinned skill of %s changed after the iteration started; nothing was run" % agent.name)
+    names = [s["name"] for s in states]
+    sb = AgentSandbox(eng, agent.wrapper(eng.name), agent_eval.install_rel(eng.name, agent.name), run_root, fixture,
+                      [(s["name"], s["skill_dir"]) for s in states])
     eng.last_stream = None
     try:
         probs = sb.problems()
         if probs: raise EvalError("isolation (%s): %s" % (eng.name, " | ".join(probs)))
-        res = eng.run(prompt, sb.work, with_skill=False, budget_usd=cap, env=sb.env, skill_name=agent.name,
+        res = eng.run(prompt, sb.work, with_skill=bool(names), budget_usd=cap, env=sb.env, skill_name=agent.name,
                       ticket=ticket)
         try:
-            iso = eng.isolation_problems(res, False, None, user_names)
+            iso = eng.isolation_problems(res, False, None, user_names, pins=names)
             res["isolation"] = dict(sb.record(), problems=iso)
+            if names: res["isolation"]["skills_loaded"] = skills_loaded(res, names)
+            res["work_manifest"] = sb.manifest()
         except Exception as ex:
             iso = []
             res["launch_failed"] = res.get("launch_failed") or "output handling failed after the call (%s)" % type(ex).__name__
@@ -4564,9 +4869,10 @@ def agent_isolated_run(eng, prompt, agent, run_root, cap, user_names, ticket=Non
     res["workdir"] = os.path.realpath(sb.work)
     return res, fatal
 
-def record_agent_run(rd, res, eng, scenario, config, k, agent, api_eq):
+def record_agent_run(rd, res, eng, scenario, config, k, agent, api_eq, fixture=None):
     """stream.jsonl, the normalized transcript.json (only when the stream normalizes and, for Claude, the init event
-    lists the agent: D8) and run.json with the run's state."""
+    lists the agent: D8) with the work-folder manifest, and run.json with the run's state and, for a scenario with a
+    fixture, its slug and hash."""
     from engine import agent_eval
     from engine import normalize as N
     wtext(os.path.join(rd, "stream.jsonl"), res["stream"])
@@ -4587,15 +4893,17 @@ def record_agent_run(rd, res, eng, scenario, config, k, agent, api_eq):
     if t is not None:
         t.setdefault("workspace", res["workdir"])
         t["turns"] = [{"user": agent_eval.prompt_of(scenario), "final": t["final"]}]
+        t["work_manifest"] = res.get("work_manifest", {})
         wjson(os.path.join(rd, "transcript.json"), N.checked(t))
-    wjson(os.path.join(rd, "run.json"), {
+    extra = {"fixture": fixture} if fixture else {}
+    wjson(os.path.join(rd, "run.json"), dict(extra, **{
         "scenario": scenario["id"], "file": scenario["file"], "tool": eng.name, "configuration": config, "run": k,
         "agent": agent.name, "agent_dir": agent.dir, "state": state, "agent_loaded": loaded, "model": eng.model,
         "effort": eng.effort, "command": res.get("command"), "returncode": res.get("returncode"), "error": res.get("error"),
         "stderr_tail": res.get("stderr_tail", ""), "duration_ms": res.get("duration_ms", 0),
         "input_tokens": res["input_tokens"], "output_tokens": res["output_tokens"], "cost_usd": res.get("cost_usd"),
         "api_equivalent_usd": round(api_eq[0], 6), "api_equivalent_source": api_eq[1], "billing": current_billing(),
-        "isolation": res.get("isolation")})
+        "isolation": res.get("isolation")}))
     return state
 
 def agent_run_iteration(agent, old, ws, engines, cells, runs, budget, prices, tokens, run_root=None, log=print):
@@ -4605,6 +4913,16 @@ def agent_run_iteration(agent, old, ws, engines, cells, runs, budget, prices, to
     n = (iterations(ws) or [0])[-1] + 1
     it_dir = os.path.join(ws, "iteration-%d" % n)
     configs = [("new_agent", agent)] + ([("old_agent", old)] if old else [])
+    pinned = {c: pin_states(src) for c, src in configs}
+    bad = [s for states in pinned.values() for s in states if not s["ok"]]
+    if bad: raise EvalError("pin %s does not verify: %s" % (bad[0]["pin"], bad[0]["reason"]))
+    pinned = {c: pin_record(states) for c, states in pinned.items()}
+    planned = {c["scenario"] for c in cells if c["state"] == agent_eval.PLANNED}
+    fixtures = {}
+    for s in agent.scenarios:
+        slug, files, probs = scenario_fixture(agent, s) if s["id"] in planned else (None, [], [])
+        if probs: raise EvalError("; ".join(probs))
+        if slug is not None: fixtures[s["id"]] = (files, fixture_record(slug, files))
     plan = {"agent_name": agent.name, "agent_path": agent.dir, "old_agent": old.dir if old else None,
             "engines": {e.name: e.model for e in engines}, "efforts": {e.name: e.effort for e in engines},
             "runs_per_cell": runs, "configurations": [c for c, _ in configs], "cells": cells,
@@ -4616,6 +4934,8 @@ def agent_run_iteration(agent, old, ws, engines, cells, runs, budget, prices, to
             "auth_profile": None if AUTH["profile"] is None else AUTH["profile"].name,
             "isolation": {"run_root": run_root, "per_run_sandbox": True},
             "budget_enforcement": {e.name: budget_enforcement(e) for e in engines}}
+    if pinned["new_agent"]: plan["pins"] = pinned["new_agent"]
+    if fixtures: plan["fixtures"] = {sid: rec for sid, (_, rec) in fixtures.items()}
     wjson(os.path.join(it_dir, "plan.json"), plan)
     spent0, stopped = budget.spent, None
     user_names = sorted({nm for nm, _ in claude_user_skills(claude_config_dir(), config_dir=True)}) \
@@ -4628,8 +4948,10 @@ def agent_run_iteration(agent, old, ws, engines, cells, runs, budget, prices, to
         ticket, stop = spend_admit(budget, "exec", eng.name, eng.model, n, cap, fallback, eng.has_call_cap, stop)
         if stop: raise _Fatal(stop)
         rd = ensure_inside(it_dir, agent_eval.run_dir(it_dir, eng.name, scenario["id"], config, k))
+        files, fx = fixtures.get(scenario["id"], ((), None))
         try:
-            res, fatal = agent_isolated_run(eng, agent_eval.prompt_of(scenario), src, run_root, cap, user_names, ticket)
+            res, fatal = agent_isolated_run(eng, agent_eval.prompt_of(scenario), src, run_root, cap, user_names, ticket,
+                                            files, pinned[config])
         except Exception:
             if ticket is not None: ticket.not_launched(budget.spent)
             raise
@@ -4641,7 +4963,8 @@ def agent_run_iteration(agent, old, ws, engines, cells, runs, budget, prices, to
                      "error" if res.get("error") else "ok", res.get("cost_usd"), res["input_tokens"],
                      res["output_tokens"], price_info(eng.name, eng.model, prices), api_eq[0], api_eq[1])
         try:
-            state = record_agent_run(rd, res, eng, scenario, config, k, src, api_eq)
+            state = record_agent_run(rd, res, eng, scenario, config, k, src, api_eq,
+                                     {"slug": fx["slug"], "sha256": fx["sha256"]} if fx else None)
         except Exception as ex:
             raise _Fatal("[%s %s] could not record the run (%s); charged $%.2f (%s) and stopped"
                          % (eng.name, config, type(ex).__name__, api_eq[0], api_eq[1]))
@@ -4738,8 +5061,9 @@ def agent_run_problems(a, agent, old, engines, cells, est, prices, tokens, left)
             out.append("--strict-budget (default): %s has no enforceable per-call budget cap (its budget is only a soft "
                        "limit); refusing the live run (drop it from --engines; --no-strict-budget overrides this, "
                        "risky)" % ", ".join(soft))
+    out += [p for sc in agent.scenarios for p in scenario_fixture(agent, sc)[2]]
     for unit in [agent] + ([old] if old else []):
-        out += agent_validation_problems(unit)
+        out += agent_validation_problems(unit) + pin_problems(unit)
         states = agent_eval.wrapper_states(unit.dir)
         out += ["%s wrapper %s: %s" % (unit.name, e.name, agent_eval.wrapper_label(states[e.name], ""))
                 for e in engines if states[e.name] is not None]
@@ -4749,6 +5073,11 @@ def agent_run_problems(a, agent, old, engines, cells, est, prices, tokens, left)
         if any(e.name == tool for e in engines):
             out.append("%s: agent %r is also installed at user scope at %s; hiding it from the run is not verified, so "
                        "it could load instead of the wrapper under test" % (tool, agent.name, p))
+    pinned = {s["name"] for u in [agent] + ([old] if old else []) for s in pin_states(u) if s["ok"]}
+    if pinned and any(e.name == "claude" for e in engines):
+        out += ["claude: pinned skill %r is also installed at %s; hiding it via --setting-sources is not verified, so "
+                "the init check could not tell it from the pinned copy" % (n, p)
+                for n, p in claude_user_skills(claude_config_dir(), config_dir=True) if n in pinned]
     if not any(c["state"] == agent_eval.PLANNED for c in cells):
         out.append("no runnable cell: every scenario x tool cell is not-run (%s)" % ", ".join(
             sorted({c["state"] for c in cells})))
@@ -4770,6 +5099,19 @@ def agent_run_problems(a, agent, old, engines, cells, est, prices, tokens, left)
                 out.append("%s is not empty; every sandbox under %s would see it (use --run-root elsewhere)" % (p, root))
     return out
 
+def plan_refused(agent, old):
+    """Prints `agent plan refused: ...` for every K2 refusal of the agent and the previous version; True when any."""
+    out = agent_input_problems(agent) + (agent_input_problems(old) if old else [])
+    for p in out: print("agent plan refused: " + p)
+    return bool(out)
+
+def pin_parts(agent, old):
+    """The plan-hash part of the pins (each pin with its registration hash), only for an agent with pins, so the
+    plan hash of an agent without pins is the N1 one."""
+    pins = {c: [[s["pin"], s["registration_sha256"]] for s in pin_states(u)]
+            for c, u in (("agent", agent), ("old_agent", old)) if u is not None and u.pins}
+    return {"pins": pins} if pins else {}
+
 def agent_run(a, agent, ws, prices, tokens):
     engines = make_agent_engines(a)
     if a.runs < 1: raise EvalError("--runs must be >= 1")
@@ -4777,6 +5119,7 @@ def agent_run(a, agent, ws, prices, tokens):
     cells = agent_cells(agent, engines)
     if a.agent_cmd == "plan" or not a.live:
         print(agent_plan_text(a, agent, old, ws, engines, cells, prices, tokens))
+        if plan_refused(agent, old): return 2
         print("\nDRY RUN: nothing was executed. A real run needs `agent run --live --auth-profile P --budget-usd X`, a "
               "clean `agent validate`, generated wrappers, " + AGENT_LIVE_APPROVALS + " and an estimate within budget; "
               "the start is recorded as an unsigned approval.")
@@ -4784,10 +5127,10 @@ def agent_run(a, agent, ws, prices, tokens):
     agent_live_required(a)
     est = agent_estimate(engines, cells, a.runs, old, prices, tokens)
     names = [e.name for e in engines]
-    parts = lambda: {"agent": sha256_labeled(agent.files(names)),
-                     "old_agent": sha256_labeled(old.files(names)) if old else None,
-                     "engines": {e.name: [e.model, e.effort] for e in engines}, "budget_usd": a.budget_usd,
-                     "approvals": agent_approval_inputs(agent, ws)}
+    parts = lambda: dict({"agent": sha256_labeled(agent.files(names)),
+                          "old_agent": sha256_labeled(old.files(names)) if old else None,
+                          "engines": {e.name: [e.model, e.effort] for e in engines}, "budget_usd": a.budget_usd,
+                          "approvals": agent_approval_inputs(agent, ws)}, **pin_parts(agent, old))
     budget = agent_live_start(
         a, agent, ws, "agent-run", lambda left: agent_run_problems(a, agent, old, engines, cells, est, prices, tokens, left)
         + agent_gate_problems(agent, ws), parts, ["agent %s: %d planned cell(s), runs %d, engines %s" % (
@@ -4832,6 +5175,7 @@ def agent_grade(a, agent, ws, prices, tokens):
         except EvalError as ex:
             out.append(str(ex))
         if not todo: out.append("nothing for a grader: no run of iteration-%d holds an llm criterion" % n)
+        out += pin_problems(agent)
         if est["unpriced_models"]: out.append("no price for %s; pass --price" % est["unpriced_models"])
         if est["total_usd"] > left: out.append("estimate $%.2f exceeds budget $%.2f" % (est["total_usd"], left))
         out += api_key_env_problems()
@@ -4909,7 +5253,7 @@ def agent_report_gate(ws, n, spec):
 # ---------- agent loop (unit B4): the builder may change only AGENT.md ----------
 AGENT_ENGLISH_BUILDER_RULE = ("Write all agent content in English only (the AGENT.md frontmatter and body, from which the "
                               "wrappers are generated); the loop stops if any non-English text appears.")
-AGENT_UNFIXABLE = ("coverage-missing:", "agent-load-unverified:", "parity-permissions-hermes:")
+AGENT_UNFIXABLE = ("coverage-missing:", "agent-load-unverified:", "skills-load-unverified:", "parity-permissions-hermes:")
 AGENT_NOT_REGULAR = "AGENT.md is not a regular file directly in the agent folder"
 
 class AgentBuilder(ClaudeBuilder):
@@ -5020,8 +5364,8 @@ AGENT_CRASH_GATES = ("writable-set", "regenerate", "rules-unchanged")
 def agent_loop(agent, ws, engines, grader, builder, max_iterations=MAX_AUTO_ITERATIONS, runs=DEFAULT_RUNS, old=None,
                budget=None, prices=None, tokens=None, precheck=None, run_root=None, log=print):
     """run -> typed grading (and grader for llm criteria) -> report; stop when the gate is clean, with "needs-coverage"
-    when only AGENT_UNFIXABLE problems remain (coverage-missing, agent-load-unverified, the fixed Hermes permission
-    FAIL: no builder can fix them), else call
+    when only AGENT_UNFIXABLE problems remain (coverage-missing, agent-load-unverified, skills-load-unverified, the fixed
+    Hermes permission FAIL: no builder can fix them), else call
     builder(iteration_dir, agent_dir), which may change only AGENT.md, and run AGENT_POST_BUILDER_GATES after it,
     whatever it returned or raised; another exception than EvalError runs only AGENT_CRASH_GATES and is re-raised.
     precheck(agent, iterations_left) -> [problems] runs before every iteration; any problem stops the loop with
@@ -5166,6 +5510,7 @@ def agent_loop_cli(a, agent, ws, prices, tokens):
     if not a.live:
         print(agent_plan_text(a, agent, old, ws, engines, cells, prices, tokens))
         print("\n".join(loop_lines))
+        if plan_refused(agent, old): return 2
         print("\nDRY RUN: nothing was executed. A real loop needs `agent loop --live --auth-profile P --budget-usd X "
               "--builder-prompt FILE`, a clean `agent validate`, generated wrappers, " + AGENT_LIVE_APPROVALS + " and an "
               "estimate within budget; the start is recorded as an unsigned approval.")
@@ -5191,12 +5536,12 @@ def agent_loop_cli(a, agent, ws, prices, tokens):
     def parts():
         agent_sha, bound["agent"] = agent_bound_files(agent.files(list(agent_eval.TOOLS)))
         old_sha, bound["old_agent"] = agent_bound_files(old.files(names)) if old else (None, {})
-        return {"agent": agent_sha, "old_agent": old_sha,
-                "engines": {e.name: [e.model, e.effort] for e in engines}, "budget_usd": a.budget_usd,
-                "builder": [a.builder_model,
-                            hashlib.sha256(builder_text.encode("utf-8")).hexdigest() if builder_text else None],
-                "max_iterations": a.max_iterations, "grader": [ge, a.grader_model, _str_opt(a, "grader_effort")],
-                "approvals": agent_approval_inputs(agent, ws)}
+        return dict({"agent": agent_sha, "old_agent": old_sha,
+                     "engines": {e.name: [e.model, e.effort] for e in engines}, "budget_usd": a.budget_usd,
+                     "builder": [a.builder_model,
+                                 hashlib.sha256(builder_text.encode("utf-8")).hexdigest() if builder_text else None],
+                     "max_iterations": a.max_iterations, "grader": [ge, a.grader_model, _str_opt(a, "grader_effort")],
+                     "approvals": agent_approval_inputs(agent, ws)}, **pin_parts(agent, old))
     budget = agent_live_start(a, agent, ws, "agent-loop", problems, parts, [
         "agent %s: loop of at most %d iteration(s), %d planned cell(s), runs %d, engines %s" % (
             agent.name, a.max_iterations, sum(1 for c in cells if c["state"] == agent_eval.PLANNED), a.runs,

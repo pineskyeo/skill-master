@@ -1,5 +1,5 @@
 {
-  "$comment": "Claude Code target (unit A3, plan.md:673). Every value is the legacy eva.py constant it replaces; tests/test_rule_targets.py pins each one. Unit B1 (D7): permissions compare the wrapper tools by capability class (tool-classes, rules/data/capabilities.json), because AGENT.md v2 names capabilities, not tools. Unit B2 (D3, D4): models maps the model_policy role to the wrapper model and effort (Q13); whether Claude Code reads effort and takes the opus alias in a subagent file is UNVERIFIED (gates.md G30). render.tool_names is the capability to tool-name list eva.py generate writes into tools; whether Claude Code still names its delegate tool Task is UNVERIFIED (gates.md G32).",
+  "$comment": "Claude Code target (unit A3, plan.md:673). Every value is the legacy eva.py constant it replaces; tests/test_rule_targets.py pins each one. Unit B1 (D7): permissions compare the wrapper tools by capability class (tool-classes, rules/data/capabilities.json), because AGENT.md v2 names capabilities, not tools. Unit B2 (D3, D4): models maps the model_policy role to the wrapper model and effort (Q13); whether Claude Code reads effort and takes the opus alias in a subagent file is UNVERIFIED (gates.md G30). render.tool_names is the capability to tool-name list eva.py generate writes into tools; whether Claude Code still names its delegate tool Task is UNVERIFIED (gates.md G32). Unit K2 (D9): wrapper.fields.skills is the sub-agent skills list (inputs/design.md:49), written only for an agent with pinned skills, as the pinned names in pin order; whether a session started with --agent preloads them is UNVERIFIED.",
   "tool": "claude",
   "label": "Claude Code",
   "engine": "claude",
@@ -20,7 +20,7 @@
     "path": "wrappers/claude/{name}.md",
     "format": "frontmatter",
     "required": ["name", "description"],
-    "fields": {"tools": {"kind": "tools"}, "model": {"kind": "string"}, "effort": {"kind": "string"}},
+    "fields": {"tools": {"kind": "tools"}, "model": {"kind": "string"}, "effort": {"kind": "string"}, "skills": {"kind": "list"}},
     "forbidden": {},
     "unknown_keys": "allow",
     "extra_files": []

@@ -808,7 +808,8 @@ def find_units(root):
 # ---------- transcript grading (agent side; slated for split-out with the agent checks) ----------
 def load_transcript(path):
     """Parse a transcript and validate it against schemas/transcript.schema.json. Returns (run, errors); run is None
-    when errors. run = {"scenario", "final", "workspace", "calls": [{"tool", "input", "result"}], "results": [str]}"""
+    when errors. run = {"scenario", "final", "workspace", "calls": [{"tool", "input", "result"}], "results": [str],
+    "is_error", "work_manifest"} (the last two None when the transcript does not record them)."""
     try:
         with open(path, encoding="utf-8") as f:
             t = json.load(f)
@@ -821,7 +822,8 @@ def load_transcript(path):
              {"tool": c["tool"], "input": c.get("input"), "result": c.get("result")} for c in t["tool_calls"]]
     results = [c["result"] for c in calls if c["result"]] + list(t.get("tool_results", []))
     return {"scenario": t["scenario"], "final": t["final"], "workspace": t.get("workspace"),
-            "calls": calls, "results": results}, []
+            "calls": calls, "results": results, "is_error": t.get("is_error"),
+            "work_manifest": t.get("work_manifest")}, []
 
 
 def grade_transcript(agent_path, transcript_path):

@@ -332,10 +332,13 @@ def _agent_files(ctx, meta, body, digest):
     files, expect = {}, {}
 
     tools = ", ".join(n for c in caps for n in tg["claude"]["render"]["tool_names"][c])
+    skills = [p.split("@")[0] for p in meta.get("skills") or []]
     lines = ["---", "# " + head["claude"], "name: " + yaml_str(name), "description: " + yaml_str(desc),
              "tools: " + yaml_str(tools)] + ["%s: %s" % (k, yaml_str(v)) for k, v in model["claude"]]
+    lines += ["skills:"] + ["  - " + yaml_str(s) for s in skills] if skills else []
     files["wrappers/claude/%s.md" % name] = ("claude", "\n".join(lines) + "\n---\n" + text["claude"] + "\n")
-    expect["claude"] = (dict([("name", name), ("description", desc), ("tools", tools)] + model["claude"]), text["claude"])
+    expect["claude"] = (dict([("name", name), ("description", desc), ("tools", tools)] + model["claude"] +
+                             ([("skills", skills)] if skills else [])), text["claude"])
 
     shell = "shell" in caps
     lines = ["# " + head["codex"], "name = " + toml_str(name), "description = " + toml_str(desc)]

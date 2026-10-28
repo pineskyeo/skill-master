@@ -119,10 +119,11 @@ def early_state(kind, ws):
     return None, None, rec
 
 
-def classify(kind, ws, unit_dir, schema_errors, signature, current, approval):
+def classify(kind, ws, unit_dir, schema_errors, signature, current, approval, pinned=None):
     """(state, reason, record) of the registration.json in ws for unit_dir, first match wins (B5 D4). schema_errors(rec):
     the registration schema's errors; signature(rec): the approvals.Verdict of the register signature; current(rec):
-    (field, value) pairs recomputed from the files; approval(gate, copy): the approvals.Verdict of a relied-on record."""
+    (field, value) pairs recomputed from the files; approval(gate, copy): the approvals.Verdict of a relied-on record;
+    pinned(rec): why the agent's pinned skills no longer verify at the hashes its iteration recorded, or None (K2)."""
     from engine import approvals
     state, reason, rec = early_state(kind, ws)
     if state is not None: return state, reason, rec
@@ -137,6 +138,8 @@ def classify(kind, ws, unit_dir, schema_errors, signature, current, approval):
     if v.status != "approved": return "invalid", "the register signature does not verify", rec
     for field, value in current(rec):
         if rec[field] != value: return "stale", "%s changed" % field, rec
+    why = pinned(rec) if pinned else None
+    if why: return "stale", why, rec
     for gate in sorted(rec["approvals"]):
         if approval(gate, rec["approvals"][gate]).status != "approved":
             return "stale", "approval %s no longer verifies" % gate, rec

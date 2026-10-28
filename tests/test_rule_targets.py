@@ -216,7 +216,8 @@ def target_pins():
         "wrapper.forbidden": ({}, None), "wrapper.unknown_keys": ("allow", None), "wrapper.extra_files": ([], None),
         "permissions.compare": ("tool-classes", None),
         "permissions.derive": ({}, None), "permissions.unrestrictable": ([], None), "permissions.fixed": (None, None),
-        "wrapper.fields.effort.kind": ("string", None), "models.judgment.model": ("opus", None),
+        "wrapper.fields.effort.kind": ("string", None), "wrapper.fields.skills.kind": ("list", None),
+        "models.judgment.model": ("opus", None),
         "models.judgment.effort": ("xhigh", None), "render.header": (B2_HEADER, None), "render.body": (B2_BODY, None)})
     claude.update({"render.tool_names." + k: (v, None) for k, v in B2_TOOL_NAMES.items()})
     codex = dict(common["codex"], **doc_pins([
@@ -325,7 +326,7 @@ class TestTargets(Tmp):
         self.assertEqual((t["skill"]["name_max"], t["skill"]["description_max"]), (eva.NAME_MAX, P7.DESCRIPTION_MAX))
         self.assertEqual(t["skill"]["forbidden_chars"], "<>")
         self.assertEqual(t["wrapper"]["required"], ["name", "description"])
-        self.assertEqual(list(t["wrapper"]["fields"]), ["tools", "model", "effort"])
+        self.assertEqual(list(t["wrapper"]["fields"]), ["tools", "model", "effort", "skills"])
         self.assertEqual(t["permissions"]["compare"], "tool-classes")
 
     def test_codex_values(self):

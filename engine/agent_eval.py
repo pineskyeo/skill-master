@@ -6,7 +6,7 @@ Iteration layout: <workspace>/iteration-N/<tool>/<scenario id>/<configuration>/r
 stream), transcript.json (the normalized transcript, only for a run whose agent load passed), run.json and, after
 `agent grade`, grading.json. configuration is new_agent, or old_agent for the previous version (--old-agent)."""
 import hashlib, json, os, re
-from engine import approvals, generate
+from engine import approvals, generate, registry
 from engine.primitives import transcript as transcript_primitive
 
 TOOLS = approvals.COVERAGE_TOOLS
@@ -145,6 +145,22 @@ def install_rel(tool, name):
 
 def wrapper_rel(tool, name):
     return WRAPPERS[tool].format(name=name)
+
+
+def parse_pin(text):
+    """(name, version) of an AGENT.md skills entry "<name>@<semver>", None for anything else."""
+    if not isinstance(text, str) or text.count("@") != 1:
+        return None
+    name, version = text.split("@")
+    if not registry.safe_name(name) or registry.parse_semver(version) is None:
+        return None
+    return name, version
+
+
+def pins_of(meta):
+    """The AGENT.md skills entries of a valid frontmatter, in order ([] without the key)."""
+    pins = (meta or {}).get("skills")
+    return list(pins) if isinstance(pins, list) else []
 
 
 def sha256_bytes(data):
@@ -337,8 +353,8 @@ def benchmark(plan, runs, coverage):
 def gate(plan, runs, coverage_missing):
     """Gate problems: the lines given by the caller (the G1 coverage-missing lines and the parity FAIL rows), then the
     run-level problems. Fail closed:
-    an unverified Codex agent load, an errored run, an ungraded run, an llm criterion without a grader verdict and a
-    failed row each keep the gate from reading clean."""
+    an unverified Codex agent load, a pinned run whose skill load is not verified, an errored run, an ungraded run, an
+    llm criterion without a grader verdict and a failed row each keep the gate from reading clean."""
     problems = list(coverage_missing)
     if plan.get("stopped"):
         problems.append("stopped: %s" % plan["stopped"])
@@ -348,6 +364,17 @@ def gate(plan, runs, coverage_missing):
         problems.append("agent-load-unverified:codex: %d Codex run(s) have no evidence that the agent was loaded (no "
                         "recorded top-level Codex agent start; UNVERIFIED until an operator capture verifies it)"
                         % len(unverified))
+    pinned = {}
+    for r in runs:
+        iso = r.get("isolation") if isinstance(r.get("isolation"), dict) else {}
+        pins = iso.get("pinned_skills") or (plan.get("pins") if r.get("configuration") == "new_agent" else None)
+        if r.get("state") == RUN and pins and iso.get("skills_loaded") != "verified":
+            pinned[r["tool"]] = pinned.get(r["tool"], 0) + 1
+    for tool in TOOLS:
+        if tool in pinned:
+            problems.append("skills-load-unverified:%s: %d pinned run(s) without an init event that lists exactly the "
+                            "pinned skills (run.json isolation.skills_loaded is not verified); the pinned skill load "
+                            "is UNVERIFIED, so these runs do not test the pins" % (tool, pinned[tool]))
     for r in runs:
         where = "%s/%s/%s/run-%d" % (r["scenario"], r["tool"], r["configuration"], r["run"])
         g = r["grading"]

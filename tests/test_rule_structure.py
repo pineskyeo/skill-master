@@ -18,7 +18,8 @@ SPLIT = {
                                    "outputs-declared", "example-present", "size-limit", "refs-relative", "refs-exist",
                                    "refs-one-level", "refs-path-depth", "reference-toc", "version-format", "evals-count"],
     "agent-structure.rules.json": ["frontmatter", "agent-frontmatter-v2", "goal-present", "success-measurable", "scenarios-present",
-                                   "scenarios-valid", "scenarios-expected", "tools-declared", "tools-subset",
+                                   "scenarios-valid", "scenarios-expected", "tools-declared",
+                                   "skills-need-skill-capability", "tools-subset",
                                    "tools-documented", "memory-section", "multi-turn-scenario"],
 }
 # id -> (applies_to, category, must when it fails, must when n/a or None when the rule never gives n/a): the A3 rows.

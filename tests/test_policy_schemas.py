@@ -27,6 +27,19 @@ B1_AGENT_ROWS = {"agent-frontmatter-v2", "success-measurable", "tools-declared",
                  "scenarios-valid", "scenarios-expected", "multi-turn-scenario", "parity-permissions-claude",
                  "parity-permissions-codex", "parity-permissions-opencode", "parity-permissions-hermes"}
 B2_ROWS = ("wrappers-generated", "tool-metadata-generated")
+# Unit K2 (brief K2 D7, D8): the agent row it adds, its rule fixtures, rule_check in the closed check-type message and
+# the variants that fire its message rules (names starting k2-). The P7 pins compare everything else.
+K2_ROWS = ("skills-need-skill-capability",)
+K2_FIXTURES = os.path.join("tests", "rules", "skills-need-skill-capability")
+K2_MESSAGES = (("markdown_table, llm, command_ran, command_absent or file_exists)", "markdown_table or llm)"),
+               ("|csv_rows|rule_check required", "|csv_rows required"))
+
+
+def k2_norm(text):
+    """text with the two closed type lists K2 widens put back to their P7 wording."""
+    for new, old in K2_MESSAGES:
+        text = text.replace(new, old)
+    return text
 SUFFIX_RE = re.compile(r" \[(?:rule [a-z-]+, )?([a-z-]+\.schema\.json)#(/[^,\]]*), keyword ([^\]]+)\]$")
 DISAGREE = "rule and eva.py disagree"
 # A4 rule ids by rule file (brief A4 D1). With the five rows of SHAPE_IDS they are the 37 rows A4 moved out of
@@ -333,6 +346,7 @@ SCENARIO_VARIANTS = {
     "outcome-list": (edit(BASE_SCENARIO, expected_outcome=["a", "b"]), True),
     "no-success-criteria": (edit(BASE_SCENARIO, success_criteria=KeyError), True),
     "extra-keys": (edit(BASE_SCENARIO, note=1, turns=[{"user": "u", "x": 2}]), True),
+    "k2-fixture-slash": (edit(BASE_SCENARIO, fixture="a/b"), True),
 }
 
 BASE_TRANSCRIPT = {"scenario": "s1", "final": "done", "workspace": "/tmp/ws",
@@ -488,6 +502,11 @@ CHECK_VARIANTS.update({
     "ok-csv-rows-astral": (chk(ROWS, path="o\U0001F600.csv", rows=[["\U0001F600"]]), False),
     "ok-csv-rows-min1": (chk(ROWS, min=1), False),
     "ok-extra-keys-regex": (chk(REGEX, note=1), False),
+    "k2-rule-check-ok": ({"type": "rule_check", "path": "out/AGENT.md", "rules": "rules/agent-structure.rules.json"}, False),
+    "k2-rule-check-unknown-key": ({"type": "rule_check", "path": "AGENT.md", "rules": "rules/naming.rules.json", "x": 1},
+                                  True),
+    "k2-rule-check-path-dotdot": ({"type": "rule_check", "path": "../AGENT.md", "rules": "rules/naming.rules.json"}, True),
+    "k2-rule-check-rules-outside": ({"type": "rule_check", "path": "AGENT.md", "rules": "schemas/evals.schema.json"}, True),
 })
 
 
@@ -1037,7 +1056,7 @@ def corpus_units():
     out = []
     for top in CORPUS_ROOTS:
         out += eva.find_units(os.path.join(ROOT, top))
-    return sorted(set(out))
+    return sorted(u for u in set(out) if not rel(u).startswith(K2_FIXTURES.replace(os.sep, "/") + "/"))
 
 
 def scenario_files():
@@ -1687,7 +1706,14 @@ def operand(fname, rid, key):
 
 # The whole check node of every A4 rule on a generic op (not a primitive and not a host op).
 GENERIC_NODES = {"goal-present": {"op": "regex", "sel": "frontmatter:#/goal", "normalize": ["string-or-empty", "strip"],
-                                  "pattern": r"[\s\S]{15}"}}
+                                  "pattern": r"[\s\S]{15}"},
+                 "skills-need-skill-capability": {
+                     "op": "when",
+                     "if": {"op": "any", "of": [{"op": "count", "sel": "frontmatter:#/skills", "min": 0},
+                                                {"op": "regex", "sel": "frontmatter:#/skills", "pattern": r"[\s\S]*"},
+                                                {"op": "equals", "left": {"sel": "frontmatter:#/skills"},
+                                                 "right": {"value": None}}]},
+                     "then": {"op": "subset", "left": {"value": ["skill"]}, "right": {"sel": "frontmatter:#/capabilities"}}}}
 
 
 class TestDescriptionData(unittest.TestCase):
@@ -1797,7 +1823,8 @@ def compared_unit_rows():
     out = {}
     for key, u in units:
         rep = eva.check(u)
-        out[key] = {"rows": [[c["id"], c["status"], c["must"], c["category"], p7_norm(c["reason"])] for c in rep.checks],
+        out[key] = {"rows": [[c["id"], c["status"], c["must"], c["category"], k2_norm(p7_norm(c["reason"]))]
+                             for c in rep.checks if c["id"] not in K2_ROWS],
                     "verdict": rep.verdict, "score": rep.score}
     return out
 
@@ -1826,7 +1853,8 @@ class TestP7RowsAndMessages(unittest.TestCase):
                                                  "rows of those ids:\n" + "\n".join(shown))
 
     def test_every_message_of_every_function_case_is_its_p7_message(self):
-        got = {case: [p7_norm(m) for m in errs] for case, errs in schema_problems_of_every_input()}
+        got = {case: [k2_norm(p7_norm(m)) for m in errs]
+               for case, errs in schema_problems_of_every_input() if not case.split(":", 1)[1].startswith("k2-")}
         wrong = mismatches(P7_MESSAGES, {k: pin_digest(v) for k, v in got.items()})
         self.assertEqual(wrong, [], "cases whose messages differ from the P7 commit, as the head gives them:\n" +
                          "\n".join("%s: %r" % (k, got.get(k)) for k in wrong))
@@ -1907,7 +1935,7 @@ class TestGateFunctions(unittest.TestCase):
         self.assertEqual(rows["parity-permissions-opencode"][0], "pass")
         self.assertEqual(reason, "[opencode] wrapper permissions ['read', 'search'] match the AGENT.md capabilities (compared "
                                  "by capability class, because OpenCode permission keys are not tool names)")
-        self.assertEqual({k: v for k, v in rows.items() if k not in B1_AGENT_ROWS and k not in B2_ROWS},
+        self.assertEqual({k: v for k, v in rows.items() if k not in B1_AGENT_ROWS and k not in B2_ROWS + K2_ROWS},
                          OPENCODE_COMPLETE_ROWS)
         self.assertEqual(status, OPENCODE_COMPLETE_STATUS)
 

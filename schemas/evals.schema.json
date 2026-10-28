@@ -65,15 +65,32 @@
         {"if": {"properties": {"type": {"const": "csv_rows"}}}, "then": {"$ref": "#/$defs/check-csv-rows"}},
         {"if": {"properties": {"type": {"enum": ["file_exists", "file_equals_fixture", "csv_cleaned"]}}}, "then": {"$ref": "#/$defs/file-path"}},
         {"if": {"properties": {"type": {"enum": ["file_equals_fixture", "csv_cleaned"]}}}, "then": {"$ref": "#/$defs/file-fixture"}},
-        {"if": {"properties": {"type": {"const": "csv_cleaned"}}}, "then": {"$ref": "#/$defs/csv-cleaned-data-rows"}}
+        {"if": {"properties": {"type": {"const": "csv_cleaned"}}}, "then": {"$ref": "#/$defs/csv-cleaned-data-rows"}},
+        {"if": {"properties": {"type": {"const": "rule_check"}}}, "then": {"$ref": "#/$defs/check-rule-check"}}
       ]},
       "else": {"$ref": "#/$defs/check-type"}
     },
     "check-type": {
-      "description": "%(where)s.check.type: one of regex|not_regex|tool_call|skill_triggered|file_exists|file_equals_fixture|csv_cleaned|csv_rows required",
+      "description": "%(where)s.check.type: one of regex|not_regex|tool_call|skill_triggered|file_exists|file_equals_fixture|csv_cleaned|csv_rows|rule_check required",
       "type": "object",
       "required": ["type"],
-      "properties": {"type": {"enum": ["regex", "not_regex", "tool_call", "skill_triggered", "file_exists", "file_equals_fixture", "csv_cleaned", "csv_rows"]}}
+      "properties": {"type": {"enum": ["regex", "not_regex", "tool_call", "skill_triggered", "file_exists", "file_equals_fixture", "csv_cleaned", "csv_rows", "rule_check"]}}
+    },
+    "check-rule-check": {"allOf": [{"$ref": "#/$defs/rule-check-keys"}, {"$ref": "#/$defs/rule-check-path"}, {"$ref": "#/$defs/rule-check-rules"}]},
+    "rule-check-keys": {
+      "description": "%(where)s.check.%(key_ascii)s: not a rule_check key (allowed: type, path, rules)",
+      "properties": {"type": true, "path": true, "rules": true},
+      "additionalProperties": {"not": {}}
+    },
+    "rule-check-path": {
+      "description": "%(where)s.check.path: one output file relative to the case's output folder required (no '..', no backslash, no NUL, not absolute)",
+      "required": ["path"],
+      "properties": {"path": {"type": "string", "minLength": 1, "not": {"anyOf": [{"pattern": "^/"}, {"pattern": "\\\\"}, {"pattern": "\\u0000"}, {"pattern": "(?:^|/)\\.\\.(?:/|\\Z)"}]}}}
+    },
+    "rule-check-rules": {
+      "description": "%(where)s.check.rules: a rule file of the engine's rules/ folder required, written rules/<file>.rules.json",
+      "required": ["rules"],
+      "properties": {"rules": {"type": "string", "pattern": "^rules/[a-z0-9][a-z0-9_-]*(\\.[a-z0-9_-]+)*\\.rules\\.json\\Z"}}
     },
     "check-regex": {"allOf": [{"$ref": "#/$defs/regex-pattern-string"}, {"$ref": "#/$defs/regex-pattern-compiles"}, {"$ref": "#/$defs/regex-target"}]},
     "regex-pattern-string": {"description": "%(where)s.check.pattern: non-empty string required", "required": ["pattern"], "properties": {"pattern": {"type": "string", "minLength": 1}}},

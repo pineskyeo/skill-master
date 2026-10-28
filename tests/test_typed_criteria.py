@@ -11,7 +11,8 @@ from engine.primitives import parity as PR, transcript as T
 CR2 = os.path.join(ROOT, "tests", "fixtures", "agents", "code-reviewer-v2")
 RA2 = os.path.join(ROOT, "tests", "fixtures", "agents", "research-assistant-v2")
 VOCABULARY = ["read", "search", "write", "shell", "web_fetch", "web_search", "delegate", "skill"]
-TYPES = ["min_verified_sources", "file_line_citations", "no_writes", "max_chars", "markdown_table", "llm"]
+TYPES = ["min_verified_sources", "file_line_citations", "no_writes", "max_chars", "markdown_table", "llm", "command_ran",
+         "command_absent", "file_exists"]
 CRITERION_DEFS = ("criterion", "count", "nonblank") + tuple(TYPES)
 # sha256 of each A4 eva.py source segment moved to engine/primitives/transcript.py, computed from the A4 export by
 # /tmp/b1-owner/pins.py (/tmp/b1-owner/a4-pins.txt). The moved file writes U+2192 as an escape, undone before hashing.

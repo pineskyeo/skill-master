@@ -340,6 +340,9 @@ def _frontmatter_wrapper(st, tgt, fp, rel, name, desc):
             if key in m and not isinstance(m[key], bool): p.append("%s: %s must be a boolean" % (rel, key))
         elif kind == "enum":
             if key in m and m[key] not in f["values"]: p.append("%s: %s must be one of %s" % (rel, key, "/".join(f["values"])))
+        elif kind == "list":
+            if key in m and not (isinstance(m[key], list) and m[key] and all(_nonempty_str(x) for x in m[key])):
+                p.append("%s: %s must be a non-empty list of strings" % (rel, key))
         elif kind == "tools":
             names = _tool_names(m.get(key))
             if names is None: p.append("%s: %s: a non-empty list or comma-separated string is required" % (rel, key))

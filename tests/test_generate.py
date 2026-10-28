@@ -1104,6 +1104,51 @@ class TestCli(Base):
         self.assertEqual(run_main(["generate", "--check", d])[0], 0)
 
 
+PINNED_BODY = READ_BODY.replace("read confirms lines.", "read confirms lines; skill loads the pinned skills.")
+
+
+def pinned_md(pins=("beta@2.0.0", "alpha@1.0.0")):
+    md = agent_md(caps="read, search, skill", body=PINNED_BODY)
+    return md.replace("targets: [claude, codex, opencode, hermes]\n", "targets: [claude, codex, opencode, hermes]\n"
+                      "skills:\n" + "".join("  - %s\n" % p for p in pins))
+
+
+class TestSkillsField(Base):
+    """Unit K2 (D9): the Claude wrapper lists the pinned skill names in pin order; no other wrapper changes and an
+    agent without pins gets no skills field."""
+    def test_the_claude_wrapper_lists_the_pins_in_pin_order_and_check_passes(self):
+        md = pinned_md()
+        d = self.generated(md=md)
+        out = READ_OUT.replace("read confirms lines.", "read confirms lines; skill loads the pinned skills.")
+        want = ('---\n# %s\nname: "scout-reader"\ndescription: "%s"\ntools: "Read, Glob, Grep, Skill"\nmodel: "opus"\n'
+                'effort: "xhigh"\nskills:\n  - "beta"\n  - "alpha"\n---\n%s\n' % (agent_header(md), READ_DESC, out))
+        self.assertEqual(self.text(d, "wrappers/claude/scout-reader.md"), want)
+        self.assert_check(d, 0)
+        for rel in wrapper_rels("scout-reader")[1:]:
+            self.assertEqual([l for l in self.text(d, rel).splitlines() if l.startswith("skills")], [], rel)
+        r = eva.check(d)
+        self.assertEqual(row(r, "parity-wrapper-claude")["status"], "pass", row(r, "parity-wrapper-claude"))
+        self.assertEqual(row(r, "wrappers-generated")["status"], "pass")
+
+    def test_an_agent_without_pins_gets_no_skills_field(self):
+        d = self.generated()
+        self.assertNotIn("skills:", self.text(d, "wrappers/claude/scout-reader.md"))
+        self.assertEqual(self.text(d, "wrappers/claude/scout-reader.md"), claude_read(agent_header(agent_md())))
+
+    def test_a_reordered_pin_list_makes_the_wrapper_stale(self):
+        d = self.generated(md=pinned_md())
+        self.put(d, "AGENT.md", pinned_md(("alpha@1.0.0", "beta@2.0.0")))
+        self.assert_check(d, 1, "wrappers/claude/scout-reader.md")
+
+    def test_the_reader_and_parity_refuse_a_skills_field_that_is_not_a_list_of_names(self):
+        d = self.generated(md=pinned_md())
+        p = os.path.join(d, "wrappers", "claude", "scout-reader.md")
+        text = self.text(d, "wrappers/claude/scout-reader.md").replace('skills:\n  - "beta"\n  - "alpha"\n', 'skills: ""\n')
+        self.put(d, "wrappers/claude/scout-reader.md", text)
+        self.assertEqual(row(eva.check(d), "parity-wrapper-claude")["status"], "fail")
+        self.assertTrue(os.path.isfile(p))
+
+
 class TestTargetsData(unittest.TestCase):
     def target(self, tool):
         with open(os.path.join(ROOT, "targets", tool + ".json"), encoding="utf-8") as f:

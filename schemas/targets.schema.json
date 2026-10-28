@@ -129,7 +129,7 @@
       "required": ["kind"],
       "additionalProperties": false,
       "properties": {
-        "kind": {"enum": ["string", "boolean", "enum", "tools", "permission"]},
+        "kind": {"enum": ["string", "boolean", "enum", "tools", "permission", "list"]},
         "values": {"$ref": "#/$defs/texts"}
       },
       "if": {"properties": {"kind": {"const": "enum"}}},

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "AGENT.md v2 frontmatter",
-  "description": "The canonical AGENT.md v2 frontmatter (inputs/agent-master-skills.md section 3.3, unit B1): name, description, goal, capabilities from the closed vocabulary, model_policy as a role name, success_criteria as typed criterion objects, and targets as exactly the four tools. The strict frontmatter reader types every scalar as a string and refuses YAML flow mappings, so each success criterion is written as one single-quoted JSON object per list item and decoded with the strict JSON loader before this schema runs (engine/primitives/transcript.py read_agent). Fix: write the frontmatter with exactly these seven keys, plus the optional version. Unit B6 (D7, plan.md:1368): version is the agent's SemVer 2.0.0 version that register records and version bump rewrites.",
+  "description": "The canonical AGENT.md v2 frontmatter (inputs/agent-master-skills.md section 3.3, unit B1): name, description, goal, capabilities from the closed vocabulary, model_policy as a role name, success_criteria as typed criterion objects, and targets as exactly the four tools. The strict frontmatter reader types every scalar as a string and refuses YAML flow mappings, so each success criterion is written as one single-quoted JSON object per list item and decoded with the strict JSON loader before this schema runs (engine/primitives/transcript.py read_agent). Fix: write the frontmatter with exactly these seven keys, plus the optional version and skills. Unit B6 (D7, plan.md:1368): version is the agent's SemVer 2.0.0 version that register records and version bump rewrites. Unit K2 (plan.md:1651): skills is an optional list of pinned registered skills, each \"<name>@<semver>\" with the exact registered version; the rule skills-need-skill-capability fails it without the skill capability.",
   "$comment": "source: house (agent-master-skills.md section 3.3, assessment section 4.5, plan.md:787-788; no dated record); severity: fail (agent-frontmatter-v2, must, CRITICAL); protects: claude, codex, opencode, hermes. The criterion definitions are copied in schemas/scenario.schema.json and pinned equal by tests/test_typed_criteria.py.",
   "type": "object",
   "required": ["name", "description", "goal", "capabilities", "model_policy", "success_criteria", "targets"],
@@ -14,23 +14,30 @@
     "model_policy": {"type": "string", "pattern": "^[a-z]+(-[a-z]+)*$"},
     "success_criteria": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/criterion"}},
     "targets": {"type": "array", "minItems": 4, "maxItems": 4, "uniqueItems": true, "items": {"enum": ["claude", "codex", "opencode", "hermes"]}},
-    "version": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?\\Z"}
+    "version": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?\\Z"},
+    "skills": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/pin"}}
   },
   "$defs": {
     "nonblank": {"type": "string", "pattern": "\\S"},
     "count": {"type": "integer", "minimum": 1},
     "capability": {"enum": ["read", "search", "write", "shell", "web_fetch", "web_search", "delegate", "skill"]},
+    "pin": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}@(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?\\Z", "not": {"pattern": "^[^@]*\\.\\."}},
+    "regex": {"type": "string", "minLength": 1, "x-python-regex": true},
+    "work-path": {"type": "string", "minLength": 1, "not": {"anyOf": [{"pattern": "^/"}, {"pattern": "\\\\"}, {"pattern": "\\u0000"}, {"pattern": "(?:^|/)\\.\\.(?:/|\\Z)"}]}},
     "criterion": {
       "type": "object",
       "required": ["type"],
-      "properties": {"type": {"enum": ["min_verified_sources", "file_line_citations", "no_writes", "max_chars", "markdown_table", "llm"]}},
+      "properties": {"type": {"enum": ["min_verified_sources", "file_line_citations", "no_writes", "max_chars", "markdown_table", "llm", "command_ran", "command_absent", "file_exists"]}},
       "allOf": [
         {"if": {"required": ["type"], "properties": {"type": {"const": "min_verified_sources"}}}, "then": {"$ref": "#/$defs/min_verified_sources"}},
         {"if": {"required": ["type"], "properties": {"type": {"const": "file_line_citations"}}}, "then": {"$ref": "#/$defs/file_line_citations"}},
         {"if": {"required": ["type"], "properties": {"type": {"const": "no_writes"}}}, "then": {"$ref": "#/$defs/no_writes"}},
         {"if": {"required": ["type"], "properties": {"type": {"const": "max_chars"}}}, "then": {"$ref": "#/$defs/max_chars"}},
         {"if": {"required": ["type"], "properties": {"type": {"const": "markdown_table"}}}, "then": {"$ref": "#/$defs/markdown_table"}},
-        {"if": {"required": ["type"], "properties": {"type": {"const": "llm"}}}, "then": {"$ref": "#/$defs/llm"}}
+        {"if": {"required": ["type"], "properties": {"type": {"const": "llm"}}}, "then": {"$ref": "#/$defs/llm"}},
+        {"if": {"required": ["type"], "properties": {"type": {"const": "command_ran"}}}, "then": {"$ref": "#/$defs/command_ran"}},
+        {"if": {"required": ["type"], "properties": {"type": {"const": "command_absent"}}}, "then": {"$ref": "#/$defs/command_absent"}},
+        {"if": {"required": ["type"], "properties": {"type": {"const": "file_exists"}}}, "then": {"$ref": "#/$defs/file_exists"}}
       ]
     },
     "min_verified_sources": {"required": ["type", "min"], "additionalProperties": false, "properties": {"type": true, "min": {"$ref": "#/$defs/count"}}},
@@ -38,6 +45,9 @@
     "no_writes": {"required": ["type"], "additionalProperties": false, "properties": {"type": true}},
     "max_chars": {"required": ["type", "max"], "additionalProperties": false, "properties": {"type": true, "max": {"$ref": "#/$defs/count"}}},
     "markdown_table": {"required": ["type"], "additionalProperties": false, "properties": {"type": true}},
-    "llm": {"required": ["type", "text"], "additionalProperties": false, "properties": {"type": true, "text": {"$ref": "#/$defs/nonblank"}}}
+    "llm": {"required": ["type", "text"], "additionalProperties": false, "properties": {"type": true, "text": {"$ref": "#/$defs/nonblank"}}},
+    "command_ran": {"required": ["type", "regex"], "additionalProperties": false, "properties": {"type": true, "regex": {"$ref": "#/$defs/regex"}}},
+    "command_absent": {"required": ["type", "regex"], "additionalProperties": false, "properties": {"type": true, "regex": {"$ref": "#/$defs/regex"}}},
+    "file_exists": {"required": ["type", "path"], "additionalProperties": false, "properties": {"type": true, "path": {"$ref": "#/$defs/work-path"}}}
   }
 }

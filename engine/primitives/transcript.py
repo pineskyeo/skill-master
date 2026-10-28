@@ -274,7 +274,8 @@ def _grep_lines(result, printed):
 
 # ---------- typed criteria (schemas/agent-frontmatter.schema.json $defs/criterion) ----------
 KINDS = {"min_verified_sources": "sources", "file_line_citations": "file-lines", "no_writes": "no-writes",
-         "max_chars": "length", "markdown_table": "table", "llm": "needs-review"}
+         "max_chars": "length", "markdown_table": "table", "llm": "needs-review", "command_ran": "command-ran",
+         "command_absent": "command-absent", "file_exists": "file-exists"}
 AGENT_SCHEMA = "agent-frontmatter.schema.json"
 MIGRATION = (
     "Migrate AGENT.md to v2: rename tools to capabilities and list values from read, search, write, shell, web_fetch, "
@@ -340,7 +341,57 @@ def criterion_evidence(crit, final, run=None):
     if kind == "llm":
         return ("needs-review", None, "not machine-checkable, grade by human/model: '%s'" % crit["text"],
                 "A human or model grader decides whether the final answer meets '%s'." % crit["text"])
+    if kind in ("command_ran", "command_absent"):
+        return _command_evidence(kind, crit["regex"], run)
+    if kind == "file_exists":
+        return _file_exists_evidence(crit["path"], run)
     raise ValueError("unknown criterion type %r" % (kind,))
+
+
+def _complete(run):
+    """Why run is not a complete normalized run (no transcript, or is_error not recorded false), else None."""
+    if not run:
+        return "no transcript"
+    if run.get("is_error") is not False:
+        return "the transcript records an error" if run.get("is_error") else "the transcript records no is_error: false"
+    return None
+
+
+def shell_commands(calls):
+    """The command string of every call whose tool maps to the shell capability (rules/data/capabilities.json:
+    Claude Bash, Codex shell); prompt, answer and tool results are never read."""
+    table, _ = parity.capability_table()
+    return [c["input"]["command"] for c in calls
+            if isinstance(c.get("tool"), str) and table.get(c["tool"].strip().lower()) == "shell"
+            and isinstance(c.get("input"), dict) and isinstance(c["input"].get("command"), str)]
+
+
+def _command_evidence(kind, regex, run):
+    pat = re.compile(regex)
+    label = KINDS[kind]
+    why = _complete(run)
+    cmds = shell_commands(run["calls"]) if why is None else []
+    hits = [c for c in cmds if pat.search(c)]
+    ok = why is None and (bool(hits) if kind == "command_ran" else not hits)
+    seen = why or "%d shell command(s), %d match %s%s" % (len(cmds), len(hits), json.dumps(regex),
+                                                        (": %s" % json.dumps(hits[:3])) if hits else "")
+    fix = ("Run a shell command that matches %s." if kind == "command_ran" else
+           "Do not run a shell command that matches %s.") % json.dumps(regex)
+    return label, ok, seen, fix
+
+
+def _file_exists_evidence(path, run):
+    why = _complete(run)
+    manifest = (run or {}).get("work_manifest")
+    if why is None and not isinstance(manifest, dict):
+        why = "the transcript holds no work-folder manifest"
+    rel = posixpath.normpath(path)
+    entry = manifest.get(rel) if why is None else None
+    ok = isinstance(entry, dict) and isinstance(entry.get("sha256"), str)
+    seen = why or ("%s is a file in the work folder" % rel if ok else
+                   "%s is a link in the work folder, not followed" % rel if isinstance(entry, dict) else
+                   "%s is not a file in the work folder" % rel)
+    return "file-exists", ok, seen, "Write the file %s inside the work folder." % rel
 
 
 # ---------- AGENT.md v2 (schemas/agent-frontmatter.schema.json) ----------
