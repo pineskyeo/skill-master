@@ -2293,17 +2293,54 @@ def rule_review_hash(skill_dir):
     files = sha256_labeled([(rel, os.path.join(skill_dir, *rel.split("/"))) for rel in eva.review_sources(skill_dir)])
     return hashlib.sha256(("\n".join(items) + "\n" + files).encode("utf-8")).hexdigest()
 
-def rule_review_problems(spec, ws, verdict_of=None):
-    """[problem] when the skill has rule-review findings and no recorded human decision (`approve --gate rule_review`) matches
-    exactly these findings and the bytes of eva.review_sources: changing a matcher, a metadata field, AGENT.md or a Codex or
-    OpenCode wrapper invalidates the decision. verdict_of(gate, spec, ws): approval_verdict, or plan's memo of it."""
+def rule_review_missing(spec, ws, verdict_of=None):
+    """(findings, verdict) when the unit has rule-review findings and no recorded human decision (`approve --gate
+    rule_review`) matches exactly these findings and the bytes of eva.review_sources, else None: changing a matcher, a
+    metadata field, AGENT.md or a Codex or OpenCode wrapper invalidates the decision. verdict_of(gate, spec, ws):
+    approval_verdict, or plan's memo of it."""
     items = rule_review_items(spec["skill_dir"])
-    if not items: return []
+    if not items: return None
     v = (verdict_of or approval_verdict)("rule_review", spec, ws)
-    if v.status == "approved": return []
+    return None if v.status == "approved" else (items, v)
+
+def rule_review_problems(spec, ws, verdict_of=None):
+    missing = rule_review_missing(spec, ws, verdict_of)
+    if missing is None: return []
+    items, v = missing
     return ["rule review not recorded%s: %d finding(s) need a human decision (%s); read them with `validate`, then run "
             "`approve --gate rule_review` at a terminal (the signed decision is bound to these exact findings)"
             % ("" if v.status == "missing" else " (%s)" % v.status, len(items), "; ".join(i[:200] for i in items))]
+
+def unapproved_live_gates(spec, ws, verdict_of=None):
+    """(gate, verdict) of requirements, then eval_set, that a live start still lacks: nothing when requirements_eval_set
+    is approved (S1 method 4). A generator, so a caller that raises on the first stops reading there."""
+    verdict_of = verdict_of or approval_verdict
+    if verdict_of(COMBINED_GATE, spec, ws).status == "approved": return
+    for gate in ("requirements", "eval_set"):
+        v = verdict_of(gate, spec, ws)
+        if v.status != "approved": yield gate, v
+
+def agent_gate_problems(agent, ws, verdict_of=None, review=True):
+    """The approval and rule-review refusals of `agent run --live` and `agent loop --live`: a current rule_review
+    decision for the agent's review rows (review=False skips it, see agent_loop_cli), and a current
+    requirements_eval_set approval or current requirements and eval_set approvals."""
+    spec, verdict_of = agent_spec(agent), verdict_of or approval_verdict
+    approve = "`approve %s --workspace %s --gate %%s` at a terminal" % (agent.dir, ws)
+    out = []
+    missing = rule_review_missing(spec, ws, verdict_of) if review else None
+    if missing is not None:
+        items, v = missing
+        out.append("rule review not recorded%s: %d finding(s) need a human decision (%s); read them with `python3 eva.py "
+                   "check %s`, then run %s (the signed decision is bound to these exact findings)"
+                   % ("" if v.status == "missing" else " (%s)" % v.status, len(items), "; ".join(i[:200] for i in items),
+                      agent.dir, approve % "rule_review"))
+    lacking = list(unapproved_live_gates(spec, ws, verdict_of))
+    if lacking:
+        out.append("live approvals missing: %s; write %s/requirements.md, then run %s (one approval of both; or approve "
+                   "requirements and eval_set separately)" % (", ".join(
+                       "%s is %s" % (g, v.status) for g, v in [(COMBINED_GATE, verdict_of(COMBINED_GATE, spec, ws))] +
+                       lacking), ws, approve % COMBINED_GATE))
+    return out
 
 def eval_set_files(skill_dir):
     """[(label, path)] covered by the eval_set approval: evals.json, trigger_evals.json and every evals[].files fixture."""
@@ -2352,7 +2389,7 @@ def approvals_data(ws):
 def approval_record(gate, spec, ws):
     """(record, verdict) of one approvals.json gate, read once."""
     try: rec = approvals_data(ws).get(gate)
-    except EvalError as ex: return None, approvals.Verdict("invalid", None, str(ex))
+    except (EvalError, ValueError) as ex: return None, approvals.Verdict("invalid", None, str(ex))
     return rec, APPROVER["it"].verdict(rec, "approve", gate, spec["skill_name"], gate_hash(gate, spec, ws),
                                        ruleset_sha256())
 
@@ -2538,7 +2575,8 @@ def approve_show(gate, spec, ws, rules):
     else:
         m = re.match(r"iteration-(\d+)$", gate)
         n = int(m.group(1)) if m else (iterations(ws) or [None])[-1]
-        g = rjson(os.path.join(ws, "iteration-%s" % n, "gate.json")) or {}
+        bench = rjson(os.path.join(ws, "iteration-%s" % n, "benchmark.json"))
+        g = bench.get("gate") if isinstance(bench, dict) and isinstance(bench.get("gate"), dict) else {}
         shown = ["iteration-%s gate problems: %s" % (n, g.get("problems") or "none recorded")]
     return shown + ["ruleset_sha256 " + rules]
 
@@ -3745,13 +3783,17 @@ def registration_record(spec, ws, shown=None):
         if not m.get("agent_sha256") or m["agent_sha256"] != tested:
             raise EvalError("iteration-%d tested other agent files (AGENT.md, scenarios or wrappers) than the ones on "
                             "disk; re-run the eval before registering" % n)
+        unnamed = [p for p in agent_parity_problems(spec["skill_dir"]) if p not in gate["problems"]]
+        if unnamed:
+            raise EvalError("iteration-%d gate does not name the agent's parity FAIL row(s) (%s); re-run `agent report`, "
+                            "then `approve --gate registration`" % (n, "; ".join(unnamed)))
     elif not m.get("skill_sha256") or m["skill_sha256"] != now_skill:
         raise EvalError("iteration-%d tested skill %s but the skill folder now hashes to %s; re-run the eval before "
                         "registering" % (n, (m.get("skill_sha256") or "<unrecorded>")[:12], now_skill[:12]))
     elif not m.get("eval_set_sha256") or m["eval_set_sha256"] != now_evals:
         raise EvalError("iteration-%d used a different eval set than the one on disk; re-run the eval" % n)
     approval, relied = "auto", {}
-    if gate["needs_approval"]:
+    if gate["needs_approval"] or agent and gate["problems"]:
         approval, v = approval_record("registration", spec, ws)
         if v.status != "approved":
             raise EvalError("iteration-%d has problems %s; registration needs `approve --gate registration` (%s)"
@@ -3899,9 +3941,19 @@ def view_coverage(row):
     if cov is None: return {t: "not-run: iteration-%d has no readable benchmark.json" % n for t in eva.TOOLS}, n
     return {t: c["status"] for t, c in cov.items()}, n
 
+def registration_findings(ws, rec):
+    """The finding ids the registration approval of a verified agent record named: the problem ids of the gate inside
+    the benchmark.json whose sha256 the record binds; [] when the record relied on no registration approval."""
+    if "registration" not in rec["approvals"]: return []
+    bench = rjson(os.path.join(ws, "iteration-%d" % rec["iteration"], "benchmark.json"))
+    gate = bench.get("gate") if isinstance(bench, dict) else None
+    problems = gate.get("problems") if isinstance(gate, dict) else None
+    return [p.split(": ", 1)[0] for p in problems if isinstance(p, str)] if isinstance(problems, list) else []
+
 def unit_view(root, row):
     """What the hub shows for one eva.build_index row (B5 D8): the row's check, English, parity and registration results,
-    the coverage per tool, the scripts flag, which agent wrappers exist, and the hashes."""
+    the coverage per tool, the scripts flag, which agent wrappers exist, the hashes, and for a registered agent the
+    findings its registration approval named."""
     import eva
     u = os.path.join(root, row["path"])
     rec = row["record"] if isinstance(row["record"], dict) else {}
@@ -3923,7 +3975,8 @@ def unit_view(root, row):
                          for t in eva.TOOLS} if row["kind"] == "agent" else {},
             "approvals": [{"gate": g, "principal": a["principal"], "reason": a.get("reason")}
                           for g, a in sorted(rec["approvals"].items())] if registered else [],
-            "machine_waiver": rec.get("machine_waiver") if registered else None}
+            "machine_waiver": rec.get("machine_waiver") if registered else None,
+            "findings": registration_findings(row["workspace"], rec) if registered and row["kind"] == "agent" else None}
 
 def hub_build(root, out, templates=None):
     """`hub build`: (exit code, lines). The site is rendered in memory from eva.build_index (the same rows and registry
@@ -4384,7 +4437,37 @@ def agent_plan_text(a, agent, old, ws, engines, cells, prices, tokens):
           "multi-turn: non-interactive continuation is UNVERIFIED for %s; every scenario with more than one turn "
           "records %s until an operator probe verifies a tool" % (
               ", ".join(t for t, ok in agent_eval.MULTI_TURN_VERIFIED.items() if not ok), agent_eval.MULTI_TURN)]
-    return "\n".join(L)
+    return "\n".join(L + agent_gate_lines(agent, ws))
+
+def waiver_label(w):
+    if w["status"] != "approved": return approval_label(approvals.Verdict(w["status"], w["principal"], w["verdict_reason"]))
+    if w["source"] == "machine": return "machine-waived by %s (expires %s)" % (w["principal"], w["machine_waiver"]["expires"])
+    return "approved by %s" % w["principal"]
+
+def agent_gate_lines(agent, ws):
+    """The approval gates of an agent in the form of skill plan_text, and the state of the agent live gates. Reads
+    the approval verdicts and the machine waiver; writes nothing."""
+    spec, verdict_of = agent_spec(agent), _memo_verdicts()
+    findings = rule_review_items(agent.dir)
+    rr = verdict_of("rule_review", spec, ws) if findings else None
+    waivers = waiver_verdicts(spec, ws)
+    lacking = list(unapproved_live_gates(spec, ws, verdict_of))
+    review_state = "pass" if rr is None or rr.status == "approved" else "fail: rule_review %s (%d finding(s))" % (
+        rr.status, len(findings))
+    approvals_state = "pass" if not lacking else "fail: " + ", ".join(
+        "%s %s" % (g, v.status) for g, v in [(COMBINED_GATE, verdict_of(COMBINED_GATE, spec, ws))] + lacking)
+    return ["rule review (English-only / parity needs-review findings): " + (
+                "none" if rr is None else "RECORDED (signed by %s)" % rr.principal if rr.status == "approved" else
+                "NOT RECORDED (%sblocks agent run --live and agent loop --live)" % (
+                    "" if rr.status == "missing" else rr.status + "; ")),
+            "coverage waivers: " + ", ".join("%s=%s" % (t, waiver_label(waivers[t])) for t in COVERAGE_REQUIRED),
+            machine_waiver_line(machine_waiver()),
+            "combined approval gate: %s=%s (the live gate needs it, or both requirements and eval_set)" % (
+                COMBINED_GATE, approval_label(verdict_of(COMBINED_GATE, spec, ws))),
+            "approval gates: requirements=%s, eval_set=%s" % (
+                approval_label(verdict_of("requirements", spec, ws)), approval_label(verdict_of("eval_set", spec, ws))),
+            "agent live gates (agent run --live and agent loop --live refuse until each passes): rule-review: %s; "
+            "approvals: %s" % (review_state, approvals_state)]
 
 class AgentSandbox(object):
     """One fresh temp folder per agent run: <run_root>/agent-eval-<engine>-XXXX/{work, home, codex_home}. work holds
@@ -4572,7 +4655,8 @@ def agent_plan_hash(a, ws, parts):
 
 def agent_live_start(a, agent, ws, gate, problems, parts, show, claude_called):
     """The skill live order for an agent command: --budget-usd and --auth-profile were checked by the caller; then
-    the ledger preview, problems(left) (every check that starts no process) inside the human gate before signing, the
+    the ledger preview, problems(left) (every check that starts no agent, model or builder; an approval verify runs
+    ssh-keygen) inside the human gate before signing, the
     signature, problems(left) again plus `claude auth status` when Claude is called under subscription auth, the plan
     hash recheck, enable_live and the spend ledger. Returns the Budget."""
     dangling = spend.preview(ws)
@@ -4607,6 +4691,15 @@ def agent_live_required(a):
     if a.budget_usd is None or not math.isfinite(a.budget_usd) or a.budget_usd <= 0:
         raise EvalError(CAP_REQUIRED % AUTH["profile"].name if api_key_mode() else NO_BUDGET)
     if a.auth_profile is None: raise EvalError(PROFILE_REQUIRED)
+
+AGENT_LIVE_APPROVALS = ("a current requirements_eval_set approval (or current requirements and eval_set approvals), a "
+                        "current rule_review decision when the agent has rule-review findings")
+
+def agent_approval_inputs(agent, ws):
+    """The approval inputs the plan hash does not bind through the agent files, so the last recheck of a live start
+    also refuses a requirements.md or rule-review change made after the post-sign problems check."""
+    spec = agent_spec(agent)
+    return {"requirements": gate_hash("requirements", spec, ws), "rule_review": gate_hash("rule_review", spec, ws)}
 
 def agent_run_problems(a, agent, old, engines, cells, est, prices, tokens, left):
     """Every check of an agent run --live that starts no process."""
@@ -4660,17 +4753,19 @@ def agent_run(a, agent, ws, prices, tokens):
     if a.agent_cmd == "plan" or not a.live:
         print(agent_plan_text(a, agent, old, ws, engines, cells, prices, tokens))
         print("\nDRY RUN: nothing was executed. A real run needs `agent run --live --auth-profile P --budget-usd X`, a "
-              "clean `agent validate`, generated wrappers, an estimate within budget and a signature at the terminal.")
+              "clean `agent validate`, generated wrappers, " + AGENT_LIVE_APPROVALS + ", an estimate within budget and "
+              "a signature at the terminal.")
         return 0
     agent_live_required(a)
     est = agent_estimate(engines, cells, a.runs, old, prices, tokens)
     names = [e.name for e in engines]
     parts = lambda: {"agent": sha256_labeled(agent.files(names)),
                      "old_agent": sha256_labeled(old.files(names)) if old else None,
-                     "engines": {e.name: [e.model, e.effort] for e in engines}, "budget_usd": a.budget_usd}
+                     "engines": {e.name: [e.model, e.effort] for e in engines}, "budget_usd": a.budget_usd,
+                     "approvals": agent_approval_inputs(agent, ws)}
     budget = agent_live_start(
-        a, agent, ws, "agent-run", lambda left: agent_run_problems(a, agent, old, engines, cells, est, prices, tokens, left),
-        parts, ["agent %s: %d planned cell(s), runs %d, engines %s" % (
+        a, agent, ws, "agent-run", lambda left: agent_run_problems(a, agent, old, engines, cells, est, prices, tokens, left)
+        + agent_gate_problems(agent, ws), parts, ["agent %s: %d planned cell(s), runs %d, engines %s" % (
             agent.name, sum(1 for c in cells if c["state"] == "planned"), a.runs, ", ".join(names))], "claude" in names)
     for e in engines:
         if budget_enforcement(e) == "soft_limit":
@@ -4759,9 +4854,16 @@ def agent_bench_coverage(bench):
     collected = {e: sum(1 for r in tested if r["tool"] == e and r.get("state") == agent_eval.RUN) for e in engines}
     return tool_coverage(list(engines), graded, collected)
 
+def agent_parity_problems(agent_dir):
+    """The gate problem line of every parity FAIL row of the agent folder (a rule_review decision clears only
+    needs-review rows)."""
+    import eva
+    return ["%s: %s" % (c["id"], c["reason"]) for c in eva.parity_report(agent_dir).failed]
+
 def agent_report_gate(ws, n, spec):
     """Writes benchmark.json, gate.json and comparison.md of iteration-n and returns the gate. spec: the agent's, whose
-    signed coverage waivers in ws clear exactly their tool (waiver_verdicts, as G1 does for skills)."""
+    signed coverage waivers in ws clear exactly their tool (waiver_verdicts, as G1 does for skills). Every parity FAIL
+    row of the agent folder is a gate problem too, so a registration approval names it."""
     from engine import agent_eval
     it_dir = os.path.join(ws, "iteration-%d" % n)
     plan = rjson(os.path.join(it_dir, "plan.json"))
@@ -4770,7 +4872,7 @@ def agent_report_gate(ws, n, spec):
     cov = bench["tool_coverage"] = agent_bench_coverage(bench)
     states = coverage_states({"tool_coverage": cov, "coverage_waivers": waiver_verdicts(spec, ws)})
     missing = [GATE_MESSAGES["coverage-missing"] % c for _, c in states if c["state"] == "missing"]
-    gate = agent_eval.gate(plan, runs, missing)
+    gate = agent_eval.gate(plan, runs, missing + agent_parity_problems(spec["skill_dir"]))
     gate["coverage"] = {t: coverage_label(c) for t, c in states}
     bench["gate"] = gate
     wjson(os.path.join(it_dir, "benchmark.json"), bench)
@@ -4782,7 +4884,7 @@ def agent_report_gate(ws, n, spec):
 # ---------- agent loop (unit B4): the builder may change only AGENT.md ----------
 AGENT_ENGLISH_BUILDER_RULE = ("Write all agent content in English only (the AGENT.md frontmatter and body, from which the "
                               "wrappers are generated); the loop stops if any non-English text appears.")
-AGENT_UNFIXABLE = ("coverage-missing:", "agent-load-unverified:")
+AGENT_UNFIXABLE = ("coverage-missing:", "agent-load-unverified:", "parity-permissions-hermes:")
 AGENT_NOT_REGULAR = "AGENT.md is not a regular file directly in the agent folder"
 
 class AgentBuilder(ClaudeBuilder):
@@ -4893,7 +4995,8 @@ AGENT_CRASH_GATES = ("writable-set", "regenerate", "rules-unchanged")
 def agent_loop(agent, ws, engines, grader, builder, max_iterations=MAX_AUTO_ITERATIONS, runs=DEFAULT_RUNS, old=None,
                budget=None, prices=None, tokens=None, precheck=None, run_root=None, log=print):
     """run -> typed grading (and grader for llm criteria) -> report; stop when the gate is clean, with "needs-coverage"
-    when only coverage-missing or agent-load-unverified problems remain (no builder can fix them), else call
+    when only AGENT_UNFIXABLE problems remain (coverage-missing, agent-load-unverified, the fixed Hermes permission
+    FAIL: no builder can fix them), else call
     builder(iteration_dir, agent_dir), which may change only AGENT.md, and run AGENT_POST_BUILDER_GATES after it,
     whatever it returned or raised; another exception than EvalError runs only AGENT_CRASH_GATES and is re-raised.
     precheck(agent, iterations_left) -> [problems] runs before every iteration; any problem stops the loop with
@@ -4977,10 +5080,12 @@ def agent_bound_files(pairs):
 
 def agent_drift_problems(agent, signed, old=None, names=()):
     """A scenario file, a signed file of the old agent or the ruleset that differs from the value bound by the
-    signature."""
+    signature, and a rule-review finding outside the set the signed decision covered."""
     now = agent_scenario_hashes(agent)
     out = ["scenario %s changed since signing" % rel for rel in sorted(set(now) | set(signed["scenarios"]))
            if now.get(rel) != signed["scenarios"].get(rel)]
+    out += ["rule review finding changed since signing: %s" % x[:200] for x in rule_review_items(agent.dir)
+            if x not in signed["review"]]
     if old is not None:
         was = signed["old_agent"]
         now_old = {rel: file_sha256(p) for rel, p in old.files(names)}
@@ -5037,17 +5142,17 @@ def agent_loop_cli(a, agent, ws, prices, tokens):
         print(agent_plan_text(a, agent, old, ws, engines, cells, prices, tokens))
         print("\n".join(loop_lines))
         print("\nDRY RUN: nothing was executed. A real loop needs `agent loop --live --auth-profile P --budget-usd X "
-              "--builder-prompt FILE`, a clean `agent validate`, generated wrappers, an estimate within budget and a "
-              "signature at the terminal.")
+              "--builder-prompt FILE`, a clean `agent validate`, generated wrappers, " + AGENT_LIVE_APPROVALS + ", an "
+              "estimate within budget and a signature at the terminal.")
         return 0
     agent_live_required(a)
     ge, names = grader_engine_of(a), [e.name for e in engines]
 
-    def problems(left, k=a.max_iterations, now=agent):
+    def problems(left, k=a.max_iterations, now=agent, first=True):
         cells_now = agent_cells(now, engines)
         est = agent_loop_estimate(a, now, old, engines, cells_now, prices, tokens, k)
         out = agent_folder_problems(now.dir) + agent_run_problems(a, now, old, engines, cells_now, est, prices, tokens,
-                                                                  left)
+                                                                  left) + agent_gate_problems(now, ws, review=first)
         if api_key_mode(): out += api_key_soft_refusals([], ge, False, True, bool(builder_text))
         out += agent_grader_problems(a, engines, ge)
         if ge == "codex" and "codex" not in names and subscription_checks_on(): out += codex_auth_problems()
@@ -5065,15 +5170,18 @@ def agent_loop_cli(a, agent, ws, prices, tokens):
                 "engines": {e.name: [e.model, e.effort] for e in engines}, "budget_usd": a.budget_usd,
                 "builder": [a.builder_model,
                             hashlib.sha256(builder_text.encode("utf-8")).hexdigest() if builder_text else None],
-                "max_iterations": a.max_iterations, "grader": [ge, a.grader_model, _str_opt(a, "grader_effort")]}
+                "max_iterations": a.max_iterations, "grader": [ge, a.grader_model, _str_opt(a, "grader_effort")],
+                "approvals": agent_approval_inputs(agent, ws)}
     budget = agent_live_start(a, agent, ws, "agent-loop", problems, parts, [
         "agent %s: loop of at most %d iteration(s), %d planned cell(s), runs %d, engines %s" % (
             agent.name, a.max_iterations, sum(1 for c in cells if c["state"] == agent_eval.PLANNED), a.runs,
             ", ".join(names))] + loop_lines[1:], "claude" in names or ge == "claude" or bool(builder_text))
     # bound holds the per-file values of the post-sign recheck, which matched the signature; the reload makes
-    # iteration 1 run those scenarios, and the iteration-1 precheck refuses any later change.
+    # iteration 1 run those scenarios, and the iteration-1 precheck refuses any later change. The builder may change
+    # AGENT.md, a rule-review source, so only the first precheck reads the signed decision; every later one refuses a
+    # finding outside the set that decision covered.
     signed = {"scenarios": {r: v for r, v in bound["agent"].items() if r.startswith("scenarios/")},
-              "old_agent": bound["old_agent"], "rules": ruleset_sha256()}
+              "old_agent": bound["old_agent"], "rules": ruleset_sha256(), "review": rule_review_items(agent.dir)}
     agent = Agent(agent.dir)
     for e in engines:
         if budget_enforcement(e) == "soft_limit":
@@ -5081,7 +5189,8 @@ def agent_loop_cli(a, agent, ws, prices, tokens):
             print("WARNING: " + NO_STRICT_WARNING % e.name, file=sys.stderr)
     grader = make_grader(ge, a.grader_model, a.grader_effort, budget=budget, prices=prices, tokens=tokens)
     builder = AgentBuilder(builder_text, a.builder_model, budget, prices) if builder_text else None
-    precheck = lambda now, left: agent_drift_problems(now, signed, old, names) + problems(budget.remaining(), left, now)
+    precheck = lambda now, left: agent_drift_problems(now, signed, old, names) + problems(
+        budget.remaining(), left, now, first=left == a.max_iterations)
     r = agent_loop(agent, ws, engines, grader, builder, a.max_iterations, a.runs, old, budget, prices, tokens, precheck,
                    a.run_root)
     print(json.dumps(r, ensure_ascii=False))
@@ -5621,13 +5730,9 @@ def _live_rule_review(g):
     for x in rule_review_problems(g.spec, g.ws, g.verdict_of): g.fail(x)
 
 def _live_approvals(g):
-    """One current requirements_eval_set record, or current requirements and eval_set records (S1 method 4)."""
-    if g.verdict_of(COMBINED_GATE, g.spec, g.ws).status == "approved": return
-    for gate in ("requirements", "eval_set"):
-        v = g.verdict_of(gate, g.spec, g.ws)
-        if v.status != "approved":
-            g.fail("gate %s not approved%s (write %s/requirements.md, then `approve --gate %s` at a terminal)"
-                   % (gate, "" if v.status == "missing" else " (%s)" % v.status, g.ws, gate))
+    for gate, v in unapproved_live_gates(g.spec, g.ws, g.verdict_of):
+        g.fail("gate %s not approved%s (write %s/requirements.md, then `approve --gate %s` at a terminal)"
+               % (gate, "" if v.status == "missing" else " (%s)" % v.status, g.ws, gate))
 
 def _live_priced(g):
     g.live_est = live_estimate(g.a, g.spec, g.ws, g.n, g.engines, g.tokens, g.prices, g.iterations_left)
@@ -5853,30 +5958,26 @@ def combined_snapshot(spec, ws):
     req_hash = None if req is None else hashlib.sha256(b"requirements.md\0" + req).hexdigest()
     return combined_hash(req_hash, h.hexdigest()), review
 
-def live_approvals_open(spec, ws, verdict_of):
-    return verdict_of(COMBINED_GATE, spec, ws).status == "approved" or all(
-        verdict_of(g, spec, ws).status == "approved" for g in ("requirements", "eval_set"))
-
-def pending_gates(spec, ws, agent, verdict_of):
-    """[(gate, summary, sha256, review)] of every approval this unit's workspace still needs. An agent has no
-    requirements gate before K1, so it lists only registration and coverage waivers."""
+def pending_gates(spec, ws, verdict_of):
+    """[(gate, summary, sha256, review)] of every approval this unit's workspace still needs, a skill's or an agent's:
+    the live approvals, the rule review, the registration of the last iteration (its problems read from the gate inside
+    benchmark.json, the bytes the approval binds) and the coverage waivers."""
     out = []
-    if not agent:
-        if not live_approvals_open(spec, ws, verdict_of):
-            sha, review = combined_snapshot(spec, ws)
-            out.append((COMBINED_GATE, "requirements.md and %d eval set file(s), one approval of both" % (len(review) - 1),
-                        sha, review))
-        findings = rule_review_items(spec["skill_dir"])
-        if findings and verdict_of("rule_review", spec, ws).status != "approved":
-            out.append(("rule_review", "%d rule-review finding(s)" % len(findings), gate_hash("rule_review", spec, ws),
-                        [("finding", x) for x in findings]))
+    if next(unapproved_live_gates(spec, ws, verdict_of), None) is not None:
+        sha, review = combined_snapshot(spec, ws)
+        out.append((COMBINED_GATE, "requirements.md and %d eval set file(s), one approval of both" % (len(review) - 1),
+                    sha, review))
+    findings = rule_review_items(spec["skill_dir"])
+    if findings and verdict_of("rule_review", spec, ws).status != "approved":
+        out.append(("rule_review", "%d rule-review finding(s)" % len(findings), gate_hash("rule_review", spec, ws),
+                    [("finding", x) for x in findings]))
     n = (iterations(ws) or [None])[-1]
     if n is None: return out
     try:
-        gate = rjson(os.path.join(ws, "iteration-%d" % n, "gate.json"))
         bench = rjson(os.path.join(ws, "iteration-%d" % n, "benchmark.json"))
     except (ValueError, RecursionError):
         return out
+    gate = bench.get("gate") if isinstance(bench, dict) else None
     if isinstance(gate, dict) and gate.get("needs_approval") and verdict_of("registration", spec, ws).status != "approved":
         problems = [str(p) for p in gate.get("problems") or []]
         out.append(("registration", "iteration-%d gate problems: %s" % (n, "; ".join(problems) or "none recorded"),
@@ -5901,7 +6002,7 @@ def pending_items(pairs):
         base = {"unit": spec["skill_name"], "kind": "agent" if agent else "skill", "unit_dir": unit_dir, "workspace": ws,
                 "ruleset_sha256": rules, "spend_usd": spend_so_far(ws),
                 "estimate_usd": None if agent else plan_estimate_usd(unit_dir, ws)}
-        for gate, summary, sha, review in pending_gates(spec, ws, agent, verdict_of):
+        for gate, summary, sha, review in pending_gates(spec, ws, verdict_of):
             out.append(dict(base, gate=gate, summary=summary, sha256=sha, status=verdict_of(gate, spec, ws).status,
                             needs_reason=gate in approvals.WAIVER_GATES, review=review))
     return out
@@ -6088,9 +6189,11 @@ def build_parser():
             s.add_argument("--builder-model", default=DEFAULT_BUILDER_MODEL)
             s.add_argument("--max-iterations", type=int, default=MAX_AUTO_ITERATIONS)
             s.add_argument("--golden")
-    s = sp.add_parser("approve", help="sign one gate at a terminal, or with --batch every pending approval of the "
-                      "--unit folders after one challenge and one passphrase (engine/approvals.py; "
-                      "references/approval-gates.md)")
+    text = ("sign one gate at a terminal, or with --batch every pending approval of the --unit folders after one "
+            "challenge and one passphrase (engine/approvals.py; references/approval-gates.md); a skill or an agent "
+            "folder, gates requirements_eval_set, requirements, eval_set, rule_review, registration, "
+            "coverage_waiver:<tool>")
+    s = sp.add_parser("approve", help=text, description=text)
     s.add_argument("skill", nargs="?")
     s.add_argument("--workspace", action="append")
     s.add_argument("--gate")
@@ -6114,7 +6217,11 @@ def build_parser():
     x = s.add_subparsers(dest="waiver_cmd", required=True)
     x.add_parser("sign").add_argument("--tools", default=",".join(MACHINE_WAIVABLE))
     x.add_parser("show"); x.add_parser("revoke")
-    s = sp.add_parser("register"); common(s, False)
+    text = ("sign and write the format-2 record of a skill or an agent (kind agent) for the last iteration; a report with "
+            "problems needs a current registration approval that names them, and every coverage_required tool a run or "
+            "a waiver")
+    s = sp.add_parser("register", help=text, description=text)
+    common(s, False)
     s = sp.add_parser("snapshot"); common(s, False)
     sp.add_parser("check-builtin-plugins", help="free: `claude --settings <launch settings> plugin list --json` and "
                   "the enabled state of every @builtin plugin (no model call; loaded skills are not shown)")
@@ -6132,11 +6239,15 @@ def build_parser():
     x.add_argument("root", nargs="?", default=".")
     x.add_argument("--out", required=True, help="an absent or empty folder")
     x.add_argument("--templates", help="a folder with index.html, unit.html and style.css (default engine/hub_templates)")
-    s = sp.add_parser("agent", help="evaluate an AGENT.md v2 agent per tool from its typed scenarios (validate, plan, "
-                      "run, grade, report) and improve it in a loop whose builder may change only AGENT.md (loop)")
+    gates = ("`agent run --live` and `agent loop --live` need a current requirements_eval_set approval (or requirements "
+             "and eval_set) and a current rule_review decision for the agent's review rows, and `agent plan` prints "
+             "those gates")
+    text = ("evaluate an AGENT.md v2 agent per tool from its typed scenarios (validate, plan, run, grade, report) and "
+            "improve it in a loop whose builder may change only AGENT.md (loop); " + gates)
+    s = sp.add_parser("agent", help=text, description=text)
     asp = s.add_subparsers(dest="agent_cmd", required=True)
     for n in ("validate", "plan", "run", "grade", "report", "loop"):
-        x = asp.add_parser(n)
+        x = asp.add_parser(n, description=gates if n in ("plan", "run", "loop") else None)
         x.add_argument("agent")
         if n != "validate": x.add_argument("--workspace")
         if n in ("grade", "report"): x.add_argument("--iteration", type=int)

@@ -161,8 +161,9 @@ class TestPendingKinds(Batch):
 
     def iteration(self, needs_approval, coverage, problems=("p1: a gate problem",)):
         it = os.path.join(self.wsp("alpha"), "iteration-1"); os.makedirs(it)
-        wjson(os.path.join(it, "gate.json"), {"needs_approval": needs_approval, "problems": list(problems)})
-        wjson(os.path.join(it, "benchmark.json"), {"tool_coverage": coverage})
+        gate = {"needs_approval": needs_approval, "problems": list(problems)}
+        wjson(os.path.join(it, "gate.json"), gate)
+        wjson(os.path.join(it, "benchmark.json"), {"tool_coverage": coverage, "gate": gate})
 
     def test_a_rule_review_item(self):
         os.makedirs(os.path.join(self.units["alpha"][0], "agents"))
@@ -191,15 +192,17 @@ class TestPendingKinds(Batch):
         self.assertEqual(items[0]["summary"], "tool opencode did not run in iteration-1 (not-run: engine not available)")
         self.assertIn("coverage-missing:opencode", items[0]["review"][0][1])
 
-    def test_an_agent_unit_lists_registration_and_coverage_waivers_and_no_combined_item(self):
+    def test_an_agent_unit_lists_the_live_gates_registration_and_coverage_waivers(self):
         import test_install as I
         agent = I.agent_copy(os.path.join(self.tmp, "agents"))
         ws = os.path.join(self.tmp, "agents", I.NAME + "-workspace")
         I.fake_iteration(agent, ws, self.runs)
+        write(os.path.join(ws, "requirements.md"), "review the repository")
         rc, out, err = self.cli("agent", "report", agent, "--workspace", ws)
         self.assertEqual(rc, 3, out + err)
         items = se.pending_items(se.unit_pairs([agent], [ws]))
-        gates = ["registration", "coverage_waiver:codex", "coverage_waiver:opencode", "coverage_waiver:hermes"]
+        gates = [COMBINED, "rule_review", "registration", "coverage_waiver:codex", "coverage_waiver:opencode",
+                 "coverage_waiver:hermes"]
         self.assertEqual([i["gate"] for i in items], gates)
         spec = se.agent_spec(se.Agent(agent))
         for item, gate in zip(items, gates):

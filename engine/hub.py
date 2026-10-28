@@ -120,6 +120,15 @@ def machine_waiver_html(view):
                esc(shown(rec.get("reason"), "reason"))))
 
 
+def findings_html(view):
+    """The named-findings section of a registered agent's page; empty for every other unit, so their pages keep their
+    bytes."""
+    findings = view.get("findings")
+    if findings is None: return ""
+    items = "\n".join("<li>%s</li>" % esc(shown(f, "finding")) for f in findings) or "<li>none</li>"
+    return '\n<h2>Findings the registration approval named</h2>\n<ul class="findings">\n%s\n</ul>' % items
+
+
 def unit_page(view, labels, template):
     name = shown(view["name"], "name")
     items = "\n".join("<li>%s</li>" % badge(*b) for b in badges(view, labels))
@@ -137,7 +146,7 @@ def unit_page(view, labels, template):
     return fill(template, {
         "name": esc(name), "kind": esc(view["kind"]), "path": esc(shown(view["path"], "path")),
         "description": esc(shown(view["description"], "description")), "badges": items, "hashes": hashes,
-        "approvals": approvals, "snippets": "\n".join(blocks),
+        "approvals": approvals, "findings": findings_html(view), "snippets": "\n".join(blocks),
         "coverage_note": esc("Coverage per tool is recomputed from the runs of iteration-%d." % n if n else
                              "Coverage per tool: no eval iteration was read.")}, "unit.html")
 

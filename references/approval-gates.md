@@ -197,6 +197,47 @@ Where it shows: `report` and `agent report` write `waived by machine policy <sha
 
 `requirements_eval_set` is one approval of both the requirements and the eval set. The live `approvals` gate opens on one current `requirements_eval_set` record or on current `requirements` and `eval_set` records; one separate record alone does not open it. The separate gates stay, so older records still read. `plan` prints a `combined approval gate:` line next to the `approval gates:` line.
 
+## Agent live gates
+
+`agent run --live` and `agent loop --live` refuse to start without two things in the agent workspace (`--workspace`, else `<parent>/<name>-workspace`):
+
+- A current `requirements_eval_set` record, or current `requirements` and `eval_set` records. For an agent, `requirements` hashes `<workspace>/requirements.md` and `eval_set` hashes every `scenarios/*.json` of the agent folder, so an edit to either stales the record. One separate record alone does not open the start.
+- A current `rule_review` decision whenever `eva.review_items` lists findings for the agent folder. For a generated agent these are `parity-permissions-codex` and `parity-permissions-opencode`. The decision binds the finding texts and the bytes of AGENT.md, every scenario and the Codex and OpenCode wrappers (`eva.review_sources`), so an edit to any of them stales it. A Claude or Hermes wrapper edit does not, and the start refuses an out-of-date wrapper on its own.
+
+The skill live gate and the agent start share one predicate (`unapproved_live_gates`), and the skill refusal texts are unchanged. The agent refusals name the agent command to run:
+
+| Gate | Refusal |
+|---|---|
+| rule review | `rule review not recorded[ (<status>)]: N finding(s) need a human decision (<findings>); read them with `python3 eva.py check <agent>`, then run `approve <agent> --workspace <ws> --gate rule_review` at a terminal (the signed decision is bound to these exact findings)` |
+| approvals | `live approvals missing: requirements_eval_set is <status>, requirements is <status>, eval_set is <status>; write <ws>/requirements.md, then run `approve <agent> --workspace <ws> --gate requirements_eval_set` at a terminal (one approval of both; or approve requirements and eval_set separately)`, naming only the separate gates that are not approved |
+
+Both checks run in the problems list of the start, before signing and again after it, each time with fresh verdicts. A `requirements.md`, scenario, AGENT.md or wrapper edit made while the person signs refuses with `agent <cmd> --live refused after signing: ...`. The plan hash also binds the `requirements` and `rule_review` gate hashes, so an edit after that second check still refuses at the last recheck. A corrupt `approvals.json` reads `invalid` and refuses; it no longer ends in a traceback, for skills too.
+
+The loop reads the signed decision before signing, after signing and before iteration 1. The builder may change only AGENT.md, which is a rule-review source, so the decision reads stale after the first builder edit. From iteration 2 on the loop therefore checks the findings instead of the bytes. Before every iteration it refuses (`gates-failed`) any finding that is not in the set read right after signing (`rule review finding changed since signing: ...`), whoever made the change. After every builder call the `rule-review` gate also stops the loop on a finding that was not there before the call. The OpenCode row prints the capabilities the regenerated wrapper grants and the Codex row the capabilities Codex cannot restrict that AGENT.md does not declare, so a capability change changes a finding (or adds a parity FAIL, which the `parity` gate stops) and stops the loop. A body-only AGENT.md edit changes no finding, and the loop goes on under the decision signed at the start. The next live start then needs a new decision, because AGENT.md moved. The loop rechecks the live approvals before every iteration.
+
+`rule_review` clears only needs-review rows. A FAIL row such as `parity-permissions-hermes` (always FAIL, gates.md G4) is not a review item, so no decision clears it. It stays in `eva.py check`, and `agent report` adds every parity FAIL row of the agent folder to the gate problems as `<row id>: <reason>`. A `registration` approval therefore names it, together with `agent-load-unverified:codex` when a Codex run's agent load is unverified. The loop counts `parity-permissions-hermes:` with `coverage-missing:` and `agent-load-unverified:` as problems no builder can fix (`needs-coverage`).
+
+The record command does not trust the stored gate for these rows. It recomputes the parity FAIL rows of the agent folder and refuses any row that the gate inside the hashed `benchmark.json` does not name, with `iteration-N gate does not name the agent's parity FAIL row(s) (<rows>); re-run `agent report`, then `approve --gate registration``. A benchmark reported before these rows joined the gate therefore cannot register. An agent gate that lists problems needs a current `registration` approval even when its `needs_approval` flag is false, so such an agent never registers as `auto`. Skill records keep their behavior.
+
+The hub unit page of a registered agent lists the findings its `registration` approval named under "Findings the registration approval named". Each entry is the id of one problem of the gate inside the benchmark the record binds, such as `parity-permissions-hermes` or `agent-load-unverified:codex`. The list reads `none` when the record relied on no `registration` approval. Skill pages and unregistered agent pages do not change.
+
+`agent plan`, and the dry runs of `agent run` and `agent loop`, print after their earlier lines:
+
+```
+rule review (English-only / parity needs-review findings): NOT RECORDED (blocks agent run --live and agent loop --live)
+coverage waivers: claude=NOT APPROVED, codex=NOT APPROVED, opencode=NOT APPROVED, hermes=NOT APPROVED
+machine waiver: missing (~/.config/skill-master/machine-waiver.json)
+combined approval gate: requirements_eval_set=NOT APPROVED (the live gate needs it, or both requirements and eval_set)
+approval gates: requirements=NOT APPROVED, eval_set=NOT APPROVED
+agent live gates (agent run --live and agent loop --live refuse until each passes): rule-review: fail: rule_review missing (2 finding(s)); approvals: fail: requirements_eval_set missing, requirements missing, eval_set missing
+```
+
+A coverage waiver reads `approved by <principal>`, `machine-waived by <principal> (expires <time>)` or the `approval_label` of its status. `agent plan` writes nothing and starts no agent, model or builder; like `plan`, it starts one `ssh-keygen -Y verify` per current signed record and `ioreg` when a machine waiver file exists.
+
+`pending`, `approve --batch` and the approval page list an agent's `requirements_eval_set` and `rule_review` items the way they list a skill's, with the same hashes a single `approve` signs. The `registration` item and the `approve --gate registration` summary show the problems of the gate inside `benchmark.json`, the file the approval binds, not `gate.json`.
+
+`agent grade --live` is not gated by these approvals. It starts no agent under test; it sends the transcripts of an existing iteration to a grader, and its plan hash binds those transcripts, AGENT.md, the scenarios and the iteration. The gap: a standalone `agent grade --live` can spend grader budget on transcripts whose scenario set no current approval covers, and `register` does not require `requirements_eval_set`. A skill `grade --live` does run the approvals gate. An `--old-agent` baseline gets no rule-review decision of its own.
+
 ## Sittings: approve --batch and the page
 
 A sitting is one presence check and one approver-check for every signature of a command. `approve --batch` opens it, lists every pending item, asks the reason of each waiver item, one six-character challenge and then the passphrase once, and signs each item as its own record through `_approve_with` and `store_approval`, the same code and format as a single `approve`. The challenge confirms the exact payload fields of each listed item (kind, gate, unit, gate hash, `ruleset_sha256`). If a gated file changes after the list was shown, that item is refused and the others are still signed. A challenge mismatch signs nothing. `approve --batch` passes the passphrase on stdin to `ssh-keygen` with no controlling terminal, the non-interactive form of the premise test.
@@ -243,6 +284,7 @@ Stale comes before the signature check, so a record with a bad signature over fi
 - `--live --dry-run` lists every live gate the command would face and executes nothing, so it needs no signature.
 - `check-builtin-plugins` runs `claude --settings ... plugin list --json`, which makes no model call. It is a separate subcommand, not a live run.
 - `plan`, `estimate`, `validate`, `report`, `snapshot` and a dry `grade` execute no CLI.
+- `agent plan`, `agent validate`, `agent report` and a dry `agent grade` execute no agent CLI. `agent grade --live` signs a `live` record but reads no approval (see Agent live gates).
 
 ## Tests
 
@@ -252,6 +294,6 @@ Stale comes before the signature check, so a record with a bad signature over fi
 - Subprocess children get a `sitecustomize` audit hook that blocks and records any touch of the real `~/.config/skill-master` and any start of `ssh-add` or `ssh-keygen`.
 - The pty and in-process cases run only where the real ancestry probe sees an agent. In a human Terminal they skip. The pty subprocess cases also skip with `no pty device` where `pty.openpty()` fails, which it does inside the session sandbox.
 
-The S1 cases are in `tests/test_approval_batch.py`, `tests/test_approve_ui.py`, `tests/test_machine_waiver.py`, `tests/test_combined_gate.py` and the `SessionAgent`, `SessionStart` and `SshSessionRoot` classes of `tests/test_human_gate.py`. They drive the page core with fake requests, a fake clock, a fake server and a fake `tailscale`, the session with a fake agent, `ssh-add` and shell, and the session rule with a fake glob, fake sockets and a fake `ssh-add`. The real-socket and pty cases skip only when the bind or `openpty` fails, as it does inside the session sandbox.
+The agent gate cases (K1) are in `tests/test_agent_lifecycle_gates.py`. The S1 cases are in `tests/test_approval_batch.py`, `tests/test_approve_ui.py`, `tests/test_machine_waiver.py`, `tests/test_combined_gate.py` and the `SessionAgent`, `SessionStart` and `SshSessionRoot` classes of `tests/test_human_gate.py`. They drive the page core with fake requests, a fake clock, a fake server and a fake `tailscale`, the session with a fake agent, `ssh-add` and shell, and the session rule with a fake glob, fake sockets and a fake `ssh-add`. The real-socket and pty cases skip only when the bind or `openpty` fails, as it does inside the session sandbox.
 
 The older tests sign through `tests/test_skill_eval.py`'s test approver: a throwaway passphrase key, the principal `test-approver`, a fake `ssh-add`, and a runner that starts only `/usr/bin/ssh-keygen` on files in the test-key folder.

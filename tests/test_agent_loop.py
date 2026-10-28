@@ -701,6 +701,8 @@ class Cli(Base):
                 return getattr(real, k)
 
             def sign(self, kind, gate, prepare, budget_usd=None):
+                if kind != "live":
+                    return real.sign(kind, gate, prepare, budget_usd=budget_usd)
                 if not after:
                     change()
                 grant = real.sign(kind, gate, prepare, budget_usd=budget_usd)
@@ -708,6 +710,9 @@ class Cli(Base):
                     change()
                 return grant
         return mock.patch.dict(se.APPROVER, {"it": Signer()})
+
+    def open_gates(self):
+        AE.open_gates(self.agent, self.ws)
 
 
 class LoopExec(AE.FakeAgentExec):
@@ -768,6 +773,7 @@ class TestCliRefusals(Cli):
             self.assertIn("--max-iterations must be 1..%d" % se.MAX_AUTO_ITERATIONS, err)
 
     def test_a_changed_builder_prompt_after_signing_is_refused(self):
+        self.open_gates()
         fake = LoopExec(allowed)
         with self.after_signing(lambda: append(self.prompt, "more\n")):
             rc, out, err = self.live(fake)
@@ -800,6 +806,10 @@ class TestCliDryRun(Cli):
 
 
 class TestCliSigned(Cli):
+    def setUp(self):
+        Cli.setUp(self)
+        self.open_gates()
+
     def test_a_signed_loop_runs_to_a_builder_stop(self):
         fake = LoopExec(lambda d, k: append(os.path.join(d, *SCENARIO.split("/")), "\n"))
         rc, out, err = self.live(fake, "--max-iterations", "3")
@@ -850,7 +860,11 @@ class TestCliSigned(Cli):
         old_text, new_text = "Give me an overview of this repository", "Summarize this repository in one line"
         self.assertIn(old_text, read(p))
         fake = LoopExec(allowed)
-        with self.before_signing(lambda: write(p, read(p).replace(old_text, new_text))):
+
+        def edit_and_approve():
+            write(p, read(p).replace(old_text, new_text))
+            self.open_gates()
+        with self.before_signing(edit_and_approve):
             rc, out, err = self.live(fake, "--max-iterations", "1")
         self.assertEqual(rc, 3, out + err)
         self.assertIn("signed agent loop --live", err)

@@ -335,7 +335,8 @@ def benchmark(plan, runs, coverage):
 
 
 def gate(plan, runs, coverage_missing):
-    """Gate problems: the G1 coverage-missing lines given by the caller, then the run-level problems. Fail closed:
+    """Gate problems: the lines given by the caller (the G1 coverage-missing lines and the parity FAIL rows), then the
+    run-level problems. Fail closed:
     an unverified Codex agent load, an errored run, an ungraded run, an llm criterion without a grader verdict and a
     failed row each keep the gate from reading clean."""
     problems = list(coverage_missing)

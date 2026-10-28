@@ -71,6 +71,24 @@ def generated_copy(parent, edit=None, name=NAME):
     return dst
 
 
+REQUIREMENTS = "Review the repository read-only and cite file:line evidence for every finding.\n"
+
+
+def open_gates(agent_dir, ws):
+    """What an agent live start needs (K1): <ws>/requirements.md, a current requirements_eval_set approval and a current
+    rule_review decision, each signed by the case's test approver when it does not verify yet."""
+    os.makedirs(ws, exist_ok=True)
+    if not os.path.isfile(os.path.join(ws, "requirements.md")):
+        with open(os.path.join(ws, "requirements.md"), "w", encoding="utf-8") as f:
+            f.write(REQUIREMENTS)
+    spec = se.agent_spec(se.Agent(agent_dir))
+    for gate in ("requirements_eval_set", "rule_review"):
+        if gate == "rule_review" and not se.rule_review_items(agent_dir):
+            continue
+        if se.approval_verdict(gate, spec, ws).status != "approved":
+            se.approve(gate, spec, ws)
+
+
 def normalize(tool, text, sid="overview", agent=None):
     from engine import normalize as N
     return N.normalize(tool, text, sid, agent=agent)
@@ -379,8 +397,10 @@ class AgentBase(T.Base):
         rel = {"claude": "wrappers/claude/%s.md", "codex": "wrappers/codex/%s.toml"}[tool] % NAME
         return read(os.path.join(agent or self.agent, *rel.split("/")), "rb")
 
-    def live(self, cmd, *extra, fake=None):
+    def live(self, cmd, *extra, fake=None, gates=True):
         fake = fake or FakeAgentExec()
+        if gates and cmd == "run":
+            open_gates(self.agent, self.ws)
         runs = ("--runs", "1") if cmd == "run" else ()
         with mock.patch.object(se, "live_exec", fake):
             rc, out, err = cli("agent", cmd, self.agent, "--workspace", self.ws, "--live", "--auth-profile",
@@ -399,7 +419,8 @@ class AgentBase(T.Base):
 
             def sign(self, kind, gate, prepare, budget_usd=None):
                 grant = real.sign(kind, gate, prepare, budget_usd=budget_usd)
-                change()
+                if kind == "live":
+                    change()
                 return grant
         return mock.patch.dict(se.APPROVER, {"it": Signer()})
 
@@ -630,13 +651,14 @@ class TestLiveRefusals(AgentBase):
         self.assertIn("duplicate scenario id", self.refused("--engines", "claude"))
 
     def test_an_input_changed_after_signing_is_refused(self):
-        scenario = os.path.join(self.agent, "scenarios", "01-overview.json")
+        old = generated_copy(os.path.join(self.tmp, "old"))
+        scenario = os.path.join(old, "scenarios", "01-overview.json")
 
         def change():
             with open(scenario, "a", encoding="utf-8") as f:
                 f.write("\n")
         with self.after_signing(change):
-            rc, out, err, fake = self.live("run", "--engines", "claude")
+            rc, out, err, fake = self.live("run", "--engines", "claude", "--old-agent", old)
         self.assertEqual(rc, 2, out + err)
         self.assertIn("inputs changed after signing", err)
         self.assertEqual(fake.calls, [])
