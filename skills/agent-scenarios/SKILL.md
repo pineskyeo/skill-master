@@ -53,7 +53,7 @@ The criterion types are the ones AGENT.md uses: `file_line_citations` with `min`
 - Use `command_ran` and `command_absent` only when AGENT.md has the `shell` capability. Use `file_exists` only with `write`.
 - Pick `must_include` strings that any correct answer holds, such as `CHANGELOG.md` or a function name. Leave out phrases the agent may word another way.
 - Name no fixture folder `.claude`, `.agents`, or `.codex`, and put no symlink in a fixture.
-- Write valid JSON, in English ASCII text.
+- Write valid JSON, in English ASCII text. In a `regex`, write every backslash as two backslashes, such as `\\.` for a literal dot and `\\s` for a space.
 - When AGENT.md lacks a capability or a rule that a requested scenario needs, leave AGENT.md unchanged and name the gap in the reply.
 
 ## Example

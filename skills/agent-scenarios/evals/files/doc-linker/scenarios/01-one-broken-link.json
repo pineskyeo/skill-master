@@ -3,6 +3,6 @@
   "turns": [{"user": "Check the links in the docs folder and tell me which ones are broken."}],
   "expected_tools": ["read", "search"],
   "must_include": ["guide.md"],
-  "expected_outcome": [{"type": "file_line_citations", "min": 1}, {"type": "no_writes"}],
+  "expected_outcome": [{"type": "llm", "text": "Does the answer name configure.md as the missing target of the link in guide.md?"}],
   "fixture": "docs-basic"
 }
