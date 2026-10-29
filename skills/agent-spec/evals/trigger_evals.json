@@ -1,0 +1,22 @@
+[
+  {"query": "The requirements for the pr-reviewer agent are in workspaces/pr-reviewer/requirements.md. Write its AGENT.md.", "should_trigger": true},
+  {"query": "Draft agents/changelog-writer/AGENT.md from the requirements file I just approved.", "should_trigger": true},
+  {"query": "Turn this requirements.md into an AGENT.md v2 with typed success criteria.", "should_trigger": true},
+  {"query": "Our dep-auditor agent still uses the old v1 AGENT.md with a tools key. Redraft it in the v2 format from its requirements.", "should_trigger": true},
+  {"query": "Write the AGENT.md frontmatter and body for a read-only code review agent, based on requirements.md in this folder.", "should_trigger": true},
+  {"query": "I need the spec file for the data-tidy agent. It should pin csv-cleaner@1.0.0 as a skill. The requirements are attached.", "should_trigger": true},
+  {"query": "Create the canonical AGENT.md for the web-brief agent from its requirements so we can generate the four wrappers.", "should_trigger": true},
+  {"query": "Convert the success criteria in requirements.md into command_ran and command_absent objects and write the agent's AGENT.md.", "should_trigger": true},
+  {"query": "The AGENT.md for release-notes fails the agent-structure check because it has no Tools section. Redraft it from the requirements.", "should_trigger": true},
+  {"query": "From the requirements below, write the AGENT.md for a triage agent with capabilities read, search, and shell.", "should_trigger": true},
+  {"query": "Draft the requirements.md for a new agent that audits Python dependencies.", "should_trigger": false},
+  {"query": "Write scenarios/01-basic.json for the pr-reviewer agent.", "should_trigger": false},
+  {"query": "Write a SKILL.md for a skill that cleans CSV files.", "should_trigger": false},
+  {"query": "Generate the Claude, Codex, OpenCode, and Hermes wrapper files for agents/pr-reviewer.", "should_trigger": false},
+  {"query": "What does model_policy judgment map to in targets/claude.json?", "should_trigger": false},
+  {"query": "Install the pr-reviewer agent into my project.", "should_trigger": false},
+  {"query": "Write a Dockerfile for this Flask app.", "should_trigger": false},
+  {"query": "Summarize what the agent in agents/web-brief does in two sentences.", "should_trigger": false},
+  {"query": "Add a test that checks the schema refuses an AGENT.md with a tools key.", "should_trigger": false},
+  {"query": "Rename the variable tmp to work_dir across the engine folder.", "should_trigger": false}
+]

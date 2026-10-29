@@ -1,0 +1,22 @@
+[
+  {"query": "I want a skill that renames invoice PDFs by vendor and date. Write up its requirements before we build anything.", "should_trigger": true},
+  {"query": "Draft requirements.md for a new agent that reviews pull requests read-only and cites file and line numbers.", "should_trigger": true},
+  {"query": "We need a release notes agent. Here is the Slack thread, turn it into a requirements file for the unit.", "should_trigger": true},
+  {"query": "Before the eval set exists, put the goal, non-goals, and success criteria for my new triage agent into requirements.md.", "should_trigger": true},
+  {"query": "Write the requirements for a skill that strips trailing whitespace from Markdown files.", "should_trigger": true},
+  {"query": "Start a new skill unit for converting CSV exports to JSON. First step is the requirements document.", "should_trigger": true},
+  {"query": "Turn these meeting notes into requirements.md for the changelog-entry skill we discussed.", "should_trigger": true},
+  {"query": "A teammate asked for a bot that fixes broken links in our docs folder. Capture what it must do and must not do in a requirements file.", "should_trigger": true},
+  {"query": "Can you write the requirements doc for an agent that audits outdated Python dependencies? Capabilities, users, target tools, the usual headings.", "should_trigger": true},
+  {"query": "New unit request: a skill that drafts commit messages from the staged diff. Please draft its requirements.md so it can go to approval.", "should_trigger": true},
+  {"query": "Write the AGENT.md for the pr-reviewer agent from its approved requirements.md.", "should_trigger": false},
+  {"query": "Draft three single-turn scenarios for the agent in agents/todo-collector/AGENT.md.", "should_trigger": false},
+  {"query": "Add two more cases to evals/evals.json for the csv-cleaner skill.", "should_trigger": false},
+  {"query": "Fix the failing unit test in tests/test_install.py.", "should_trigger": false},
+  {"query": "Summarize this product requirements document for the marketing team in five bullets.", "should_trigger": false},
+  {"query": "Update requirements.txt to pin requests to version 2.32.", "should_trigger": false},
+  {"query": "Improve the description in skills/csv-cleaner/SKILL.md so it triggers more often.", "should_trigger": false},
+  {"query": "Review this pull request and point out any bugs.", "should_trigger": false},
+  {"query": "Explain what the requirements_eval_set approval gate covers.", "should_trigger": false},
+  {"query": "Translate the README into Spanish.", "should_trigger": false}
+]

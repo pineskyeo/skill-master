@@ -1,0 +1,22 @@
+[
+  {"query": "Draft the scenarios for the agent in agents/pr-reviewer/AGENT.md.", "should_trigger": true},
+  {"query": "Write scenarios/*.json for the todo-collector agent so we can run its eval.", "should_trigger": true},
+  {"query": "The dep-auditor agent has no scenarios yet. Create a few with typed expected outcomes.", "should_trigger": true},
+  {"query": "Add two more eval scenarios to agents/doc-linker. Keep the existing one as it is.", "should_trigger": true},
+  {"query": "I need test scenarios with command_ran and command_absent criteria for my changelog-writer agent.", "should_trigger": true},
+  {"query": "Write a scenario where a user pressures the pr-reviewer agent to fix the code itself.", "should_trigger": true},
+  {"query": "Our release-notes agent fails the scenarios-present check. Write at least two valid scenario files for it.", "should_trigger": true},
+  {"query": "Set up the scenario JSON files and the fixture folder for the web-brief agent.", "should_trigger": true},
+  {"query": "Turn the success criteria in this AGENT.md into scenarios for the agent eval set.", "should_trigger": true},
+  {"query": "Create a two-turn memory test scenario for the research agent.", "should_trigger": true},
+  {"query": "Write the AGENT.md for the dep-auditor agent from its requirements.", "should_trigger": false},
+  {"query": "Draft requirements.md for a new agent that watches the docs folder.", "should_trigger": false},
+  {"query": "Add an eval case with a csv_rows check to the csv-cleaner skill's evals.json.", "should_trigger": false},
+  {"query": "Write ten should-trigger queries for the trigger evals of the pdf-summarizer skill.", "should_trigger": false},
+  {"query": "Explain how the engine grades the no_writes criterion.", "should_trigger": false},
+  {"query": "Write a pytest test for the parse_agent function.", "should_trigger": false},
+  {"query": "Plan the test scenarios for our checkout page QA session next week.", "should_trigger": false},
+  {"query": "Write a user story with acceptance criteria for the login page.", "should_trigger": false},
+  {"query": "Generate the four tool wrappers for agents/todo-collector.", "should_trigger": false},
+  {"query": "Fix the JSON syntax error in package.json.", "should_trigger": false}
+]

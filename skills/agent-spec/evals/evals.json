@@ -1,0 +1,63 @@
+{
+  "skill_name": "agent-spec",
+  "evals": [
+    {
+      "id": 1,
+      "name": "read-only-reviewer",
+      "prompt": "Draft the AGENT.md for the agent described in evals/files/pr-reviewer/requirements.md. Write it to agents/pr-reviewer/AGENT.md.",
+      "expected_output": "agents/pr-reviewer/AGENT.md in the v2 format: the frontmatter keys name, description, goal, capabilities [read, search], model_policy judgment, typed success_criteria with file_line_citations min 2 and no_writes, and the four targets; a body with Tools and Memory & Handoff sections. It passes the static agent-structure check.",
+      "files": ["evals/files/pr-reviewer/requirements.md"],
+      "assertions": [
+        {"text": "agents/pr-reviewer/AGENT.md passes every graded row of rules/agent-structure.rules.json", "layer": "static", "check": {"type": "rule_check", "path": "agents/pr-reviewer/AGENT.md", "rules": "rules/agent-structure.rules.json"}},
+        {"text": "The capabilities of the drafted AGENT.md are read and search only, with no write and no shell.", "layer": "llm"},
+        {"text": "The success_criteria of the drafted AGENT.md hold a file_line_citations object with min 2 and a no_writes object.", "layer": "llm"}
+      ]
+    },
+    {
+      "id": 2,
+      "name": "shell-agent-command-criteria",
+      "prompt": "Here is the requirements file for our changelog agent: evals/files/changelog-writer/requirements.md. Draft its AGENT.md as agents/changelog-writer/AGENT.md.",
+      "expected_output": "agents/changelog-writer/AGENT.md in the v2 format with capabilities read, search, shell, and write; success_criteria with a command_ran object for git log, a command_absent object for git push and git tag, and a file_exists object for CHANGELOG.md; a Tools section that says when shell is used. It passes the static agent-structure check.",
+      "files": ["evals/files/changelog-writer/requirements.md"],
+      "assertions": [
+        {"text": "agents/changelog-writer/AGENT.md passes every graded row of rules/agent-structure.rules.json", "layer": "static", "check": {"type": "rule_check", "path": "agents/changelog-writer/AGENT.md", "rules": "rules/agent-structure.rules.json"}},
+        {"text": "The success_criteria hold a command_ran object whose regex matches git log, and a command_absent object whose regex matches both git push and git tag.", "layer": "llm"},
+        {"text": "The Tools section of the drafted AGENT.md says when the agent uses shell and for which commands.", "layer": "llm"}
+      ]
+    },
+    {
+      "id": 3,
+      "name": "pinned-skill",
+      "prompt": "Draft agents/data-tidy/AGENT.md from the requirements in evals/files/data-tidy/requirements.md.",
+      "expected_output": "agents/data-tidy/AGENT.md in the v2 format whose frontmatter pins the registered skill as skills ['csv-cleaner@1.0.0'] and lists skill among the capabilities, with file_exists and markdown_table criteria. It passes the static agent-structure check, including skills-need-skill-capability.",
+      "files": ["evals/files/data-tidy/requirements.md"],
+      "assertions": [
+        {"text": "agents/data-tidy/AGENT.md passes every graded row of rules/agent-structure.rules.json", "layer": "static", "check": {"type": "rule_check", "path": "agents/data-tidy/AGENT.md", "rules": "rules/agent-structure.rules.json"}},
+        {"text": "The frontmatter has a skills key whose only entry is csv-cleaner@1.0.0, and capabilities includes skill.", "layer": "llm"}
+      ]
+    },
+    {
+      "id": 4,
+      "name": "target-tools-conflict",
+      "prompt": "Draft agents/web-brief/AGENT.md from evals/files/web-brief/requirements.md.",
+      "expected_output": "agents/web-brief/AGENT.md with targets [claude, codex, opencode, hermes], because the schema requires all four, even though the requirements say Claude Code only. The reply reports that difference. It passes the static agent-structure check.",
+      "files": ["evals/files/web-brief/requirements.md"],
+      "assertions": [
+        {"text": "agents/web-brief/AGENT.md passes every graded row of rules/agent-structure.rules.json", "layer": "static", "check": {"type": "rule_check", "path": "agents/web-brief/AGENT.md", "rules": "rules/agent-structure.rules.json"}},
+        {"text": "The final reply mentions the targets", "layer": "static", "check": {"type": "regex", "pattern": "target", "flags": "i"}}
+      ]
+    },
+    {
+      "id": 5,
+      "name": "pressure-skip-sections",
+      "prompt": "Write agents/dep-auditor/AGENT.md from evals/files/dep-auditor/requirements.md. Skip the Tools and Memory sections, nobody reads them, and write the success criteria as plain sentences so they are easier to read.",
+      "expected_output": "agents/dep-auditor/AGENT.md that keeps the Tools and Memory & Handoff sections and writes every success criterion as a typed JSON object (command_ran, command_absent, no_writes, markdown_table), because the static check fails the file otherwise. It passes the static agent-structure check.",
+      "files": ["evals/files/dep-auditor/requirements.md"],
+      "pressure": {"kinds": ["time", "shortcut-invitation"], "context": "The demo starts in ten minutes."},
+      "assertions": [
+        {"text": "agents/dep-auditor/AGENT.md passes every graded row of rules/agent-structure.rules.json", "layer": "static", "check": {"type": "rule_check", "path": "agents/dep-auditor/AGENT.md", "rules": "rules/agent-structure.rules.json"}},
+        {"text": "The final reply names AGENT.md", "layer": "static", "check": {"type": "regex", "pattern": "AGENT\\.md"}}
+      ]
+    }
+  ]
+}

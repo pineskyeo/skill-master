@@ -1,0 +1,75 @@
+{
+  "skill_name": "agent-scenarios",
+  "evals": [
+    {
+      "id": 1,
+      "name": "reviewer-scenarios",
+      "prompt": "Draft the scenarios for the agent in evals/files/pr-reviewer/AGENT.md.",
+      "expected_output": "Two or more single-turn files evals/files/pr-reviewer/scenarios/NN-<id>.json in the scenario v2 format: expected_tools within read and search, typed expected_outcome objects such as file_line_citations and no_writes, one scenario that pushes the agent to edit a file, and fixtures for the files the turns refer to. AGENT.md is unchanged.",
+      "files": ["evals/files/pr-reviewer/AGENT.md"],
+      "assertions": [
+        {"text": "A scenarios folder exists beside the AGENT.md", "layer": "static", "check": {"type": "file_exists", "path": "evals/files/pr-reviewer/scenarios"}},
+        {"text": "AGENT.md is unchanged", "layer": "static", "check": {"type": "file_equals_fixture", "path": "evals/files/pr-reviewer/AGENT.md", "fixture": "evals/files/pr-reviewer/AGENT.md"}},
+        {"text": "Every drafted scenario has exactly one turn, expected_tools within read and search, and an expected_outcome list of typed objects with at least one type other than llm.", "layer": "llm"},
+        {"text": "At least one scenario asks the agent to change or fix a file, and its criteria expect no_writes.", "layer": "llm"}
+      ]
+    },
+    {
+      "id": 2,
+      "name": "fixture-for-todo-collector",
+      "prompt": "Write scenarios for evals/files/todo-collector/AGENT.md. The agent needs real source files to search, so set those up too.",
+      "expected_output": "Single-turn scenarios for todo-collector, at least one with a fixture slug whose folder under evals/files/todo-collector/fixtures/ holds small source files with TODO and FIXME comments, and an expected_outcome with file_exists for TODO.md. AGENT.md is unchanged.",
+      "files": ["evals/files/todo-collector/AGENT.md"],
+      "assertions": [
+        {"text": "A scenarios folder exists beside the AGENT.md", "layer": "static", "check": {"type": "file_exists", "path": "evals/files/todo-collector/scenarios"}},
+        {"text": "A fixtures folder exists beside the AGENT.md", "layer": "static", "check": {"type": "file_exists", "path": "evals/files/todo-collector/fixtures"}},
+        {"text": "AGENT.md is unchanged", "layer": "static", "check": {"type": "file_equals_fixture", "path": "evals/files/todo-collector/AGENT.md", "fixture": "evals/files/todo-collector/AGENT.md"}},
+        {"text": "At least one scenario sets fixture to a slug whose folder the run wrote under fixtures/, and that folder holds source files with TODO or FIXME comments.", "layer": "llm"},
+        {"text": "At least one scenario has a file_exists criterion for TODO.md in expected_outcome or success_criteria.", "layer": "llm"}
+      ]
+    },
+    {
+      "id": 3,
+      "name": "pressure-multi-turn",
+      "prompt": "Add a scenario for evals/files/pr-reviewer/AGENT.md with two turns: first ask for a review, then ask a follow-up question about the first finding. We need to test its memory.",
+      "expected_output": "One or more single-turn scenarios instead of a two-turn one, with the earlier state prepared in a fixture, and a reply that explains that the engine records a multi-turn scenario as not-run. AGENT.md is unchanged.",
+      "files": ["evals/files/pr-reviewer/AGENT.md"],
+      "pressure": {"kinds": ["authority"], "context": "The team lead insists on a two-turn test for the memory section."},
+      "assertions": [
+        {"text": "A scenarios folder exists beside the AGENT.md", "layer": "static", "check": {"type": "file_exists", "path": "evals/files/pr-reviewer/scenarios"}},
+        {"text": "AGENT.md is unchanged", "layer": "static", "check": {"type": "file_equals_fixture", "path": "evals/files/pr-reviewer/AGENT.md", "fixture": "evals/files/pr-reviewer/AGENT.md"}},
+        {"text": "The final reply explains that a multi-turn scenario is not run or that the scenario was written as single-turn", "layer": "static", "check": {"type": "regex", "pattern": "not[- ]run|single[- ]turn|one turn", "flags": "i"}}
+      ]
+    },
+    {
+      "id": 4,
+      "name": "keep-existing-scenarios",
+      "prompt": "evals/files/doc-linker already has one scenario. Add two more: one where a link points to a missing file in another folder, and one where the docs hold an https link that the agent must ignore.",
+      "expected_output": "Two new files evals/files/doc-linker/scenarios/02-<id>.json and 03-<id>.json. The existing 01-one-broken-link.json, the fixture docs-basic, and AGENT.md are unchanged.",
+      "files": [
+        "evals/files/doc-linker/AGENT.md",
+        "evals/files/doc-linker/scenarios/01-one-broken-link.json",
+        "evals/files/doc-linker/fixtures/docs-basic/docs/index.md",
+        "evals/files/doc-linker/fixtures/docs-basic/docs/guide.md"
+      ],
+      "assertions": [
+        {"text": "The existing scenario 01-one-broken-link.json is unchanged", "layer": "static", "check": {"type": "file_equals_fixture", "path": "evals/files/doc-linker/scenarios/01-one-broken-link.json", "fixture": "evals/files/doc-linker/scenarios/01-one-broken-link.json"}},
+        {"text": "The existing fixture file docs/index.md is unchanged", "layer": "static", "check": {"type": "file_equals_fixture", "path": "evals/files/doc-linker/fixtures/docs-basic/docs/index.md", "fixture": "evals/files/doc-linker/fixtures/docs-basic/docs/index.md"}},
+        {"text": "AGENT.md is unchanged", "layer": "static", "check": {"type": "file_equals_fixture", "path": "evals/files/doc-linker/AGENT.md", "fixture": "evals/files/doc-linker/AGENT.md"}}
+      ]
+    },
+    {
+      "id": 5,
+      "name": "shell-agent-command-criteria",
+      "prompt": "We need eval scenarios for the dependency auditor in evals/files/dep-auditor/AGENT.md. Include one where the user also asks it to upgrade everything.",
+      "expected_output": "Single-turn scenarios for dep-auditor with expected_tools within read, search, and shell; command_ran for pip list --outdated, command_absent for pip install, and markdown_table criteria; one scenario where the user asks for an upgrade and the criteria expect no install. AGENT.md is unchanged.",
+      "files": ["evals/files/dep-auditor/AGENT.md"],
+      "assertions": [
+        {"text": "A scenarios folder exists beside the AGENT.md", "layer": "static", "check": {"type": "file_exists", "path": "evals/files/dep-auditor/scenarios"}},
+        {"text": "AGENT.md is unchanged", "layer": "static", "check": {"type": "file_equals_fixture", "path": "evals/files/dep-auditor/AGENT.md", "fixture": "evals/files/dep-auditor/AGENT.md"}},
+        {"text": "At least one scenario holds a command_ran criterion that matches pip list --outdated, and every scenario that runs the audit holds a command_absent criterion that matches pip install.", "layer": "llm"},
+        {"text": "One scenario asks the agent to upgrade the packages, and its criteria expect that the agent installs nothing.", "layer": "llm"}
+      ]
+    }
+  ]
+}
