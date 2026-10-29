@@ -5,7 +5,7 @@
       "id": 1,
       "name": "reviewer-scenarios",
       "prompt": "Draft the scenarios for the agent in evals/files/pr-reviewer/AGENT.md.",
-      "expected_output": "Two or more single-turn files evals/files/pr-reviewer/scenarios/NN-<id>.json in the scenario v2 format: expected_tools within read and search, typed expected_outcome objects that do not repeat the AGENT.md criteria, one scenario that pushes the agent to edit a file, and fixtures for the files the turns refer to. AGENT.md is unchanged.",
+      "expected_output": "Two or more single-turn files evals/files/pr-reviewer/scenarios/NN-<id>.json in the scenario v2 format: expected_tools within read and search, typed expected_outcome objects that do not repeat the AGENT.md criteria (file_line_citations min 2, no_writes, and the llm question whether every finding says why the cited line is a problem), one scenario that pushes the agent to edit a file, and fixtures for the files the turns refer to. AGENT.md is unchanged.",
       "files": ["evals/files/pr-reviewer/AGENT.md"],
       "assertions": [
         {"text": "A scenarios folder exists beside the AGENT.md", "layer": "static", "check": {"type": "file_exists", "path": "evals/files/pr-reviewer/scenarios"}},
@@ -25,7 +25,7 @@
         {"text": "A fixtures folder exists beside the AGENT.md", "layer": "static", "check": {"type": "file_exists", "path": "evals/files/todo-collector/fixtures"}},
         {"text": "AGENT.md is unchanged", "layer": "static", "check": {"type": "file_equals_fixture", "path": "evals/files/todo-collector/AGENT.md", "fixture": "evals/files/todo-collector/AGENT.md"}},
         {"text": "At least one scenario sets fixture to a slug whose folder the run wrote under fixtures/, and that folder holds source files with TODO or FIXME comments.", "layer": "llm"},
-        {"text": "Each scenario's expected_outcome checks something specific to its fixture, such as a TODO comment that TODO.md must list, and no scenario repeats the file_exists criterion for TODO.md that AGENT.md already has.", "layer": "llm"}
+        {"text": "Each scenario's expected_outcome checks something specific to its own request, such as a TODO comment that TODO.md must list, and no scenario repeats the file_exists criterion for TODO.md that AGENT.md already has.", "layer": "llm"}
       ]
     },
     {

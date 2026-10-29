@@ -34,7 +34,8 @@
       "expected_output": "requirements.md for an agent unit with all seven agent headings. The decisions the request leaves open, such as whether the agent writes fixes or only proposes them, are listed under Open questions instead of being made.",
       "assertions": [
         {"text": "requirements.md exists in the current folder", "layer": "static", "check": {"type": "file_exists", "path": "requirements.md"}},
-        {"text": "requirements.md has the seven agent headings, each on its own line as written", "layer": "static", "check": {"type": "csv_rows", "path": "requirements.md", "normalize": "strip", "min": 1, "rows": [["## Goal"], ["## Users"], ["## Capabilities"], ["## Success criteria"], ["## Non-goals"], ["## Target tools"], ["## Open questions"]]}}
+        {"text": "requirements.md has the seven agent headings, each on its own line as written", "layer": "static", "check": {"type": "csv_rows", "path": "requirements.md", "normalize": "strip", "min": 1, "rows": [["## Goal"], ["## Users"], ["## Capabilities"], ["## Success criteria"], ["## Non-goals"], ["## Target tools"], ["## Open questions"]]}},
+        {"text": "Open questions asks whether the agent writes the link fixes or only proposes them, and Capabilities does not settle that question on its own.", "layer": "llm"}
       ]
     },
     {
