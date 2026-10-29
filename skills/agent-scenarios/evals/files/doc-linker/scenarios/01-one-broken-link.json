@@ -1,0 +1,8 @@
+{
+  "id": "one-broken-link",
+  "turns": [{"user": "Check the links in the docs folder and tell me which ones are broken."}],
+  "expected_tools": ["read", "search"],
+  "must_include": ["guide.md"],
+  "expected_outcome": [{"type": "file_line_citations", "min": 1}, {"type": "no_writes"}],
+  "fixture": "docs-basic"
+}
