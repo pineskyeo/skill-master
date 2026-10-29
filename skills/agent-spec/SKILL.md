@@ -23,8 +23,8 @@ Draft the `AGENT.md` of one agent from its `requirements.md`. AGENT.md is the si
 Write these keys in this order, each on its own line:
 
 - `name`. The agent name, in lowercase letters, digits, and single hyphens. It equals the name of the folder that holds AGENT.md.
-- `description`. One sentence that says what the agent does, then a sentence that starts with "Use when" and names the request that should start it. Leave out colons and the characters `<` and `>`.
-- `goal`. One sentence, from the Goal heading. Leave out colons. The frontmatter reader refuses a plain value that holds a colon followed by a space.
+- `description`. One sentence that says what the agent does, then a sentence that starts with "Use when" and names the request that should start it. Leave out colons, the character `#`, and the characters `<` and `>`.
+- `goal`. One sentence, from the Goal heading. Leave out colons and the character `#`. The frontmatter reader refuses a plain value that holds a colon followed by a space, and drops everything after a space and `#`.
 - `capabilities`. A flow list such as `[read, search]`, with words from read, search, write, shell, web_fetch, web_search, delegate, and skill only. Take them from the Capabilities heading. Leave out every capability that no step of the agent uses.
 - `model_policy`. Write `judgment`. It is the only role that the tool targets map today.
 - `success_criteria`. A block list. Each item is one typed JSON object in single quotes, as in the example.

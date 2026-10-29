@@ -56,6 +56,7 @@
       "assertions": [
         {"text": "The existing scenario 01-one-broken-link.json is unchanged", "layer": "static", "check": {"type": "file_equals_fixture", "path": "evals/files/doc-linker/scenarios/01-one-broken-link.json", "fixture": "evals/files/doc-linker/scenarios/01-one-broken-link.json"}},
         {"text": "The existing fixture file docs/index.md is unchanged", "layer": "static", "check": {"type": "file_equals_fixture", "path": "evals/files/doc-linker/fixtures/docs-basic/docs/index.md", "fixture": "evals/files/doc-linker/fixtures/docs-basic/docs/index.md"}},
+        {"text": "The existing fixture file docs/guide.md is unchanged", "layer": "static", "check": {"type": "file_equals_fixture", "path": "evals/files/doc-linker/fixtures/docs-basic/docs/guide.md", "fixture": "evals/files/doc-linker/fixtures/docs-basic/docs/guide.md"}},
         {"text": "AGENT.md is unchanged", "layer": "static", "check": {"type": "file_equals_fixture", "path": "evals/files/doc-linker/AGENT.md", "fixture": "evals/files/doc-linker/AGENT.md"}},
         {"text": "Two new files scenarios/02-<id>.json and 03-<id>.json exist beside AGENT.md, one about a link to a missing file in another folder and one about an https link the agent must ignore.", "layer": "llm"},
         {"text": "Each new scenario's fixture holds at least one broken relative link, so a correct answer can meet the file_line_citations criterion of AGENT.md.", "layer": "llm"}
