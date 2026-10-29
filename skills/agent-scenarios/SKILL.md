@@ -29,7 +29,7 @@ Write one JSON object per file with these keys:
 | `id` | A short lowercase id, unique in the folder, such as `small-diff`. The file name repeats it. |
 | `turns` | A list with exactly one object, `{"user": "<request>"}`. Write the request as a real person would type it. |
 | `expected_tools` | The capabilities the run must use. Every value is one of the AGENT.md capabilities. |
-| `must_include` | Short strings the final answer must contain, compared without case, such as a file name. |
+| `must_include` | A non-empty list of short strings the final answer must contain, compared without case, such as a file name. |
 | `expected_outcome` | A non-empty list of typed criterion objects that this request needs beyond the AGENT.md criteria. Use a machine type when one fits. |
 | `success_criteria` | Optional. More typed criterion objects. |
 | `fixture` | Optional. The slug of a folder under `fixtures/` that the run copies into its work folder. Start with a lowercase letter or a digit, then use only lowercase letters, digits, hyphens, and underscores, at most 64 characters in all. |
@@ -51,7 +51,7 @@ The criterion types are the ones AGENT.md uses: `file_line_citations` with `min`
 - Draft no scenario that cannot meet the AGENT.md criteria. A scenario whose fixture holds nothing to cite fails `file_line_citations` on every run. Give the fixture the material a correct answer needs.
 - Keep `expected_tools` within the AGENT.md capabilities. List only the capabilities the run must use, because the grader fails a run that calls no tool of a listed capability.
 - Use `command_ran` and `command_absent` only when AGENT.md has the `shell` capability. Use `file_exists` only with `write`.
-- Pick `must_include` strings that any correct answer holds, such as `CHANGELOG.md` or a function name. Leave out phrases the agent may word another way.
+- Write at least one `must_include` string, such as a file name that the request names. Pick strings that any correct answer holds, such as `CHANGELOG.md` or a function name. Leave out phrases the agent may word another way.
 - Name no fixture folder `.claude`, `.agents`, or `.codex`, and put no symlink in a fixture.
 - Write valid JSON, in English ASCII text. In a `regex`, write every backslash as two backslashes, such as `\\.` for a literal dot and `\\s` for a space.
 - When AGENT.md lacks a capability or a rule that a requested scenario needs, leave AGENT.md unchanged and name the gap in the reply.

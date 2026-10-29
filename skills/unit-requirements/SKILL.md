@@ -42,7 +42,7 @@ Draft one `requirements.md` for a new skill or agent from a person's request. A 
 - `## Goal`. One sentence that says what the agent finishes.
 - `## Users`. Who starts the agent, and in what setting.
 - `## Capabilities`. Only words from this list: read, search, write, shell, web_fetch, web_search, delegate, skill. Give one reason for each capability. List each registered skill the agent needs as `<name>@<version>`, and add skill to the capabilities when you do.
-- `## Success criteria`. Checks that decide whether a run succeeded. Name the criterion type when one fits: file_line_citations, no_writes, max_chars, markdown_table, min_verified_sources, command_ran, command_absent, or file_exists. Write the rest as yes or no questions for a grader.
+- `## Success criteria`. Checks that decide whether a run succeeded. Name the criterion type when one fits: file_line_citations, no_writes, max_chars, markdown_table, min_verified_sources, command_ran, command_absent, or file_exists. Write the rest as yes or no questions for a grader. Also write each Non-goal that a check can decide as a criterion, such as command_absent for a command the agent must never run.
 - `## Non-goals`. What the agent must not do, including the steps that a person keeps.
 - `## Target tools`. Always claude, codex, opencode, and hermes, because the engine requires all four. If the person names fewer, list all four and record the difference under Open questions.
 - `## Open questions`.

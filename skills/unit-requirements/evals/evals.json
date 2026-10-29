@@ -17,25 +17,25 @@
       "id": 2,
       "name": "agent-from-thread",
       "prompt": "evals/files/release-notes-thread.md is the thread where our team asked for a release notes agent. Draft the agent's requirements.md in the current folder.",
-      "expected_output": "requirements.md for an agent unit with the seven agent headings in order (Goal, Users, Capabilities, Success criteria, Non-goals, Target tools, Open questions). Capabilities come only from the closed list. Success criteria keep the 3000 character limit and the rule against pushing, tagging, or publishing. Target tools lists all four tools, and the doubt about OpenCode and Hermes is an open question.",
+      "expected_output": "requirements.md for an agent unit with the seven agent headings in order (Goal, Users, Capabilities, Success criteria, Non-goals, Target tools, Open questions). Capabilities come only from the closed list. Success criteria keep the 3000 character limit and a check that the agent never runs git push or git tag. Publishing stays a person's step under Non-goals. Target tools lists all four tools, and the doubt about OpenCode and Hermes is an open question.",
       "files": ["evals/files/release-notes-thread.md"],
       "assertions": [
         {"text": "requirements.md exists in the current folder", "layer": "static", "check": {"type": "file_exists", "path": "requirements.md"}},
         {"text": "requirements.md has the seven agent headings, each on its own line as written", "layer": "static", "check": {"type": "csv_rows", "path": "requirements.md", "normalize": "strip", "min": 1, "rows": [["## Goal"], ["## Users"], ["## Capabilities"], ["## Success criteria"], ["## Non-goals"], ["## Target tools"], ["## Open questions"]]}},
         {"text": "Under Capabilities, requirements.md uses only words from read, search, write, shell, web_fetch, web_search, delegate and skill.", "layer": "llm"},
-        {"text": "Success criteria keep the 3000 character limit and the rule that the agent never pushes, tags, or publishes, each written as a check.", "layer": "llm"},
+        {"text": "Success criteria keep the 3000 character limit and a check that the agent never runs git push or git tag, each written as a check.", "layer": "llm"},
         {"text": "Target tools lists claude, codex, opencode and hermes, and Open questions records that the thread is unsure about OpenCode and Hermes.", "layer": "llm"}
       ]
     },
     {
       "id": 3,
       "name": "underspecified-agent",
-      "prompt": "Write requirements.md here for a small agent that watches our docs folder and fixes broken links.",
+      "prompt": "Write requirements.md here for a small agent that watches our docs folder and helps with broken links.",
       "expected_output": "requirements.md for an agent unit with all seven agent headings. The decisions the request leaves open, such as whether the agent writes fixes or only proposes them, are listed under Open questions instead of being made.",
       "assertions": [
         {"text": "requirements.md exists in the current folder", "layer": "static", "check": {"type": "file_exists", "path": "requirements.md"}},
         {"text": "requirements.md has the seven agent headings, each on its own line as written", "layer": "static", "check": {"type": "csv_rows", "path": "requirements.md", "normalize": "strip", "min": 1, "rows": [["## Goal"], ["## Users"], ["## Capabilities"], ["## Success criteria"], ["## Non-goals"], ["## Target tools"], ["## Open questions"]]}},
-        {"text": "Open questions asks whether the agent writes the link fixes or only proposes them, and Capabilities does not settle that question on its own.", "layer": "llm"}
+        {"text": "Open questions asks whether the agent writes the link fixes or only proposes them.", "layer": "llm"}
       ]
     },
     {
