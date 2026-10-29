@@ -29,11 +29,12 @@
       "id": 3,
       "name": "pinned-skill",
       "prompt": "Draft agents/data-tidy/AGENT.md from the requirements in evals/files/data-tidy/requirements.md.",
-      "expected_output": "agents/data-tidy/AGENT.md in the v2 format whose frontmatter pins the registered skill as skills ['csv-cleaner@1.0.0'] and lists skill among the capabilities, with file_exists and markdown_table criteria. It passes the static agent-structure check, including skills-need-skill-capability.",
+      "expected_output": "agents/data-tidy/AGENT.md in the v2 format whose frontmatter pins the registered skill as skills ['csv-cleaner@1.0.0'] and lists skill among the capabilities, with a markdown_table criterion. The sample-folder check for data/clean/orders.csv stays out of AGENT.md and the reply names it for the scenarios. It passes the static agent-structure check, including skills-need-skill-capability.",
       "files": ["evals/files/data-tidy/requirements.md"],
       "assertions": [
         {"text": "agents/data-tidy/AGENT.md passes every graded row of rules/agent-structure.rules.json", "layer": "static", "check": {"type": "rule_check", "path": "agents/data-tidy/AGENT.md", "rules": "rules/agent-structure.rules.json"}},
-        {"text": "The frontmatter has a skills key whose only entry is csv-cleaner@1.0.0, and capabilities includes skill.", "layer": "llm"}
+        {"text": "The frontmatter has a skills key whose only entry is csv-cleaner@1.0.0, and capabilities includes skill.", "layer": "llm"},
+        {"text": "The success_criteria of AGENT.md hold no file_exists object for data/clean/orders.csv, and the final reply names that check as one for a scenario.", "layer": "llm"}
       ]
     },
     {
@@ -44,7 +45,7 @@
       "files": ["evals/files/web-brief/requirements.md"],
       "assertions": [
         {"text": "agents/web-brief/AGENT.md passes every graded row of rules/agent-structure.rules.json", "layer": "static", "check": {"type": "rule_check", "path": "agents/web-brief/AGENT.md", "rules": "rules/agent-structure.rules.json"}},
-        {"text": "The final reply mentions the targets", "layer": "static", "check": {"type": "regex", "pattern": "target", "flags": "i"}}
+        {"text": "The final reply mentions the targets", "layer": "static", "check": {"type": "regex", "pattern": "target|all four|opencode|hermes|claude code only", "flags": "i"}}
       ]
     },
     {

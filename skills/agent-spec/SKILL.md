@@ -6,7 +6,7 @@ metadata:
 ---
 # Agent spec
 
-Draft the `AGENT.md` of one agent from its `requirements.md`. AGENT.md is the single source of the agent. The engine renders the four tool wrappers from it, and the static check grades it with `rules/agent-structure.rules.json` and `schemas/agent-frontmatter.schema.json`. A draft that breaks the format below fails that check before any eval runs. You only draft this file. You run no engine command, and you write no scenario, wrapper, or eval file.
+Draft the `AGENT.md` of one agent from its `requirements.md`. AGENT.md is the single source of the agent. The engine renders the four tool wrappers from it, and the static check grades it with `rules/agent-structure.rules.json` and `schemas/agent-frontmatter.schema.json`. You only draft this file. You run no engine command, and you write no scenario, wrapper, or eval file.
 
 ## Inputs
 
@@ -24,19 +24,21 @@ Write these keys in this order, each on its own line:
 
 - `name`. The agent name, in lowercase letters, digits, and single hyphens. It equals the name of the folder that holds AGENT.md.
 - `description`. One sentence that says what the agent does, then a sentence that starts with "Use when" and names the request that should start it. Leave out colons and the characters `<` and `>`.
-- `goal`. One sentence, from the Goal heading.
+- `goal`. One sentence, from the Goal heading. Leave out colons. The frontmatter reader refuses a plain value that holds a colon followed by a space.
 - `capabilities`. A flow list such as `[read, search]`, with words from read, search, write, shell, web_fetch, web_search, delegate, and skill only. Take them from the Capabilities heading. Leave out every capability that no step of the agent uses.
 - `model_policy`. Write `judgment`. It is the only role that the tool targets map today.
 - `success_criteria`. A block list. Each item is one typed JSON object in single quotes, as in the example.
 - `targets`. Always `[claude, codex, opencode, hermes]`. The schema requires exactly these four. When the requirements name fewer tools, keep all four and report the difference.
 - `skills`. Only when the requirements list registered skills. Write a flow list of single-quoted `<name>@<version>` pins, such as `['csv-cleaner@1.0.0']`, and add `skill` to the capabilities.
-- `version`. Write `1.0.0` for a new agent. Registration reads it.
+- `version`. Write `1.0.0` for a new agent.
 
-Write no other key. The schema refuses any key outside this list, and a `tools` key marks the file as the old v1 format.
+Write no other key. Never write a `tools` key. It marks the file as the old v1 format.
 
 ## Success criteria
 
-Turn each success criterion of the requirements into one criterion object. Use a machine type when one fits, and keep at least one machine type in the list. The static check fails a list that holds only `llm` objects.
+Turn each success criterion of the requirements into one criterion object. Use a machine type when one fits, and keep at least one machine type in the list.
+
+The engine grades every AGENT.md criterion on every scenario of the agent. Put a criterion here only when it holds for every request the agent takes. A criterion about one sample input, such as a file that one test folder produces, belongs in a scenario. Leave it out of AGENT.md and name it in the reply.
 
 | Type | Keys | Use it when the agent must |
 |---|---|---|
@@ -54,7 +56,7 @@ Follow these rules for the objects:
 
 - Write each object on one line, wrapped in single quotes: `- '{"type": "no_writes"}'`.
 - Use ASCII text only. Inside the single quotes, write an apostrophe as two apostrophes.
-- In a `regex`, escape a dot as `\\.` because the text is JSON. Match the command, as in `git push`, not a whole command line.
+- In a `regex`, write every backslash as two backslashes, because the text is JSON. Write `\\.` for a literal dot and `\\s` for a space. A single backslash makes the object invalid, or silently changes `\b` into another character. Match the command, as in `git push`, not a whole command line.
 - Use `command_ran` and `command_absent` only with the `shell` capability, and `file_exists` only with `write`.
 - Write an `llm` text as a yes or no question about the final answer or the work, such as "Does every finding name the file it is about?"
 
@@ -74,7 +76,6 @@ After the frontmatter, write these parts in English:
 - Draft from the requirements only. When a heading is missing or unclear, write the closest valid value and name the gap in the reply.
 - Keep the Open questions of the requirements in the reply. Do not answer them yourself.
 - If an AGENT.md already exists at the output path, read it first and keep what still matches the requirements.
-- Keep the file ASCII. The engine refuses non-ASCII text in a criterion and non-English text anywhere in AGENT.md.
 
 ## Example
 

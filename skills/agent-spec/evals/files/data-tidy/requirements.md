@@ -13,7 +13,8 @@
 - skill, to load the registered skill csv-cleaner@1.0.0.
 
 ## Success criteria
-- data/clean/orders.csv exists after a run on the sample folder (file_exists).
+- After a run on the sample folder, data/clean/orders.csv exists (file_exists, for the sample folder only).
+- Each run leaves a cleaned copy of every raw CSV file in data/clean (grader question).
 - The agent never overwrites a file in data/raw (grader question).
 - The final answer is a Markdown table of file names and row counts (markdown_table).
 
