@@ -24,7 +24,7 @@ Draft one `requirements.md` for a new skill or agent from a person's request. A 
 1. Read the request and every file it points at.
 2. Pick the unit kind. A skill is one job that an agent loads by its description, such as cleaning a CSV file. An agent is a role with its own capabilities that a person starts, such as a pull request reviewer. If the person names the kind, use it.
 3. Pick the unit name. Use lowercase letters, digits, and single hyphens, at most 64 characters, and leave out the words anthropic and claude. Keep a name the person gives when it fits this rule. If you change it, say so under Open questions.
-4. Write the title line `# <name> requirements`. Then write the headings for the unit kind in the order below. Copy each heading exactly, with no number, colon, or extra word. The skills that draft the unit later, and its eval, find the headings by their exact text.
+4. Write the title line `# <name> requirements`. Then write the headings for the unit kind in the order below. Copy each heading exactly, with no number, colon, or extra word.
 5. Fill each heading with short bullets. State what the request says. When the request leaves a decision open, write the decision under Open questions instead of making it for the person.
 6. Reply.
 
@@ -32,7 +32,7 @@ Draft one `requirements.md` for a new skill or agent from a person's request. A 
 
 - `## What it does`. The input the skill takes, the output it writes, and what it leaves unchanged.
 - `## When to use`. The requests that should load the skill.
-- `## When not to use`. At least two nearby requests that the skill must not take. The trigger evals use them as negatives.
+- `## When not to use`. At least two nearby requests that the skill must not take.
 - `## First live run`. The engines under test, which are `claude` and `codex` unless the person names others, and 3 runs per case, the engine default. Name a model only when the person names one.
 - `## Pass criteria`. Checks that decide whether the skill works. Write each one so that a script or a grader can answer yes or no. Write "the output CSV has no duplicate row", not "the output is clean".
 - `## Open questions`.
