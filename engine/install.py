@@ -6,7 +6,7 @@ A plan is built with every check first; a refusal raises InstallError and writes
 import collections, difflib, hashlib, json, os, pwd, re, shutil, stat, tempfile, unicodedata
 from engine.primitives.script_denylist import unit_tree
 
-TOOLS =("claude", "codex", "opencode", "hermes")
+TOOLS = ("claude", "codex", "opencode", "hermes")
 KINDS = ("agent", "skill")
 USER_AGENT_PATH = ".claude/agents/{name}.md"
 FLOOR_ROOTS = (".claude", ".codex", ".config/opencode", ".hermes", ".agents", "Library/Keychains")
