@@ -1,6 +1,6 @@
 ---
 name: unit-requirements
-description: Drafts requirements.md for a new skill or agent unit from a person's request, with the headings that the unit kind needs. Use when a person asks to build a skill or an agent and its requirements file is not written yet.
+description: Drafts requirements.md for a new skill or agent unit from a person's request, meeting notes, or a thread, with the headings that the unit kind needs. Use when a person asks for the requirements file of a skill or agent unit, or asks to build such a unit before its requirements.md exists. It does not cover AGENT.md, SKILL.md, scenarios, eval files, or questions about how an approval gate works, because those come after requirements.md is approved.
 metadata:
   version: "1.0.0"
 ---
