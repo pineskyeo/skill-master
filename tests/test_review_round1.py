@@ -10,6 +10,7 @@ import test_eva as E
 import test_skill_eval as T
 import test_multi_tool_parity as P
 import test_english_rule as ER
+from test_rule_runner import old_labeled
 
 KO = "\ud55c\uad6d\uc5b4 \ud14d\uc2a4\ud2b8"
 CHEROKEE = "\u13a0\u13a1\u13a2"
@@ -190,7 +191,11 @@ class TestRegisteredGoldenSkillKeepsItsMeaning(unittest.TestCase):
     def test_every_recorded_hash_still_matches_and_reads_unsigned(self):
         self.assertEqual(sorted(self.approvals), ["eval_set", "iteration-4", "registration", "requirements"])
         for gate, rec in self.approvals.items():
-            self.assertEqual(se.gate_hash(gate, self.spec, self.ws), rec["sha256"], gate)
+            if gate == "eval_set":
+                self.assertEqual(old_labeled(se.unit_eval_files(self.spec)), rec["sha256"])
+                self.assertEqual(se.gate_hash(gate, self.spec, self.ws), T.GOLDEN_EVAL_SET_SHA256)
+            else:
+                self.assertEqual(se.gate_hash(gate, self.spec, self.ws), rec["sha256"], gate)
             self.assertEqual(se.approval_verdict(gate, self.spec, self.ws).status, "unsigned", gate)
             self.assertFalse(se.approval_ok(gate, self.spec, self.ws), gate)
 

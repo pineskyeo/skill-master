@@ -22,6 +22,7 @@ Usage: python3 skill_eval.py <validate|estimate|plan|run|grade|calibrate|report|
 """
 import argparse, contextlib, csv, datetime, errno, hashlib, io, itertools, json, math, mmap, os, platform, random, re, shlex, shutil, subprocess, sys, tempfile, time
 from engine import approvals, registry, spend, writable
+from engine.rule_runner import hash_frame
 
 POLICY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "policy")
 RULESET_ROOT = os.path.dirname(os.path.abspath(__file__))  # rules/, schemas/, targets/, policy/ of ruleset_sha256()
@@ -280,18 +281,16 @@ def sha256_files(*paths):
     return h.hexdigest()
 
 def sha256_labeled(pairs, marked=()):
-    """pairs: [(label, path)]; the label (path relative to the skill) is hashed with the content. marked: [(label,
-    marker bytes)], hashed after the pairs with the marker in place of content."""
+    """pairs: [(label, path)]; the label is hashed with the content, as a <file> entry, or as a <missing> entry for an
+    absent path. marked: [(label, marker bytes)], hashed after the pairs as entries of that kind with no content."""
     h = hashlib.sha256()
     for label, p in pairs:
-        h.update(label.encode() + b"\0")
         if os.path.isfile(p):
-            with open(p, "rb") as f: h.update(f.read())
+            with open(p, "rb") as f: h.update(hash_frame(b"<file>", label, f.read()))
         else:
-            h.update(b"<missing>")
-        h.update(b"\0")
+            h.update(hash_frame(b"<missing>", label))
     for label, marker in marked:
-        h.update(label.encode() + b"\0" + marker + b"\0")
+        h.update(hash_frame(marker, label))
     return h.hexdigest()
 
 def ruleset_sha256():
@@ -5279,15 +5278,13 @@ def agent_bound_files(pairs):
     the plan hash covered."""
     h, each = hashlib.sha256(), {}
     for label, p in pairs:
-        h.update(label.encode() + b"\0")
         if os.path.isfile(p):
             with open(p, "rb") as f: data = f.read()
-            h.update(data)
+            h.update(hash_frame(b"<file>", label, data))
             each[label] = hashlib.sha256(data).hexdigest()
         else:
-            h.update(b"<missing>")
+            h.update(hash_frame(b"<missing>", label))
             each[label] = None
-        h.update(b"\0")
     return h.hexdigest(), each
 
 def agent_drift_problems(agent, signed, old=None, names=()):
@@ -5462,8 +5459,9 @@ def target_wrapper_rel(tool, name):
 
 def install_items(spec, tools, places, user_dest=None):
     """[(tool, source path, destination, UNVERIFIED source or None)]: an agent's generated wrappers, refused when one
-    is missing or out of date (install never generates), or every regular file of a skill folder. places: the
-    policy destinations of the unit kind; user_dest: the absolute user-scope destination."""
+    is missing or out of date (install never generates), or the files of a skill folder that skill_tree_hash binds
+    (install.skill_files). places: the policy destinations of the unit kind; user_dest: the absolute user-scope
+    destination."""
     from engine import agent_eval, install
     d, name, out = spec["skill_dir"], spec["skill_name"], []
     if unit_kind(spec) == "agent":
@@ -6138,7 +6136,7 @@ def combined_snapshot(spec, ws):
     review, h = [("requirements.md", review_text(req))], hashlib.sha256()
     for label, p in unit_eval_files(spec):
         data = read_bytes(p) if os.path.isfile(p) else None
-        h.update(label.encode() + b"\0" + (b"<missing>" if data is None else data) + b"\0")
+        h.update(hash_frame(b"<missing>", label) if data is None else hash_frame(b"<file>", label, data))
         review.append((label, review_text(data)))
     req_hash = None if req is None else hashlib.sha256(b"requirements.md\0" + req).hexdigest()
     return combined_hash(req_hash, h.hexdigest()), review
@@ -6366,9 +6364,9 @@ def build_parser():
                            "change only AGENT.md")
             x.add_argument("--builder-model", default=DEFAULT_BUILDER_MODEL)
             x.add_argument("--max-iterations", type=int, default=MAX_AUTO_ITERATIONS)
-    s = sp.add_parser("install", help="install an agent's generated wrappers or a skill folder per tool (policy/install"
-                      ".json; references/install.md): project scope under --target, or the Claude agent at user scope "
-                      "after a recorded approval of the manifest")
+    s = sp.add_parser("install", help="install an agent's generated wrappers or the files a skill's tree hash binds, "
+                      "per tool (policy/install.json; references/install.md): project scope under --target, or the "
+                      "Claude agent at user scope after a recorded approval of the manifest")
     s.add_argument("unit")
     s.add_argument("--tools", default=",".join(install.TOOLS))
     s.add_argument("--scope", choices=("project", "user"), default="project")

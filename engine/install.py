@@ -4,8 +4,9 @@ only; no import of eva or skill_eval (skill_eval passes in the sources, the home
 
 A plan is built with every check first; a refusal raises InstallError and writes nothing (no folder, no backup)."""
 import collections, difflib, hashlib, json, os, pwd, re, shutil, stat, tempfile, unicodedata
+from engine.primitives.script_denylist import unit_tree
 
-TOOLS = ("claude", "codex", "opencode", "hermes")
+TOOLS =("claude", "codex", "opencode", "hermes")
 KINDS = ("agent", "skill")
 USER_AGENT_PATH = ".claude/agents/{name}.md"
 FLOOR_ROOTS = (".claude", ".codex", ".config/opencode", ".hermes", ".agents", "Library/Keychains")
@@ -169,9 +170,10 @@ def target_problems(target_real, home_list, policy):
 
 
 def skill_files(skill_dir):
-    """[(relative POSIX path, absolute path)] of every regular file of the skill folder, sorted; InstallError when the
-    folder holds a symbolic link or a special file."""
+    """[(relative POSIX path, absolute path)] of the skill folder's unit_tree files, the ones skill_tree_hash binds,
+    sorted; InstallError when the folder holds a symbolic link or a special file anywhere, ignored paths included."""
     root, out, bad = os.path.realpath(skill_dir), [], []
+    listed = set(unit_tree(root).files)
     for dp, dn, fn in os.walk(root):
         for n in sorted(dn + fn):
             p = os.path.join(dp, n)
@@ -179,7 +181,7 @@ def skill_files(skill_dir):
             mode = os.lstat(p).st_mode
             if stat.S_ISLNK(mode): bad.append("%s is a symbolic link" % rel)
             elif n in fn and not stat.S_ISREG(mode): bad.append("%s is not a regular file" % rel)
-            elif n in fn: out.append((rel, p))
+            elif n in fn and rel in listed: out.append((rel, p))
     if bad: raise InstallError(["skill folder %s: %s; a skill installs regular files only" % (skill_dir, x) for x in bad])
     return sorted(out)
 

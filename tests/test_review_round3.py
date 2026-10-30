@@ -148,9 +148,16 @@ class TestRegistrationDecision(unittest.TestCase):
     def waive_all(self):
         T.waive_coverage(self.spec, self.ws, se.approvals.COVERAGE_TOOLS)
 
+    def record_tested_hashes(self, **metadata):
+        bp = os.path.join(self.it, "benchmark.json")
+        bench = se.rjson(bp)
+        se.wjson(bp, dict(bench, metadata=dict(bench["metadata"], skill_sha256=T.GOLDEN_SKILL_SHA256,
+                                               eval_set_sha256=T.GOLDEN_EVAL_SET_SHA256, **metadata)))
+
     def test_the_unsigned_golden_registration_approval_refuses(self):
         with self.assertRaises(se.EvalError) as cm: self.decide()
         self.assertIn("cannot be registered: " + "; ".join(T.CLAUDE_ONLY_MISSING) + ".", str(cm.exception))
+        self.record_tested_hashes()
         self.waive_all()
         with self.assertRaises(se.EvalError) as cm: self.decide()
         self.assertIn("registration needs `approve --gate registration` (unsigned", str(cm.exception))
@@ -162,6 +169,7 @@ class TestRegistrationDecision(unittest.TestCase):
         return out
 
     def test_the_golden_iteration_without_a_recorded_ruleset_refuses_and_writes_nothing(self):
+        self.record_tested_hashes()
         self.waive_all()
         se.approve("registration", self.spec, self.ws)  # golden's own record is unsigned (H1)
         before = self.snapshot()
@@ -175,9 +183,7 @@ class TestRegistrationDecision(unittest.TestCase):
         self.assertEqual(se.gate_hash("registration", self.spec, self.ws), reg["benchmark_sha256"])
         self.assertEqual(reg["approval"]["sha256"], reg["benchmark_sha256"])
         bp = os.path.join(self.it, "benchmark.json")
-        golden_bench = se.rjson(bp)
-        bench = dict(golden_bench, metadata=dict(golden_bench["metadata"], ruleset_sha256=se.ruleset_sha256()))
-        se.wjson(bp, bench)  # golden iteration 4 predates ruleset_sha256 (A5 D5)
+        self.record_tested_hashes(ruleset_sha256=se.ruleset_sha256())  # golden iteration 4 predates ruleset_sha256 (A5 D5)
         self.waive_all()
         signed = se.approve("registration", self.spec, self.ws)  # golden's own record is unsigned (H1)
         before = self.snapshot()
@@ -187,7 +193,8 @@ class TestRegistrationDecision(unittest.TestCase):
         drop = ("registered_at", "skill_path", "approval", "benchmark_sha256", "registration_format", "kind", "version",
                 "approvals")
         self.assertEqual({k: v for k, v in rec.items() if k not in drop},
-                         dict({k: v for k, v in reg.items() if k not in drop}, ruleset_sha256=se.ruleset_sha256()))
+                         dict({k: v for k, v in reg.items() if k not in drop}, ruleset_sha256=se.ruleset_sha256(),
+                              skill_sha256=T.GOLDEN_SKILL_SHA256, eval_set_sha256=T.GOLDEN_EVAL_SET_SHA256))
         self.assertEqual(rec["benchmark_sha256"], se.sha256_files(bp))
         self.assertNotEqual(rec["benchmark_sha256"], reg["benchmark_sha256"])
         self.assertTrue(se.rjson(os.path.join(self.it, "gate.json"))["needs_approval"])
