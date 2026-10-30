@@ -1,6 +1,6 @@
 ---
 name: agent-scenarios
-description: Drafts single-turn scenario files with typed criteria for one agent from its AGENT.md. Use when an agent unit needs scenarios/*.json for its eval set, or more scenarios beside the ones it has.
+description: Drafts single-turn scenario files with typed criteria for one agent from its AGENT.md. Use when an agent unit needs scenarios/*.json for its eval set, or more scenarios beside the ones it has. Only scenario files and their fixtures are in scope, not AGENT.md, requirements.md, tool wrappers, a skill's evals.json, or questions about how the engine grades a criterion.
 metadata:
   version: "1.0.0"
 ---

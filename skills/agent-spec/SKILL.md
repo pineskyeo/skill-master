@@ -1,6 +1,6 @@
 ---
 name: agent-spec
-description: Drafts the AGENT.md v2 file of one agent from its requirements.md, with typed success criteria and the Tools and Memory sections that the static check reads. Use when an agent unit has a requirements file and its AGENT.md is not written yet or must be redrafted.
+description: Drafts the AGENT.md v2 file of one agent from its requirements.md, with typed success criteria and the Tools and Memory sections that the static check reads. Use when an agent unit has a requirements file and its AGENT.md is not written yet or must be redrafted. Not for requirements files, scenario JSON files, SKILL.md files, rendered tool wrappers, target maps, agent installs, or schema tests.
 metadata:
   version: "1.0.0"
 ---
@@ -57,6 +57,7 @@ Follow these rules for the objects:
 - Write each object on one line, wrapped in single quotes: `- '{"type": "no_writes"}'`.
 - Use ASCII text only. Inside the single quotes, write an apostrophe as two apostrophes.
 - In a `regex`, write every backslash as two backslashes, because the text is JSON. Write `\\.` for a literal dot and `\\s` for a space. A single backslash makes the object invalid, or silently changes `\b` into another character. Match the command, as in `git push`, not a whole command line.
+- When the requirements forbid several commands, write one `command_absent` object whose regex matches all of them, such as `git\\s+(push|tag)`. Likewise, write one `command_ran` object per required command.
 - Use `command_ran` and `command_absent` only with the `shell` capability, and `file_exists` only with `write`.
 - Write an `llm` text as a yes or no question about the final answer or the work, such as "Does every finding name the file it is about?"
 
@@ -67,7 +68,7 @@ After the frontmatter, write these parts in English:
 1. A title line, `# <Agent title>`.
 2. A short role paragraph from Goal and Users.
 3. `## Steps`, a numbered list of what the agent does from request to final answer.
-4. `## Tools`, one bullet per capability that says when the agent uses it. The static check needs a heading with the word "Tools".
+4. `## Tools`, one bullet per capability that says when the agent uses it. The `shell` bullet names every command the agent runs, such as `git log`, and the commands it must never run. The static check needs a heading with the word "Tools".
 5. `## Rules`, the non-goals as plain orders, such as "Never run git push."
 6. `## Memory & Handoff`, what the agent keeps between turns and what it hands over at the end. The static check needs a heading with the word "Memory", "Handoff", or "Context".
 
