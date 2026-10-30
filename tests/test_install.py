@@ -22,6 +22,11 @@ WRAPPERS = ("wrappers/claude/%s.md" % NAME, "wrappers/codex/%s.toml" % NAME, "wr
             "wrappers/hermes/SOUL.md")
 HERMES_NOTE = "hermes: config.yaml UNVERIFIED, not written (gates.md G4)"
 STAMP_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z(-[0-9]+)?$")
+BOUND_FILES = {"references/guide.md": "A guide.\n", "scripts/helper.py": "print('ok')\n"}
+IGNORED_FILES = {"evals/files/data.csv": "a,b\n", "FEEDBACK.md": "# Feedback\n", "FEEDBACK.json": "{}\n",
+                 "__pycache__/x.pyc": "pyc\n", ".git/config": "[core]\n", "x-workspace/run.txt": "run\n",
+                 "references/x-workspace/run.txt": "run\n", "references/evals/case.json": "{}\n",
+                 "references/FEEDBACK.md": "# Feedback\n", "scripts/__pycache__/helper.pyc": "pyc\n"}
 _patches = []
 
 
@@ -249,11 +254,12 @@ class TestProjectInstall(Base):
         self.assertEqual(rc, 2, out + err)
         self.assertIn("--target", err)
 
-    def test_a_skill_installs_every_regular_file_and_refuses_a_link(self):
+    def test_a_skill_installs_its_fingerprint_list_and_refuses_a_link(self):
         d = T.make_skill(os.path.join(self.tmp, "skills"))
         rc, out, err = self.install("--tools", "claude,codex", unit=d)
         self.assertEqual(rc, 0, out + err)
-        files = sorted(rel for rel, v in tree(d).items() if isinstance(v[0], bytes))
+        files = eva.unit_tree(d).files
+        self.assertEqual(files, ["SKILL.md"])
         for base in (".claude/skills/branch-setup/", ".agents/skills/branch-setup/"):
             for rel in files:
                 self.assertEqual(read(os.path.join(self.target, *(base + rel).split("/")), "rb"),
@@ -269,6 +275,55 @@ class TestProjectInstall(Base):
         self.assertEqual(rc, 2, out + err)
         self.assertIn("outside", err)
         self.assertEqual(tree(self.target), before)
+
+    def skill_with_ignored_files(self):
+        return T.make_skill(os.path.join(self.tmp, "skills"), extra_files=dict(BOUND_FILES, **IGNORED_FILES))
+
+    def test_a_skill_installs_exactly_the_files_of_its_tree(self):
+        d = self.skill_with_ignored_files()
+        want = {rel: read(os.path.join(d, *rel.split("/")), "rb") for rel in eva.unit_tree(d).files}
+        self.assertEqual(sorted(want), ["SKILL.md"] + sorted(BOUND_FILES))
+        rc, out, err = self.install("--tools", "claude,codex", unit=d)
+        self.assertEqual(rc, 0, out + err)
+        for base in (".claude/skills/branch-setup", ".agents/skills/branch-setup"):
+            got = tree(os.path.join(self.target, *base.split("/")))
+            self.assertEqual({rel: v[0] for rel, v in got.items()}, want, base)
+
+    def test_the_skill_file_list_is_the_tree_file_list(self):
+        d = self.skill_with_ignored_files()
+        real = os.path.realpath(d)
+        self.assertEqual(install_module().skill_files(d),
+                         [(rel, os.path.join(real, *rel.split("/"))) for rel in sorted(eva.unit_tree(d).files)])
+
+    def test_an_ignored_file_moves_neither_the_install_plan_nor_the_tree_hash(self):
+        d = self.skill_with_ignored_files()
+        rc, out, err = self.install("--tools", "claude", unit=d)
+        self.assertEqual(rc, 0, out + err)
+        plan, digest = self.install("--tools", "claude", "--dry-run", unit=d), se.skill_tree_hash(d)
+        self.assertEqual(plan[0], 0, plan[1] + plan[2])
+        for rel in IGNORED_FILES:
+            write(os.path.join(d, *rel.split("/")), "other content\n")
+        self.assertEqual(self.install("--tools", "claude", "--dry-run", unit=d), plan)
+        self.assertEqual(se.skill_tree_hash(d), digest)
+        write(os.path.join(d, "references", "guide.md"), "other content\n")
+        self.assertNotEqual(se.skill_tree_hash(d), digest)
+        rc, out, err = self.install("--tools", "claude", "--dry-run", unit=d)
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("references/guide.md", err)
+
+    def test_a_link_or_special_file_under_an_ignored_path_still_refuses(self):
+        d = self.skill_with_ignored_files()
+        for rel, make, word in (("evals/outside", lambda p: os.symlink(self.home, p), "symbolic link"),
+                                ("__pycache__/pipe", os.mkfifo, "not a regular file")):
+            with self.subTest(rel):
+                p = os.path.join(d, *rel.split("/"))
+                make(p)
+                rc, out, err = self.install("--tools", "claude", "--force", unit=d)
+                self.assertEqual(rc, 2, out + err)
+                self.assertIn(rel, err)
+                self.assertIn(word, err)
+                self.assertEqual(os.listdir(self.target), [])
+                os.remove(p)
 
 
 class TestDestinationSafety(Base):

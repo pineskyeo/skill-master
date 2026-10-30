@@ -45,7 +45,7 @@ This page lists every subcommand of `eva.py` and `skill_eval.py`. The flags come
 | `agent grade AGENT` | Grade the run transcripts of an iteration | `--workspace`, `--iteration`, the agent grader flags, `--live` |
 | `agent report AGENT` | Write the benchmark, the gate and `comparison.md` of an iteration | `--workspace`, `--iteration` |
 | `agent loop AGENT` | Improve an agent with a builder that may change only AGENT.md | the agent run flags, the agent grader flags, `--builder-prompt`, `--builder-model`, `--max-iterations`, `--live` |
-| `install UNIT` | Install an agent's wrappers or a skill folder per tool | `--tools`, `--scope {project,user}`, `--target`, `--dry-run`, `--force`, `--workspace` |
+| `install UNIT` | Install an agent's wrappers or the files a skill's tree hash binds, per tool | `--tools`, `--scope {project,user}`, `--target`, `--dry-run`, `--force`, `--workspace` |
 | `version bump UNIT {major,minor,patch}` | Raise the SemVer version after a `CHANGELOG.md` entry | `--dry-run` |
 | `deprecate UNIT` | Mark a version deprecated | `--version` (required), `--reason` (required), `--workspace` |
 | `drift [ROOT]` | List tool version drift, units recorded under an older ruleset and old rule dates | `--observed TOOL=VERSION`, `--today YYYY-MM-DD` |

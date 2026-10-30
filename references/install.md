@@ -16,7 +16,9 @@ What it copies:
 
 - An agent: the four generated wrappers at `targets/<tool>.json` `wrapper.path` in the agent folder. A missing or
   out-of-date wrapper refuses and names `python3 eva.py generate <agent>`. Install never generates.
-- A skill: every regular file of the skill folder. A symbolic link or a special file in the folder refuses.
+- A skill: the files `skill_tree_hash` binds, the `eva.unit_tree` list. It skips `evals/`, `__pycache__`, `*-workspace`,
+  `.git`, `FEEDBACK.md` and `FEEDBACK.json` at any depth. It refuses a symbolic link or a special file anywhere in the
+  folder, those paths included.
 
 Where it writes, under the real path of `--target`:
 

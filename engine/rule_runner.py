@@ -30,19 +30,23 @@ MAIN_FILE = {"skill": "SKILL.md", "agent": "AGENT.md"}
 TEMPLATE_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_-]*)\}")
 
 
+def hash_frame(kind, label, content=b""):
+    """One entry of a labeled hash: the kind, the byte lengths of label and content, then both."""
+    label = label.encode()
+    return kind + b"%d:%d:" % (len(label), len(content)) + label + content
+
+
 def sha256_labeled(pairs, marked=()):
-    """pairs: [(label, path)]; the label (path relative to the skill) is hashed with the content. marked: [(label,
-    marker bytes)], hashed after the pairs with the marker in place of content."""
+    """pairs: [(label, path)]; the label is hashed with the content, as a <file> entry, or as a <missing> entry for an
+    absent path. marked: [(label, marker bytes)], hashed after the pairs as entries of that kind with no content."""
     h = hashlib.sha256()
     for label, p in pairs:
-        h.update(label.encode() + b"\0")
         if os.path.isfile(p):
-            with open(p, "rb") as f: h.update(f.read())
+            with open(p, "rb") as f: h.update(hash_frame(b"<file>", label, f.read()))
         else:
-            h.update(b"<missing>")
-        h.update(b"\0")
+            h.update(hash_frame(b"<missing>", label))
     for label, marker in marked:
-        h.update(label.encode() + b"\0" + marker + b"\0")
+        h.update(hash_frame(marker, label))
     return h.hexdigest()
 
 

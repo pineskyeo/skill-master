@@ -103,6 +103,8 @@ NOT_SELECTED, NOT_AVAILABLE = "not-run: engine not selected", "not-run: engine n
 NO_COVERAGE_ENTRY = "unknown (no valid tool_coverage entry)"
 CLAUDE_ONLY_MISSING = [coverage_missing("opencode", NOT_AVAILABLE), coverage_missing("hermes", NOT_AVAILABLE)]
 NO_COVERAGE_MISSING = [coverage_missing(t, NO_COVERAGE_ENTRY) for t in eva.TOOLS]
+GOLDEN_SKILL_SHA256 = "83cfab923ed37b4272ab82c75bcb18f18d0f574210f1e72653247ac79a44c4e3"
+GOLDEN_EVAL_SET_SHA256 = "717798e203f74aa21c344347d54c4761dfffb603812ae2bf6e10939d6dfad31f"
 
 def waive_coverage(spec, ws, tools=tuple(t for t in eva.TOOLS if t != "claude")):
     for t in tools: se.approve("coverage_waiver:" + t, spec, ws)

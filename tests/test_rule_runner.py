@@ -1,7 +1,7 @@
 """engine/rule_runner.py and its eva.py wiring: bundle loading, the closed op and selector tables, the severity mapping,
 the bundle-non-default cap, ruleset_sha256, the moved readers, and the CLI (plan.md:556-561, :566; D9 to D16 of the A1
 how pass). Every unit and bundle lives in a temp folder; nothing runs a model or a tool binary."""
-import contextlib, inspect, io, json, os, re, shutil, subprocess, sys, tempfile, unittest
+import contextlib, hashlib, inspect, io, itertools, json, os, re, shutil, subprocess, sys, tempfile, unittest
 from unittest import mock
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -795,6 +795,134 @@ class TestRulesetHash(Base):
         with self.assertRaises(RR.BundleError) as cm:
             RR.load_bundle(SELFTEST, root=troot)
         self.assertIn("targets/t.json", str(cm.exception))
+
+
+def old_labeled(pairs, marked=()):
+    h = hashlib.sha256()
+    for label, p in pairs:
+        h.update(label.encode() + b"\0")
+        if os.path.isfile(p):
+            with open(p, "rb") as f:
+                h.update(f.read())
+        else:
+            h.update(b"<missing>")
+        h.update(b"\0")
+    for label, marker in marked:
+        h.update(label.encode() + b"\0" + marker + b"\0")
+    return h.hexdigest()
+
+
+def old_tree_hash(d):
+    tree = eva.unit_tree(d)
+    return old_labeled([(rel, os.path.join(d, *rel.split("/"))) for rel in tree.files],
+                       [(rel, b"<outside>") for rel in tree.outside] + [(rel, b"<cycle>") for rel in tree.cycles])
+
+
+class TestHashFraming(Base):
+    COLLIDED = (("label with NUL", [("a\0x\0b", b"y")], (), [("a", b"x"), ("b", b"y")], ()),
+                ("content with NUL", [("a", b"x\0b\0y")], (), [("a", b"x"), ("b", b"y")], ()),
+                ("label moved across the boundary", [("a\0b", b"c")], (), [("a", b"b\0c")], ()),
+                ("file holding <missing>", [("a", b"<missing>")], (), [("a", None)], ()),
+                ("file holding <outside>", [("a", b"<outside>")], (), [], [("a", b"<outside>")]),
+                ("file holding <cycle>", [("a", b"<cycle>")], (), [], [("a", b"<cycle>")]))
+
+    def pairs(self, entries):
+        folder = tempfile.mkdtemp(dir=self.tmp)
+        out = []
+        for i, (label, content) in enumerate(entries):
+            p = os.path.join(folder, str(i))
+            if content is not None:
+                with open(p, "wb") as f:
+                    f.write(content)
+            out.append((label, p))
+        return out
+
+    def digest(self, entries, marked=()):
+        return RR.sha256_labeled(self.pairs(entries), marked)
+
+    def test_every_pair_that_collided_under_the_old_framing_now_differs(self):
+        for name, left, left_marked, right, right_marked in self.COLLIDED:
+            with self.subTest(name):
+                a, b = self.pairs(left), self.pairs(right)
+                self.assertEqual(old_labeled(a, left_marked), old_labeled(b, right_marked))
+                self.assertNotEqual(RR.sha256_labeled(a, left_marked), RR.sha256_labeled(b, right_marked))
+
+    def test_the_digest_is_the_entries_spelled_by_hand(self):
+        hangul = chr(0xac00)
+        for entries, marked, framed in (
+                ([("a", b"x"), ("b", None)], (), b"<file>1:1:ax<missing>1:0:b"),
+                ([("a", b"")], (), b"<file>1:0:a"),
+                ([("b", None)], [("c", b"<outside>"), ("d", b"<cycle>")], b"<missing>1:0:b<outside>1:0:c<cycle>1:0:d"),
+                ([(hangul, b"xy")], (), b"<file>3:2:\xea\xb0\x80xy"),
+                ([(hangul, None)], (), b"<missing>3:0:\xea\xb0\x80"),
+                ([], [(hangul, b"<outside>")], b"<outside>3:0:\xea\xb0\x80"),
+                ([], [(hangul, b"<cycle>")], b"<cycle>3:0:\xea\xb0\x80")):
+            with self.subTest(framed):
+                self.assertEqual(self.digest(entries, marked), hashlib.sha256(framed).hexdigest())
+
+    def test_order_and_the_label_content_split_change_the_digest(self):
+        self.assertNotEqual(self.digest([("a", b"x"), ("b", b"y")]), self.digest([("b", b"y"), ("a", b"x")]))
+        self.assertNotEqual(self.digest([("ab", b"c")]), self.digest([("a", b"bc")]))
+
+    def test_the_empty_list_hashes_nothing_and_differs_from_one_empty_entry(self):
+        empty = self.digest([])
+        self.assertEqual(empty, hashlib.sha256().hexdigest())
+        self.assertNotEqual(empty, self.digest([("", b"")]))
+        self.assertNotEqual(empty, self.digest([("", None)]))
+
+    def test_the_four_kinds_with_one_label_all_differ(self):
+        digests = {self.digest([("a", b"")]), self.digest([("a", None)]), self.digest([], [("a", b"<outside>")]),
+                   self.digest([], [("a", b"<cycle>")])}
+        self.assertEqual(len(digests), 4)
+
+    def test_no_two_short_lists_of_tricky_entries_share_a_digest(self):
+        entries = [(label, content) for label in ("", "a", "a\0", "\0a")
+                   for content in (None, b"", b"a", b"\0", b"<missing>", b"<file>1:1:ab", b"1:0:a")]
+        pool = self.pairs(entries)
+        lists = [list(c) for n in range(3) for c in itertools.product(pool, repeat=n)]
+        self.assertEqual(len({RR.sha256_labeled(x) for x in lists}), len(lists))
+
+    def test_the_two_functions_and_agent_bound_files_agree_on_every_row(self):
+        rows = [[], [("a", b"")], [("a", None)], [("a", b"x"), ("b", None)], [(chr(0xac00), b"x\0y")]]
+        for _, left, _, right, _ in self.COLLIDED:
+            rows += [left, right]
+        for entries in rows:
+            with self.subTest(entries):
+                pairs = self.pairs(entries)
+                want = RR.sha256_labeled(pairs)
+                self.assertEqual(skill_eval.sha256_labeled(pairs), want)
+                digest, each = skill_eval.agent_bound_files(pairs)
+                self.assertEqual(digest, want)
+                self.assertEqual(each, {label: None if data is None else hashlib.sha256(data).hexdigest()
+                                        for label, data in entries})
+        for marked in ([("a", b"<outside>")], [("a", b"<cycle>"), ("b", b"<outside>")]):
+            pairs = self.pairs([("c", b"x"), ("d", None)])
+            self.assertEqual(RR.sha256_labeled(pairs, marked), skill_eval.sha256_labeled(pairs, marked))
+
+    def test_the_batch_snapshot_hash_equals_the_combined_gate_hash(self):
+        cases = [{"files": ["evals/files/nul.bin", "evals/files/gone.csv"]}]
+        d = self.unit({"evals/evals.json": json.dumps({"evals": cases}), "evals/files/nul.bin": "a\0b"})
+        ws = os.path.join(self.tmp, "ws")
+        write(os.path.join(ws, "requirements.md"), "# Requirements\n")
+        spec = {"skill_dir": d, "skill_name": "demo"}
+        want = skill_eval.gate_hash(skill_eval.COMBINED_GATE, spec, ws)
+        self.assertRegex(want, "^[0-9a-f]{64}$")
+        self.assertEqual(skill_eval.combined_snapshot(spec, ws)[0], want)
+
+    def test_a_marked_link_and_a_file_holding_the_marker_differ_in_the_tree_hash(self):
+        outside = os.path.join(self.tmp, "outside")
+        os.makedirs(outside)
+        for name, marker, target in (("out", b"<outside>", outside), ("loop", b"<cycle>", ".")):
+            with self.subTest(name):
+                linked = self.unit(folder="linked-" + name)
+                os.symlink(target, os.path.join(linked, name))
+                plain = self.unit(folder="plain-" + name)
+                with open(os.path.join(plain, name), "wb") as f:
+                    f.write(marker)
+                tree = eva.unit_tree(linked)
+                self.assertEqual(tree.outside + tree.cycles, [name])
+                self.assertEqual(old_tree_hash(linked), old_tree_hash(plain))
+                self.assertNotEqual(skill_eval.skill_tree_hash(linked), skill_eval.skill_tree_hash(plain))
 
 
 class TestReadersMoved(unittest.TestCase):

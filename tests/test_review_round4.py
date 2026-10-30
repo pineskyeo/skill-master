@@ -18,6 +18,7 @@ import skill_eval as se
 import test_eva as E
 import test_skill_eval as T
 import test_multi_tool_parity as P
+from test_rule_runner import old_tree_hash
 
 KO = "".join(map(chr, (0xD55C, 0xAD6D, 0xC5B4)))
 ALIAS = "".join(map(chr, (0xCC38, 0xACE0)))
@@ -234,7 +235,8 @@ class TestGoldenHashUnchanged(E.TmpMixin, unittest.TestCase):
         d = os.path.join(self.tmp, "csv-cleaner")
         shutil.copytree(os.path.join(src, "csv-cleaner"), d)
         rec = T.rjson(os.path.join(src, "csv-cleaner-workspace", "registration.json"))
-        self.assertEqual(se.skill_tree_hash(d), rec["skill_sha256"])
+        self.assertEqual(old_tree_hash(d), rec["skill_sha256"])
+        self.assertEqual(se.skill_tree_hash(d), T.GOLDEN_SKILL_SHA256)
 
 if __name__ == "__main__":
     unittest.main()

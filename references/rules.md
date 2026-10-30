@@ -154,9 +154,9 @@ The validator supports a subset of JSON Schema 2020-12 and fails closed. It refu
 
 - every file of the bundle folder, labeled `rules/...`;
 - every file of `schemas/` and `targets/` (`rule_runner.HASHED_TREES`);
-- `policy/eval-policy.json`, `policy/gates.json` and `policy/gate.rules.json` (`rule_runner.POLICY_FILES`), hashed as `<missing>` when absent.
+- `policy/eval-policy.json`, `policy/gates.json` and `policy/gate.rules.json` (`rule_runner.POLICY_FILES`), hashed as a `<missing>` entry when absent.
 
-Each label is hashed with the file's bytes. Labels are relative, so one bundle hashes the same in any folder. The hash moves when any byte of a hashed file changes, and when a file in a hashed tree is added, removed or renamed. It does not move for `eva.py`, `skill_eval.py`, `engine/`, `tests/` or the other `policy/` files, such as `policy/auth-profiles.json` and `policy/install.json`. With `--rules DIR`, the files of DIR take the place of `rules/` in the hash.
+Each label is hashed with the file's bytes. One entry is its kind, then the byte lengths of the label and the content as `<label length>:<content length>:`, then the label and the content. So `<file>1:1:ax` is file `a` holding `x`. The kinds are `<file>`, `<missing>` for an absent path, and `<outside>` and `<cycle>` for the links `skill_tree_hash` marks. The last three hold no content. Labels are relative, so one bundle hashes the same in any folder. The hash moves when any byte of a hashed file changes, and when a file in a hashed tree is added, removed or renamed. It does not move for `eva.py`, `skill_eval.py`, `engine/`, `tests/` or the other `policy/` files, such as `policy/auth-profiles.json` and `policy/install.json`. With `--rules DIR`, the files of DIR take the place of `rules/` in the hash.
 
 `skill_eval.ruleset_sha256` computes the same hash on every call. Every approval record binds it, so a change of the hash makes existing approvals read stale ([Approval gates](approval-gates.md)). The loop stops with `rules-changed` when a builder call moves it, and `drift` lists units recorded under an older hash ([Install, versions and drift](install.md)).
 
