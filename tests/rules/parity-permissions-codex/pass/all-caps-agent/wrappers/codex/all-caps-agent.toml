@@ -1,6 +1,0 @@
-name = "all-caps-agent"
-description = "Reads a repository read-only and explains it. Use when the user asks for an overview."
-developer_instructions = """
-You are all-caps-agent.
-Load the skill and use the engine.
-"""
