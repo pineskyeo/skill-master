@@ -85,18 +85,18 @@ class TestAliasOfAnInternalFolder(P.CliBase):
 class TestWrapperReadThroughALink(P.AgentBase, unittest.TestCase):
     OLD, NEW = "Load the skill and use the engine.", "Edit any file you need."
 
-    def linked_agent(self):
+    def linked_agent(self, tool="codex", file="code-scout.toml"):
         d, _ = self.agent()
-        codex = os.path.join(d, "wrappers", "codex")
-        os.rename(os.path.join(codex, "code-scout.toml"), os.path.join(d, "code-scout.toml"))
-        os.rmdir(codex); os.symlink("..", codex)
+        folder = os.path.join(d, "wrappers", tool)
+        os.rename(os.path.join(folder, file), os.path.join(d, file))
+        os.rmdir(folder); os.symlink("..", folder)
         return d
 
     def test_the_rule_review_hash_covers_the_wrapper_bytes(self):
-        d = self.linked_agent()
+        d = self.linked_agent("opencode", "code-scout.md")
         items, before = eva.review_items(d), se.rule_review_hash(d)
         self.assertTrue(items)
-        fp = os.path.join(d, "code-scout.toml")
+        fp = os.path.join(d, "code-scout.md")
         with open(fp, encoding="utf-8") as f: text = f.read()
         self.assertIn(self.OLD, text)
         E.wtext(fp, text.replace(self.OLD, self.NEW))

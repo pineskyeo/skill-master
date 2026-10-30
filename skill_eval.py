@@ -96,6 +96,7 @@ POLICY_SPECS = {
     "CODEX_EFFORTS": PolicySpec("models.json", "tuple", _each(_STRING), "a non-empty list of strings"),
     "CODEX_EFFORT_CONFIG": PolicySpec("models.json", "str", _whole(_STRING), "a string", unverified=True),
     "GRADER_ENGINES": PolicySpec("models.json", "tuple", _each(_STRING), "a non-empty list of strings"),
+    "MODEL_TIERS": PolicySpec("models.json", "tuple", _each(_STRING), "a non-empty list of strings"),
 }
 POLICY_FILES = ("eval-policy.json", "gate.rules.json", "pricing.json", "models.json")
 PRICE_ROW = {  # field of a PRICES row -> (valid, what a valid field is)
@@ -210,13 +211,14 @@ CODEX_EFFORTS = _POLICY["CODEX_EFFORTS"]
 CODEX_EFFORT_CONFIG = _POLICY["CODEX_EFFORT_CONFIG"]  # UNVERIFIED config key (policy/models.json)
 CODEX_ADMIN_SKILLS = os.path.join("/etc", "codex", "skills")  # admin-scope skills: load in every Codex call
 GRADER_ENGINES = _POLICY["GRADER_ENGINES"]
-# UNVERIFIED assumption: no Codex price is verified, so the most expensive PRICES row stands in (policy/pricing.json).
-CODEX_GRADER_ASSUMED_PRICE = max(PRICES.values(), key=lambda p: p[0] + p[1])
+MODEL_TIERS = _POLICY["MODEL_TIERS"]
 CLAUDE_CAP_HEADROOM = _POLICY["CLAUDE_CAP_HEADROOM"]
 WORST_CASE_FACTOR = _POLICY["WORST_CASE_FACTOR"]
 SOFT_LIMIT_NOTE = ("SOFT LIMIT: %s has no per-call budget cap; the worst-case bound is an estimate, so one call can "
-                   "exceed the remaining budget (--live refuses it by default; --no-strict-budget allows it, risky)")
+                   "exceed the remaining budget (--live refuses it by default; --no-strict-budget opens only the "
+                   "strict-budget gate)")
 NO_REOPEN = " (--no-strict-budget does not reopen it)"
+NO_STRICT_TIER = "A Codex model name holds no tier word, so grader-tier-distinct still refuses Codex under test."
 NO_STRICT_WARNING = ("--no-strict-budget: %s runs with a SOFT budget limit (one call can exceed --budget-usd) and its "
                      "auth.json copy is readable by the agent under test (its tokens may be saved in transcripts or "
                      "output files)")
@@ -1543,8 +1545,10 @@ class CodexEngine(Engine):
         return any(needle in json.dumps(c.get("input"), ensure_ascii=False) for c in result["tool_calls"])
 
 ENGINES = {"claude": ClaudeCodeEngine, "codex": CodexEngine}
-# Multi-tool parity (owner decision 2026-10-19 18:43): a skill is created for Claude Code, Codex CLI, OpenCode and Hermes
+# Multi-tool parity (owner decisions 2026-10-19 18:43, 2026-10-30): a skill is created for Claude Code, OpenCode and Hermes
 # Agent together. Only claude and codex have an engine; OpenCode and Hermes engines do not exist and are never faked.
+# codex stays a key: agent_cells passes it to cell_table and targets/codex.json names its engine. tool_coverage reads
+# only eva.TOOLS.
 TOOL_ENGINES = {"claude": "claude", "codex": "codex", "opencode": None, "hermes": None}
 UNAVAILABLE_ENGINES = {"opencode": "OpenCode", "hermes": "Hermes Agent"}
 NOT_AVAILABLE = "not-run: engine not available"
@@ -1825,8 +1829,9 @@ def transcript_text(t):
     return "Final message:\n%s\n\nTool calls (JSON):\n%s" % (t.get("final") or "", calls)
 
 class LLMGrader:
-    """Grades with `claude -p --json-schema` and no tools (`--tools ""`). Must use a model different from the executor.
-    With a finite budget every call gets --max-budget-usd (CLAUDE_CAP_HEADROOM of what is left)."""
+    """Grades with `claude -p --json-schema` and no tools (`--tools ""`). Its model tier must differ from every executor
+    and from the builder (grader_tier_problems). With a finite budget every call gets --max-budget-usd
+    (CLAUDE_CAP_HEADROOM of what is left)."""
     engine = "claude"
     EFFORTS = CLAUDE_EFFORTS
     def __init__(self, model=DEFAULT_GRADER_MODEL, exec_fn=None, timeout=300, budget=None, prices=None, effort=None):
@@ -1924,196 +1929,37 @@ class LLMGrader:
             raise JudgeAnswerError("pairwise judge winner %r is not A, B or TIE; the call was charged and grading "
                                    "stopped" % (str(w)[:40],), w)
         return w, str(so.get("reasoning") or "")
-    @property
-    def record_name(self):
-        """What grading.json / comparison-k.json / calibration.json record as the grader."""
-        return self.model
 
 def grader_label(engine, model, effort=None):
     return "%s(%s%s)" % (engine, model or "CLI default model", ", effort %s" % effort if effort else "")
 
-CODEX_GRADER_SANDBOX = "read-only"
-# Tools the Codex grader never needs (the transcript is inline in the prompt): each is switched off with
-# `--disable <feature>` (= -c features.<name>=false, codex-cli 0.162.1 `codex features list`), plus web search off.
-# Without a shell / exec / browser / image tool the model has no way to read auth.json from the isolated CODEX_HOME
-# (the read-only sandbox only blocks writes). Enforced after the call too: any non-message item fails closed.
-CODEX_GRADER_DISABLED_FEATURES = ("shell_tool", "unified_exec", "shell_snapshot", "view_image", "browser_use",
-                                  "browser_use_external", "in_app_browser", "computer_use", "apps", "plugins",
-                                  "multi_agent", "image_generation", "code_mode_host", "skill_search", "tool_suggest",
-                                  "hooks", "sleep_tool")
-CODEX_GRADER_ALLOWED_ITEMS = ("agent_message", "reasoning", "error")  # "error": CLI notice (e.g. code mode off), not a tool
-_CODEX_GRADER_NOTE_OLD = ("the Codex grader runs `codex exec --sandbox read-only` in a fresh temp folder with an isolated "
-                     "CODEX_HOME holding a read-only copy of auth.json; that copy is READABLE by the grader agent (the "
-                     "read-only sandbox permits reads), and the grader prompt contains the untrusted transcript of the "
-                     "run under test, so a prompt injection could make it quote the token into grading.json / "
-                     "comparison-k.json evidence")
+def model_tier(model):
+    """The tier word of a model name, or None when it holds no tier word or two different ones."""
+    words = set(re.split("[^a-z0-9]+", model.lower())) if isinstance(model, str) else set()
+    tiers = words.intersection(MODEL_TIERS)
+    return tiers.pop() if len(tiers) == 1 else None
 
-CODEX_GRADER_NOTE = ("the Codex grader runs `codex exec --sandbox read-only` with its tools switched off (no shell, "
-                     "exec, browser, image or web tool: CODEX_GRADER_DISABLED_FEATURES) in a fresh temp folder with an "
-                     "isolated CODEX_HOME holding a read-only copy of auth.json that the codex process needs to log in; "
-                     "a call whose events show any tool use, or whose answer contains any auth.json value, is refused")
-
-def codex_grader_command_problems(cmd):
-    """The Codex grader launch shape: codex exec --json with exactly one --sandbox read-only, no flag that widens it."""
-    out = []
-    if cmd[:3] != ["codex", "exec", "--json"]: out.append("not a `codex exec --json` call")
-    modes = [cmd[i + 1] for i, x in enumerate(cmd[:-1]) if x in ("--sandbox", "-s")]
-    if modes != [CODEX_GRADER_SANDBOX]: out.append("sandbox must be exactly one `--sandbox read-only`, got %s" % modes)
-    wide = [x for x in cmd if x in ("--full-auto", "--dangerously-bypass-approvals-and-sandbox", "--yolo", "--add-dir")
-            or x.startswith(("--sandbox=", "--add-dir="))]
-    if wide: out.append("flags that change the sandbox: %s" % wide)
-    off = {cmd[i + 1] for i, x in enumerate(cmd[:-1]) if x == "--disable"}
-    miss = [f for f in CODEX_GRADER_DISABLED_FEATURES if f not in off]
-    if miss: out.append("grader tools not disabled: %s" % miss)
-    if "--enable" in cmd or any(x.startswith("--enable=") for x in cmd): out.append("--enable is not allowed for the grader")
-    if 'web_search="disabled"' not in [cmd[i + 1] for i, x in enumerate(cmd[:-1]) if x == "-c"]:
-        out.append('web search must be off (-c web_search="disabled")')
+def grader_tier_problems(grader_model, under_test, builder_model=None):
+    """[] when the grader tier differs from each model-under-test tier and the builder tier, else one line per problem.
+    under_test: [(label, model)]. A model that is None or has no tier is a problem (fail closed)."""
+    tiers = "|".join(MODEL_TIERS)
+    grader, out = model_tier(grader_model), []
+    if grader is None:
+        out.append("grader model %s has no single tier word (%s); pick another --grader-model" % (grader_model, tiers))
+    rows = [("%s model under test" % label, m) for label, m in under_test]
+    if builder_model is not None: rows.append(("builder model", builder_model))
+    for who, m in rows:
+        tier = model_tier(m)
+        if tier is None:
+            out.append("%s %s has no single tier word (%s); this gate cannot show that the grader differs"
+                       % (who, m or "(CLI default)", tiers))
+        elif tier == grader:
+            out.append("grader %s has the same tier (%s) as %s %s; pick another --grader-model"
+                       % (grader_model, tier, who, m))
     return out
-
-def auth_secret_strings(data):
-    """Every string of 16+ chars in a Codex auth.json (and each JWT segment of 24+), in memory only, never printed."""
-    try: o = json.loads(data.decode("utf-8"))
-    except Exception: return set()
-    out, stack = set(), [o]
-    while stack:
-        x = stack.pop()
-        if isinstance(x, dict): stack.extend(x.values())
-        elif isinstance(x, list): stack.extend(x)
-        elif isinstance(x, str) and len(x) >= 16:
-            out.add(x); out.update(p for p in x.split(".") if len(p) >= 24)
-    return out
-
-def extract_json_object(text):
-    """The JSON object a Codex grader was told to reply with: the whole message, or one ```json fenced block."""
-    t = (text or "").strip()
-    m = re.match(r"^```(?:json)?\s*(.*?)\s*```$", t, re.S)
-    if m: t = m.group(1)
-    data = json.loads(t)
-    if not isinstance(data, dict): raise ValueError("not a JSON object")
-    return data
-
-class CodexGrader(LLMGrader):
-    """Grader and blind pairwise judge through `codex exec --json --sandbox read-only` (Codex is never an eval target
-    here). Model: the Codex CLI default unless --grader-model is given; reasoning effort via `-c
-    model_reasoning_effort=<level>` (spelling UNVERIFIED, see CODEX_EFFORT_CONFIG). Runs in a fresh temp folder with the
-    same isolated HOME / CODEX_HOME as a Codex run (CodexEngine.sandbox_env: read-only auth.json copy, removed and
-    verified gone after the call; see CODEX_GRADER_NOTE for the readability risk). The answer is the final agent
-    message, which must be one JSON object (the schema is in the prompt; `--output-schema` is not used: unverified).
-    Budget: Codex has no per-call cap, so a call starts only when its worst-case bound (assumed tokens x
-    WORST_CASE_FACTOR x price, CODEX_GRADER_ASSUMED_PRICE unless --price grader=...) fits the remaining budget, and
-    every call is charged max(usage x price, bound): a conservative charge, still a soft limit."""
-    engine = "codex"
-    EFFORTS = CODEX_EFFORTS
-    def __init__(self, model=None, exec_fn=None, timeout=600, budget=None, prices=None, effort=None, tokens=None):
-        LLMGrader.__init__(self, model, exec_fn, timeout, budget, prices, effort)
-        self.tokens = tokens or DEFAULT_TOKENS
-        self._env_engine = CodexEngine(exec_fn=self.exec_fn)
-    @property
-    def record_name(self):
-        return self.label()
-    def price(self):
-        return grader_price("codex", self.model, self.prices)
-    def price_info(self):
-        info = price_info("grader", self.model, self.prices)
-        if info[0] is not None: return info
-        return (self.prices["codex"], "--price", None) if "codex" in self.prices else \
-            (CODEX_GRADER_ASSUMED_PRICE, "assumed", None)
-    def bound(self, kind):
-        return grader_call_usd(kind, "codex", self.model, self.tokens, self.prices)
-    def command(self, prompt, schema, cap=None):
-        cmd = ["codex", "exec", "--json", "--skip-git-repo-check", "--ephemeral", "--sandbox", CODEX_GRADER_SANDBOX]
-        for f in CODEX_GRADER_DISABLED_FEATURES: cmd += ["--disable", f]
-        cmd += ["-c", 'web_search="disabled"']
-        if self.model: cmd += ["-m", self.model]
-        if self.effort: cmd += ["-c", CODEX_EFFORT_CONFIG % self.effort]
-        return cmd + [codex_grader_prompt(prompt, schema)]
-    def _call(self, prompt, schema):
-        kind = "pairwise" if "winner" in schema.get("properties", {}) else "grader"
-        bound, stop = self.bound(kind), None
-        if self.budget is not None and self.budget.finite() and bound > self.budget.remaining():
-            stop = ("codex grader worst-case %s call $%.2f > remaining budget $%.2f (no per-call cap); stopped before the "
-                    "call" % (kind, bound, self.budget.remaining()))
-        scope = getattr(self, "spend_scope", None) or {}
-        ticket, stop = spend_admit(self.budget, scope.get("kind") or kind, "codex", self.model, scope.get("iteration"),
-                                   None, bound, False, stop)
-        if stop: raise EvalError(stop)
-        cmd = self.command(prompt, schema)
-        probs = codex_grader_command_problems(cmd)
-        if probs: raise EvalError("codex grader launch refused: " + "; ".join(probs))
-        run_root = tempfile.gettempdir()
-        root = tempfile.mkdtemp(prefix="skill-eval-grader-codex-", dir=run_root)
-        eng, out, err, rc, failed, left = self._env_engine, "", "", None, None, []
-        try:
-            work = os.path.join(root, "work"); os.makedirs(work)
-            env = eng.sandbox_env(root)  # raises before launch when there is no ChatGPT auth.json: nothing spent
-            # the executor's static checks: no project skill in work, none in an ancestor of the sandbox, the
-            # sandbox HOME / CODEX_HOME or /etc/codex/skills (refused before launch: nothing spent)
-            skills = eng.sandbox_problems(root, work, None, False)
-            if skills: raise EvalError("codex grader launch refused: " + "; ".join(skills))
-            if ticket is not None: ticket.launch()
-            try:
-                rc, out, err = self.exec_fn(cmd, work, self.timeout, env=env)
-            except LiveDisabled:
-                if ticket is not None: ticket.not_launched(self.budget.spent)
-                raise
-            except Exception as ex:
-                failed = "call failed after launch (%s)" % type(ex).__name__
-            left = list(eng.after_run(root))
-            try:
-                with open(os.path.join(real_codex_home(), "auth.json"), "rb") as f: secrets = auth_secret_strings(f.read())
-            except OSError: secrets = set()
-            if any(v in (out or "") or v in (err or "") for v in secrets):
-                failed = failed or "output contained an auth.json value (discarded, not saved)"
-                out, err = "", ""
-            secrets = None
-        finally:
-            gone = remove_sandbox(eng, os.path.realpath(run_root), root)
-            left += gone
-            if gone and sys.exc_info()[0] is not None: print("WARNING: " + "; ".join(gone), file=sys.stderr)
-        res = None
-        if failed is None:
-            try:
-                res = eng.parse(out or "")
-            except Exception as ex:
-                failed = "output could not be parsed after the call (%s)" % type(ex).__name__
-        tin, tout = (res["input_tokens"], res["output_tokens"]) if res else (0, 0)
-        cost = max(call_cost((tin, tout), self.price()) or 0.0, bound)  # conservative: never below the bound
-        self.usage["calls"] += 1
-        self.usage["input_tokens"] += tin; self.usage["output_tokens"] += tout; self.usage["api_equivalent_usd"] += cost
-        if self.budget is not None: self.budget.charge(cost)
-        outcome = ("launch_failed" if failed and failed.startswith("call failed") else
-                   "unparsed" if failed and failed.startswith("output could not be parsed") else
-                   "error" if failed or left or res is None or res["error"] or rc != 0 else "ok")
-        spend_settle(ticket, self.budget, outcome, None, tin, tout, self.price_info(), cost,
-                     "tokens_x_price" if (call_cost((tin, tout), self.price()) or 0.0) >= bound else "bound_charged")
-        if left: raise EvalError("codex grader sandbox: %s; charged $%.2f and stopped" % ("; ".join(left), cost))
-        if res is not None and failed is None:
-            used = sorted({c.get("tool") for c in res["tool_calls"]} - set(CODEX_GRADER_ALLOWED_ITEMS))
-            if used: failed = "used tools although they are disabled (%s); answer discarded" % ", ".join(map(str, used))
-        if failed: raise EvalError("codex grader %s; charged $%.2f and stopped" % (failed, cost))
-        if res["error"] or rc != 0:
-            raise EvalError("codex grader call failed (exit %s, %s); charged $%.2f and stopped"
-                            % (rc, (res["error"] or "")[:200], cost))
-        try:
-            return extract_json_object(res["final"])
-        except ValueError as ex:
-            raise EvalError("codex grader answer is not one JSON object (%s); charged $%.2f and stopped" % (ex, cost))
-
-def codex_grader_prompt(prompt, schema):
-    return ("%s\n\nDo not run commands, read files or use tools: everything you need is above. Reply with exactly one "
-            "JSON object and nothing else, matching this JSON Schema:\n%s\n" % (prompt, json.dumps(schema)))
-
-def grader_price(engine, model, prices):
-    """(in, out) USD/MTok for the grader: --price grader=... / model overrides first; a Codex grader without one uses
-    CODEX_GRADER_ASSUMED_PRICE (assumption)."""
-    p = price_for("grader", model, prices)
-    if p is None and engine == "codex": p = prices.get("codex") or CODEX_GRADER_ASSUMED_PRICE
-    return p
 
 def make_grader(engine, model=None, effort=None, **kw):
     if engine not in GRADER_ENGINES: raise EvalError("unknown grader engine %r (%s)" % (engine, "|".join(GRADER_ENGINES)))
-    if engine == "codex": return CodexGrader(model, effort=effort, **kw)
-    kw.pop("tokens", None)
     return LLMGrader(model or DEFAULT_GRADER_MODEL, effort=effort, **kw)
 
 # ---------- cost estimate ----------
@@ -2171,17 +2017,12 @@ def price_info(engine, model, prices):
 def call_cost(tokens, price):
     return None if price is None else (tokens[0] * price[0] + tokens[1] * price[1]) / 1e6
 
-def grader_call_usd(kind, engine, model, tokens, prices):
-    """Estimated USD of one grader/pairwise call. A Codex grader is charged at least its worst-case bound per call
-    (CodexGrader), so the bound is what is estimated."""
-    per = call_cost(tokens[kind], grader_price(engine, model, prices))
-    return per * WORST_CASE_FACTOR if (per is not None and engine == "codex") else per
-
-def grader_row_model(engine, model):
-    return model if engine == "claude" else "codex:%s" % (model or "CLI default")
+def grader_call_usd(kind, model, tokens, prices):
+    """Estimated USD of one grader/pairwise call."""
+    return call_cost(tokens[kind], price_for("grader", model, prices))
 
 def estimate(n_cases, n_llm_cases, n_triggers, runs, engines, baseline, grader_model, tokens=None, prices=None,
-             pairwise=True, grader_engine="claude"):
+             pairwise=True):
     """engines: [(engine_name, executor_model)]. One grader call per run that has llm items; one pairwise call per
     (case, run) when two configurations are compared; trigger queries run only in configurations that have a skill
     (with_skill, plus old_skill when baseline is old)."""
@@ -2197,8 +2038,7 @@ def estimate(n_cases, n_llm_cases, n_triggers, runs, engines, baseline, grader_m
             if kind in ("exec", "trigger"):
                 who, per = model or "%s CLI default" % eng, call_cost(tokens[kind], eprice)
             else:
-                who = grader_row_model(grader_engine, grader_model)
-                per = grader_call_usd(kind, grader_engine, grader_model, tokens, prices)
+                who, per = grader_model, grader_call_usd(kind, grader_model, tokens, prices)
             rows.append(est_row(eng, kind, who, n, tokens, per))
     return est_result(rows, tokens)
 
@@ -2212,10 +2052,10 @@ def est_result(rows, tokens):
     return {"rows": rows, "total_usd": round(sum(known), 4), "unpriced_models": unknown,
             "calls": sum(r["calls"] for r in rows), "tokens": tokens}
 
-def grader_estimate(n_grader, n_pairwise, grader_model, tokens, prices, grader_engine="claude"):
+def grader_estimate(n_grader, n_pairwise, grader_model, tokens, prices):
     """Grader-only cost: `grade --live` (counts from the iteration on disk) and `calibrate --live` (golden size)."""
-    per = {k: grader_call_usd(k, grader_engine, grader_model, tokens, prices) for k in ("grader", "pairwise")}
-    return est_result([est_row("grader", k, grader_row_model(grader_engine, grader_model), n, tokens, per[k])
+    per = {k: grader_call_usd(k, grader_model, tokens, prices) for k in ("grader", "pairwise")}
+    return est_result([est_row("grader", k, grader_model, n, tokens, per[k])
                        for k, n in (("grader", n_grader), ("pairwise", n_pairwise))], tokens)
 
 def scale_estimate(est, k, extra_rows=()):
@@ -2289,7 +2129,7 @@ def waiver_hash(tool, spec, ws):
 
 def rule_review_items(skill_dir):
     """Needs-review findings of the English-only and parity rules (eva.review_items): non-English run-output matchers,
-    Codex metadata fields that cannot be verified, Hermes invocation control."""
+    Hermes invocation control."""
     import eva
     return eva.review_items(skill_dir)
 
@@ -2304,8 +2144,8 @@ def rule_review_hash(skill_dir):
 
 def rule_review_missing(spec, ws, verdict_of=None):
     """(findings, verdict) when the unit has rule-review findings and no recorded human decision (`approve --gate
-    rule_review`) matches exactly these findings and the bytes of eva.review_sources, else None: changing a matcher, a
-    metadata field, AGENT.md or a Codex or OpenCode wrapper invalidates the decision. verdict_of(gate, spec, ws):
+    rule_review`) matches exactly these findings and the bytes of eva.review_sources, else None: changing a matcher,
+    AGENT.md or an OpenCode wrapper invalidates the decision. verdict_of(gate, spec, ws):
     approval_verdict, or plan's memo of it."""
     items = rule_review_items(spec["skill_dir"])
     if not items: return None
@@ -2865,9 +2705,10 @@ def write_run(run_dir, res, engine, config, prompt, triggered, api_eq=None):
 class _Fatal(Exception): pass
 
 def run_iteration(spec, ws, engines, runs=DEFAULT_RUNS, baseline="none", old_skill=None, budget=None, prices=None,
-                  iteration=None, log=print, tokens=None, run_root=None):
+                  iteration=None, log=print, tokens=None, run_root=None, builder_model=None):
     """Executes every (engine, case, config, run) and every trigger query, each in its own Sandbox under run_root
-    (default: the system temp folder). Returns the iteration number."""
+    (default: the system temp folder). builder_model: recorded in plan.json so a later `grade --live` compares it.
+    Returns the iteration number."""
     configs = configs_for(baseline)
     for engine in engines:
         if isinstance(engine, ClaudeCodeEngine):
@@ -2877,7 +2718,7 @@ def run_iteration(spec, ws, engines, runs=DEFAULT_RUNS, baseline="none", old_ski
     run_root = os.path.realpath(run_root or tempfile.gettempdir())
     n = iteration or ((iterations(ws) or [0])[-1] + 1)
     it_dir = os.path.join(ws, "iteration-%d" % n)
-    wjson(os.path.join(it_dir, "plan.json"), {"skill_name": spec["skill_name"], "skill_path": spec["skill_dir"],
+    plan = {"skill_name": spec["skill_name"], "skill_path": spec["skill_dir"],
           "old_skill": old_skill, "configurations": configs, "runs_per_configuration": runs,
           "engines": {e.name: e.model for e in engines}, "evals_run": [c["id"] for c in spec["cases"]],
           "tool_coverage": tool_coverage([e.name for e in engines]),
@@ -2888,7 +2729,9 @@ def run_iteration(spec, ws, engines, runs=DEFAULT_RUNS, baseline="none", old_ski
           "ruleset_sha256": ruleset_sha256(), "policy_sha256": policy_sha256(),
           "auth_profile": None if AUTH["profile"] is None else AUTH["profile"].name,
           "isolation": {"run_root": run_root, "per_run_sandbox": True},
-          "budget_enforcement": {e.name: budget_enforcement(e) for e in engines}})
+          "budget_enforcement": {e.name: budget_enforcement(e) for e in engines}}
+    if builder_model: plan["builder_model"] = builder_model
+    wjson(os.path.join(it_dir, "plan.json"), plan)
     budget, prices, tokens = budget or Budget(float("inf")), prices or {}, tokens or DEFAULT_TOKENS
     spent0 = budget.spent
     user_names = sorted({nm for nm, _ in claude_user_skills(claude_config_dir(), config_dir=True)}) \
@@ -3140,20 +2983,14 @@ def walk_runs(it_dir):
                 for rd in sorted(os.listdir(cp)):
                     if re.match(r"run-\d+$", rd): yield eng, os.path.join(ep, ed), cfg, os.path.join(cp, rd)
 
-def check_grader_model(it_dir, grader_model, grader_engine="claude"):
-    """The grader must differ from the executor models recorded in the iteration's plan.json (not from CLI flags).
-    A Codex grader may only grade iterations without Codex runs (Codex is a grader here, never an eval target)."""
+def check_grader_model(it_dir, grader_model):
+    """The grader tier must differ from the executor models and the builder recorded in the iteration's plan.json (not
+    from CLI flags). grader_tier_problems does the comparison."""
     plan = rjson(os.path.join(it_dir, "plan.json"))
     if not isinstance(plan, dict) or not isinstance(plan.get("engines"), dict):
         raise EvalError("%s has no plan.json with executor models; cannot check the grader differs" % it_dir)
-    models = plan["engines"]
-    if grader_engine == "codex":
-        if "codex" in models: raise EvalError("a codex grader cannot grade codex runs; codex is a grader only")
-        return
-    same = [e for e, m in models.items() if m and m == grader_model]
-    if same: raise EvalError("grader model %s equals the executor model of %s; use a different model" % (grader_model, same))
-    if any(e == "claude" and not m for e, m in models.items()):
-        raise EvalError("claude executor model unknown (CLI default) in plan.json; the grader cannot be shown to differ")
+    probs = grader_tier_problems(grader_model, list(plan["engines"].items()), plan.get("builder_model"))
+    if probs: raise EvalError("; ".join(probs))
 
 def parse_id_list(text, flag):
     """'1,2' -> frozenset({1, 2}); None -> None (no narrowing). Positive integers only."""
@@ -3188,7 +3025,7 @@ def grade_iteration(spec, ws, n, grader=None, seed=None, log=print, scope=None):
     cost is appended to cost.json even when grading stops early."""
     it_dir = os.path.join(ws, "iteration-%d" % n)
     if not os.path.isdir(it_dir): raise EvalError("no %s" % it_dir)
-    if grader is not None: check_grader_model(it_dir, grader.model, getattr(grader, "engine", "claude"))
+    if grader is not None: check_grader_model(it_dir, grader.model)
     check_scope(spec, scope)
     before = dict(grader.usage) if grader is not None else None
     try:
@@ -3237,7 +3074,7 @@ def _grade(spec, ws, it_dir, grader, seed, log, scope=None):
                 for it in llm_items:
                     ok, ev = g[it["id"]]
                     res[it["id"]] = {"passed": ok, "evidence": ev, "status": "graded" if ok is not None else "not-graded",
-                                     "grader": grader.record_name}
+                                     "grader": grader.model}
         exps = [dict({"text": it["text"], "id": it["id"], "layer": it["layer"]}, **res[it["id"]]) for it in case["items"]]
         graded = [e for e in exps if isinstance(e["passed"], bool)]
         p = sum(e["passed"] for e in graded)
@@ -3305,12 +3142,12 @@ def pairwise(spec, it_dir, grader, seed=None, scope=None):
             wjson(os.path.join(ed, "comparison-%d.json" % k), {
                 "winner": None, "status": "failed", "error": str(ex), "invalid_winner": str(ex.winner)[:40],
                 "mapping": {"A": a_cfg, "B": b_cfg}, "winner_configuration": None, "seed": seed,
-                "grader_model": grader.record_name})
+                "grader_model": grader.model})
             raise
         winner_cfg = {"A": a_cfg, "B": b_cfg}.get(w, "tie")
         wjson(os.path.join(ed, "comparison-%d.json" % k), {
             "winner": w, "reasoning": why, "mapping": {"A": a_cfg, "B": b_cfg}, "winner_configuration": winner_cfg,
-            "seed": seed, "grader_model": grader.record_name})
+            "seed": seed, "grader_model": grader.model})
 
 def load_golden(golden_path):
     try: data = rjson(golden_path)
@@ -3338,7 +3175,7 @@ def calibrate(golden_path, grader):
     pe = ph * pg + (1 - ph) * (1 - pg)
     kappa = 1.0 if pe == 1 else (agree - pe) / (1 - pe)
     return {"n": n, "agreement": round(agree, 4), "kappa": round(kappa, 4), "threshold": AGREEMENT_MIN,
-            "grader_model": grader.record_name, "golden": os.path.abspath(golden_path),
+            "grader_model": grader.model, "golden": os.path.abspath(golden_path),
             "disagreements": [r for r in rows if r["grader"] is not r["human"]]}
 
 def calibrate_metered(golden_path, grader, it_dir):
@@ -3677,7 +3514,7 @@ COVERAGE_REQUIRED = _policy_or_exit(load_coverage_required)
 
 def load_machine_waivable():
     """machine_waivable of policy/gate.rules.json: the tools a machine waiver may clear, a non-empty list of unique
-    names from opencode and hermes (gates.md G33); claude and codex are never machine-waivable."""
+    names from opencode and hermes (gates.md G33); claude is never machine-waivable."""
     from engine import schema
     where = "policy/gate.rules.json"
     try:
@@ -4242,7 +4079,7 @@ def loop(spec, ws, engines, grader, builder, max_iterations=MAX_AUTO_ITERATIONS,
             probs = precheck(spec, max_iterations - i)
             if probs: return {"status": "gates-failed", "iteration": n, "problems": probs}
         n = run_iteration(spec, ws, engines, runs, baseline, old_skill, budget, prices, log=log, tokens=tokens,
-                          run_root=run_root)
+                          run_root=run_root, builder_model=getattr(builder, "model", None))
         stopped = (rjson(os.path.join(ws, "iteration-%d" % n, "plan.json"), {}) or {}).get("stopped")
         if stopped: return {"status": "run-stopped", "iteration": n, "error": stopped}  # no grading, no builder
         grade_iteration(spec, ws, n, grader, seed, log=log)
@@ -4696,7 +4533,7 @@ def agent_plan_text(a, agent, old, ws, engines, cells, prices, tokens):
     ge = grader_engine_of(a)
     n_llm = sum(1 for c in cells if c["state"] == agent_eval.PLANNED and any(
         agent_eval.llm_items(agent.dir, s["data"]) for s in agent.scenarios if s["id"] == c["scenario"])) * calls
-    g = grader_call_usd("grader", ge, a.grader_model, tokens, prices)
+    g = grader_call_usd("grader", a.grader_model, tokens, prices)
     L.append("grader: %s for llm criteria with `agent grade --live`: %d call(s), est %s" % (
         grader_label(ge, a.grader_model, _str_opt(a, "grader_effort")), n_llm,
         "unpriced" if g is None else "$%.2f" % (g * n_llm)))
@@ -4721,7 +4558,9 @@ def agent_plan_text(a, agent, old, ws, engines, cells, prices, tokens):
           "multi-turn: non-interactive continuation is UNVERIFIED for %s; every scenario with more than one turn "
           "records %s until an operator probe verifies a tool" % (
               ", ".join(t for t, ok in agent_eval.MULTI_TURN_VERIFIED.items() if not ok), agent_eval.MULTI_TURN)]
-    return "\n".join(L + agent_gate_lines(agent, ws))
+    tier = agent_grader_problems(a, engines)
+    L += agent_gate_lines(agent, ws)
+    return "\n".join(L + ["grader-tier-distinct: " + ("fail: " + "; ".join(tier) if tier else "pass")])
 
 def waiver_label(w):
     if w["status"] != "approved": return approval_label(approvals.Verdict(w["status"], w["principal"], w["verdict_reason"]))
@@ -4906,8 +4745,10 @@ def record_agent_run(rd, res, eng, scenario, config, k, agent, api_eq, fixture=N
         "isolation": res.get("isolation")}))
     return state
 
-def agent_run_iteration(agent, old, ws, engines, cells, runs, budget, prices, tokens, run_root=None, log=print):
-    """Every planned cell, runs times per configuration, each in its own AgentSandbox. Returns the iteration number."""
+def agent_run_iteration(agent, old, ws, engines, cells, runs, budget, prices, tokens, run_root=None, log=print,
+                        builder_model=None):
+    """Every planned cell, runs times per configuration, each in its own AgentSandbox. builder_model: recorded in
+    plan.json so a later `agent grade --live` compares it. Returns the iteration number."""
     from engine import agent_eval
     run_root = os.path.realpath(run_root or tempfile.gettempdir())
     n = (iterations(ws) or [0])[-1] + 1
@@ -4936,6 +4777,7 @@ def agent_run_iteration(agent, old, ws, engines, cells, runs, budget, prices, to
             "budget_enforcement": {e.name: budget_enforcement(e) for e in engines}}
     if pinned["new_agent"]: plan["pins"] = pinned["new_agent"]
     if fixtures: plan["fixtures"] = {sid: rec for sid, (_, rec) in fixtures.items()}
+    if builder_model: plan["builder_model"] = builder_model
     wjson(os.path.join(it_dir, "plan.json"), plan)
     spent0, stopped = budget.spent, None
     user_names = sorted({nm for nm, _ in claude_user_skills(claude_config_dir(), config_dir=True)}) \
@@ -5042,6 +4884,7 @@ def agent_live_required(a):
 
 AGENT_LIVE_APPROVALS = ("a current requirements_eval_set approval (or current requirements and eval_set approvals), a "
                         "current rule_review decision when the agent has rule-review findings")
+AGENT_GRADER_TIER = "a grader tier (opus, sonnet, haiku) that differs from every model under test and from any builder"
 
 def agent_approval_inputs(agent, ws):
     """The approval inputs the plan hash does not bind through the agent files, so the last recheck of a live start
@@ -5059,8 +4902,8 @@ def agent_run_problems(a, agent, old, engines, cells, est, prices, tokens, left)
         soft = [e.name for e in engines if budget_enforcement(e) == "soft_limit"]
         if a.strict_budget and soft:
             out.append("--strict-budget (default): %s has no enforceable per-call budget cap (its budget is only a soft "
-                       "limit); refusing the live run (drop it from --engines; --no-strict-budget overrides this, "
-                       "risky)" % ", ".join(soft))
+                       "limit); refusing the live run. Drop it from --engines. --no-strict-budget is risky and overrides "
+                       "only this gate. %s" % (", ".join(soft), NO_STRICT_TIER))
     out += [p for sc in agent.scenarios for p in scenario_fixture(agent, sc)[2]]
     for unit in [agent] + ([old] if old else []):
         out += agent_validation_problems(unit) + pin_problems(unit)
@@ -5121,8 +4964,8 @@ def agent_run(a, agent, ws, prices, tokens):
         print(agent_plan_text(a, agent, old, ws, engines, cells, prices, tokens))
         if plan_refused(agent, old): return 2
         print("\nDRY RUN: nothing was executed. A real run needs `agent run --live --auth-profile P --budget-usd X`, a "
-              "clean `agent validate`, generated wrappers, " + AGENT_LIVE_APPROVALS + " and an estimate within budget; "
-              "the start is recorded as an unsigned approval.")
+              "clean `agent validate`, generated wrappers, " + AGENT_LIVE_APPROVALS + ", " + AGENT_GRADER_TIER +
+              " and an estimate within budget; the start is recorded as an unsigned approval.")
         return 0
     agent_live_required(a)
     est = agent_estimate(engines, cells, a.runs, old, prices, tokens)
@@ -5133,7 +4976,8 @@ def agent_run(a, agent, ws, prices, tokens):
                           "approvals": agent_approval_inputs(agent, ws)}, **pin_parts(agent, old))
     budget = agent_live_start(
         a, agent, ws, "agent-run", lambda left: agent_run_problems(a, agent, old, engines, cells, est, prices, tokens, left)
-        + agent_gate_problems(agent, ws), parts, ["agent %s: %d planned cell(s), runs %d, engines %s" % (
+        + agent_gate_problems(agent, ws) + agent_grader_problems(a, engines), parts,
+        ["agent %s: %d planned cell(s), runs %d, engines %s" % (
             agent.name, sum(1 for c in cells if c["state"] == "planned"), a.runs, ", ".join(names))], "claude" in names)
     for e in engines:
         if budget_enforcement(e) == "soft_limit":
@@ -5167,11 +5011,11 @@ def agent_grade(a, agent, ws, prices, tokens):
     todo = [r for r in agent_eval.iter_runs(it_dir) if r.get("state") == agent_eval.RUN
             and os.path.isfile(os.path.join(r["dir"], "transcript.json")) and r["scenario"] in by_id
             and agent_eval.llm_items(agent.dir, by_id[r["scenario"]]["data"])]
-    est = grader_estimate(len(todo), 0, a.grader_model, tokens, prices, ge)
+    est = grader_estimate(len(todo), 0, a.grader_model, tokens, prices)
     def problems(left):
         out = api_key_soft_refusals([], ge, False, True) if api_key_mode() else []
         try:
-            check_grader_model(it_dir, a.grader_model, ge)
+            check_grader_model(it_dir, a.grader_model)
         except EvalError as ex:
             out.append(str(ex))
         if not todo: out.append("nothing for a grader: no run of iteration-%d holds an llm criterion" % n)
@@ -5179,7 +5023,6 @@ def agent_grade(a, agent, ws, prices, tokens):
         if est["unpriced_models"]: out.append("no price for %s; pass --price" % est["unpriced_models"])
         if est["total_usd"] > left: out.append("estimate $%.2f exceeds budget $%.2f" % (est["total_usd"], left))
         out += api_key_env_problems()
-        if ge == "codex" and subscription_checks_on(): out += codex_auth_problems()
         return out
     shas = lambda: {"runs": sorted((os.path.relpath(r["dir"], it_dir), sha256_files(os.path.join(r["dir"], "transcript.json")))
                                    for r in todo),
@@ -5188,7 +5031,7 @@ def agent_grade(a, agent, ws, prices, tokens):
     budget = agent_live_start(a, agent, ws, "agent-grade", problems, shas, [
         "agent %s: %d run(s) with llm criteria, grader %s" % (
             agent.name, len(todo), grader_label(ge, a.grader_model, _str_opt(a, "grader_effort")))], ge == "claude")
-    grader = make_grader(ge, a.grader_model, a.grader_effort, budget=budget, prices=prices, tokens=tokens)
+    grader = make_grader(ge, a.grader_model, a.grader_effort, budget=budget, prices=prices)
     with spend_scope(grader, iteration=n):
         agent_eval.grade_runs(it_dir, agent.dir, agent.scenarios, grade_fn, grader, signed={r["dir"] for r in todo})
     append_cost(it_dir, "agent grade", grader.usage)
@@ -5383,7 +5226,7 @@ def agent_loop(agent, ws, engines, grader, builder, max_iterations=MAX_AUTO_ITER
             probs = precheck(agent, max_iterations - i)
             if probs: return {"status": "gates-failed", "iteration": n, "problems": probs}
         n = agent_run_iteration(agent, old, ws, engines, agent_cells(agent, engines), runs, budget, prices, tokens,
-                                run_root, log)
+                                run_root, log, getattr(builder, "model", None))
         it_dir = os.path.join(ws, "iteration-%d" % n)
         stopped = (rjson(os.path.join(it_dir, "plan.json"), {}) or {}).get("stopped")
         if stopped: return {"status": "run-stopped", "iteration": n, "error": stopped}
@@ -5472,24 +5315,17 @@ def agent_loop_estimate(a, agent, old, engines, cells, prices, tokens, k):
     calls = a.runs * agent_configs(old)
     n_llm = sum(1 for c in cells if c["state"] == agent_eval.PLANNED and any(
         agent_eval.llm_items(agent.dir, s["data"]) for s in agent.scenarios if s["id"] == c["scenario"])) * calls
-    ge = grader_engine_of(a)
     rows = agent_estimate(engines, cells, a.runs, old, prices, tokens)["rows"] + \
-        grader_estimate(n_llm, 0, a.grader_model, tokens, prices, ge)["rows"][:1]
+        grader_estimate(n_llm, 0, a.grader_model, tokens, prices)["rows"][:1]
     est = scale_estimate(est_result(rows, tokens), k)
     if a.builder_prompt and k > 1:
         per = call_cost(tokens["builder"], price_for("builder", a.builder_model, prices))
         est = est_result(est["rows"] + [est_row("builder", "builder", a.builder_model, k - 1, tokens, per)], tokens)
     return est
 
-def agent_grader_problems(a, engines, ge):
-    models = {e.name: e.model for e in engines}
-    if ge == "codex":
-        return ["a codex grader cannot grade codex runs; codex is a grader only"] if "codex" in models else []
-    same = sorted(e for e, m in models.items() if m and m == a.grader_model)
-    out = ["grader model %s equals the executor model of %s; use a different model" % (a.grader_model, same)] if same else []
-    if any(e == "claude" and not m for e, m in models.items()):
-        out.append("claude executor model unknown (CLI default); the grader cannot be shown to differ")
-    return out
+def agent_grader_problems(a, engines):
+    return grader_tier_problems(a.grader_model, [(e.name, e.model) for e in engines],
+                                a.builder_model if _str_opt(a, "builder_prompt") else None)
 
 def agent_loop_cli(a, agent, ws, prices, tokens):
     from engine import agent_eval
@@ -5512,8 +5348,8 @@ def agent_loop_cli(a, agent, ws, prices, tokens):
         print("\n".join(loop_lines))
         if plan_refused(agent, old): return 2
         print("\nDRY RUN: nothing was executed. A real loop needs `agent loop --live --auth-profile P --budget-usd X "
-              "--builder-prompt FILE`, a clean `agent validate`, generated wrappers, " + AGENT_LIVE_APPROVALS + " and an "
-              "estimate within budget; the start is recorded as an unsigned approval.")
+              "--builder-prompt FILE`, a clean `agent validate`, generated wrappers, " + AGENT_LIVE_APPROVALS + ", " +
+              AGENT_GRADER_TIER + " and an estimate within budget; the start is recorded as an unsigned approval.")
         return 0
     agent_live_required(a)
     ge, names = grader_engine_of(a), [e.name for e in engines]
@@ -5524,8 +5360,7 @@ def agent_loop_cli(a, agent, ws, prices, tokens):
         out = agent_folder_problems(now.dir) + agent_run_problems(a, now, old, engines, cells_now, est, prices, tokens,
                                                                   left) + agent_gate_problems(now, ws, review=first)
         if api_key_mode(): out += api_key_soft_refusals([], ge, False, True, bool(builder_text))
-        out += agent_grader_problems(a, engines, ge)
-        if ge == "codex" and "codex" not in names and subscription_checks_on(): out += codex_auth_problems()
+        out += agent_grader_problems(a, engines)
         if builder_text is not None:
             try: same = read_builder_prompt(a) == builder_text
             except EvalError: same = False
@@ -5557,7 +5392,7 @@ def agent_loop_cli(a, agent, ws, prices, tokens):
         if budget_enforcement(e) == "soft_limit":
             print("WARNING: budget " + SOFT_LIMIT_NOTE % e.name, file=sys.stderr)
             print("WARNING: " + NO_STRICT_WARNING % e.name, file=sys.stderr)
-    grader = make_grader(ge, a.grader_model, a.grader_effort, budget=budget, prices=prices, tokens=tokens)
+    grader = make_grader(ge, a.grader_model, a.grader_effort, budget=budget, prices=prices)
     builder = AgentBuilder(builder_text, a.builder_model, budget, prices) if builder_text else None
     precheck = lambda now, left: agent_drift_problems(now, signed, old, names) + problems(
         budget.remaining(), left, now, first=left == a.max_iterations)
@@ -5617,9 +5452,10 @@ def unit_kind(spec):
 
 def parse_install_tools(text):
     tools = [t.strip() for t in text.split(",") if t.strip()]
-    if not tools or len(set(tools)) != len(tools) or any(t not in approvals.COVERAGE_TOOLS for t in tools):
-        raise EvalError("--tools %r: name tools from %s, each at most once" % (text, ",".join(approvals.COVERAGE_TOOLS)))
-    return [t for t in approvals.COVERAGE_TOOLS if t in tools]
+    from engine import install
+    if not tools or len(set(tools)) != len(tools) or any(t not in install.TOOLS for t in tools):
+        raise EvalError("--tools %r: name tools from %s, each at most once" % (text, ",".join(install.TOOLS)))
+    return [t for t in install.TOOLS if t in tools]
 
 def target_wrapper_rel(tool, name):
     return rjson(os.path.join(RULESET_ROOT, "targets", tool + ".json"))["wrapper"]["path"].format(name=name)
@@ -5817,9 +5653,9 @@ def drift_cmd(a):
     observed = {}
     for item in a.observed:
         tool, _, version = item.partition("=")
-        if tool not in approvals.COVERAGE_TOOLS or not version.strip() or tool in observed:
+        if tool not in lifecycle.TOOLS or not version.strip() or tool in observed:
             raise EvalError("--observed %r: give TOOL=VERSION once per tool, TOOL one of %s"
-                            % (item, ", ".join(approvals.COVERAGE_TOOLS)))
+                            % (item, ", ".join(lifecycle.TOOLS)))
         observed[tool] = version.strip()
     today = a.today or datetime.datetime.now(datetime.timezone.utc).date().isoformat()
     units = []
@@ -5924,16 +5760,6 @@ def plan_text(spec, problems, a, engines, ws, est, tokens=None, prices=None):
     else:
         L += ["auth: subscription only (Claude: existing claude.ai Keychain login; Codex: ChatGPT login); `claude auth "
               "status --json` is checked only by a real --live (not by --dry-run)"]
-    if grader_engine_of(a) == "codex" and api_key_mode():
-        L += ["grader budget: " + spend.no_cap_reason("grader", "codex", p.name) + NO_REOPEN,
-              "grader isolation: none: the codex grader never starts in API-key mode"]
-    elif grader_engine_of(a) == "codex":
-        L += ["grader budget: SOFT LIMIT (codex has no per-call cap): each grader/pairwise call starts only if its "
-              "worst-case bound fits the remaining budget and is charged max(usage x price, bound); price %s" % (
-                  "from --price" if price_for("grader", a.grader_model, parse_price_overrides(getattr(a, "price", None)))
-                  else "ASSUMED $%.2f/$%.2f per MTok (not verified, override with --price grader=IN,OUT)"
-                  % CODEX_GRADER_ASSUMED_PRICE),
-              "grader isolation: " + CODEX_GRADER_NOTE]
     soft = [e.name for e in engines if budget_enforcement(e) == "soft_limit"]
     if api_key_mode():
         refused = api_key_soft_refusals(engines, grader_engine_of(a), True, True, builds_now(a))
@@ -5957,22 +5783,20 @@ def plan_text(spec, problems, a, engines, ws, est, tokens=None, prices=None):
 def live_estimate(a, spec, ws, n, engines, tokens, prices, iterations_left=None):
     """Cost of what a live command will really execute; never uses --cases/--llm-cases/--trigger-queries.
     loop: iterations_left x (one iteration + calibration) + (iterations_left - 1) builder calls."""
-    ge = grader_engine_of(a)
     if a.cmd == "grade":
-        check_grader_model(os.path.join(ws, "iteration-%d" % n), a.grader_model, ge)
         check_scope(spec, grade_scope(a))
         ng, npw = grade_counts(spec, os.path.join(ws, "iteration-%d" % n), grade_scope(a))
-        return grader_estimate(ng, npw, a.grader_model, tokens, prices, ge)
+        return grader_estimate(ng, npw, a.grader_model, tokens, prices)
     if a.cmd == "calibrate":
-        return grader_estimate(len(load_golden(a.golden)), 0, a.grader_model, tokens, prices, ge)
+        return grader_estimate(len(load_golden(a.golden)), 0, a.grader_model, tokens, prices)
     n_cases, n_llm, n_trig = spec_counts(spec, None)
     est = estimate(n_cases, n_llm, n_trig, a.runs, [(e.name, e.model) for e in engines], a.baseline, a.grader_model,
-                   tokens, prices, grader_engine=ge)
+                   tokens, prices)
     if a.cmd == "run":
         return est_result([r for r in est["rows"] if r["kind"] in ("exec", "trigger")], tokens)
     if a.cmd == "loop":  # every automatic iteration may run, each with its calibration, plus a builder call between
         k = a.max_iterations if iterations_left is None else iterations_left
-        cal = grader_estimate(len(load_golden(a.golden)), 0, a.grader_model, tokens, prices, ge)["rows"][:1] if a.golden else []
+        cal = grader_estimate(len(load_golden(a.golden)), 0, a.grader_model, tokens, prices)["rows"][:1] if a.golden else []
         est = scale_estimate(est, k, cal)
         if getattr(a, "builder_prompt", None) and k > 1:
             per = call_cost(tokens["builder"], price_for("builder", a.builder_model, prices))
@@ -5995,8 +5819,6 @@ def subscription_problems(a, engines):
     out = [] if a.cmd in ("run", "loop") else api_key_env_problems()  # run/loop: reported by preflight
     if needs_claude_auth(a, engines):
         out += claude_auth_problems()
-    if grades_now(a) and grader_engine_of(a) == "codex":
-        out += codex_auth_problems()  # reads only the auth_mode field of auth.json
     return out
 
 def required_key_problems(a, engines):
@@ -6007,10 +5829,10 @@ def required_key_problems(a, engines):
 
 def api_key_soft_refusals(engines, grader_engine, runs_engines, grades, builds=False):
     """API-key mode: the spend.api_key_refusal of every call the command makes (the engines under test, the grader,
-    the builder): a Claude call (plan.md:902), and an engine or a Codex grader without a per-call cap (D5). The calls
-    without a per-call cap come first, so the D5 refusal stays the first one where it was."""
+    the builder): a Claude call (plan.md:902), and an engine without a per-call cap (D5). The calls without a per-call
+    cap come first, so the D5 refusal stays the first one where it was."""
     calls = ([("exec", e.name, e.has_call_cap) for e in engines] if runs_engines else []) \
-        + ([("grader", grader_engine, grader_engine != "codex")] if grades else []) \
+        + ([("grader", grader_engine, True)] if grades else []) \
         + ([("builder", "claude", True)] if builds else [])
     out = [spend.api_key_refusal(kind, engine, AUTH["profile"].name, cap)
            for kind, engine, cap in sorted(calls, key=lambda c: c[2])]
@@ -6031,8 +5853,6 @@ def needs_claude_auth(a, engines):
         or (a.cmd == "loop" and bool(_str_opt(a, "builder_prompt")))
 
 AUTH_STATUS_SKIPPED = "skipped in dry run: `claude auth status --json` (runs a CLI; only the real --live checks it)"
-CODEX_AUTH_SKIPPED = ("skipped in dry run: the Codex grader's ChatGPT login (auth_mode of auth.json; only the real "
-                      "--live reads it)")
 
 class _LiveGates(object):
     """What the live gate functions read. report: a list collects every failure instead of raising (dry runs, plan).
@@ -6064,13 +5884,8 @@ def _live_strict_budget(g):
     soft = [e.name for e in g.engines if budget_enforcement(e) == "soft_limit"] if g.a.cmd in ("run", "loop") else []
     if getattr(g.a, "strict_budget", True) and soft:
         g.fail("--strict-budget (default): %s has no enforceable per-call budget cap (its budget is only a soft limit); "
-               "refusing the live run (drop it from --engines; --no-strict-budget overrides this, risky)" % ", ".join(soft))
-
-def _live_codex_grader(g):
-    if g.a.cmd in ("run", "loop") and grader_engine_of(g.a) == "codex" and any(e.name == "codex" for e in g.engines):
-        g.fail("--grader-engine codex with codex under test: a codex grader cannot grade codex runs (`grade` refuses "
-               "them), so the codex runs would be paid for and never graded; drop codex from --engines or use "
-               "--grader-engine claude")
+               "refusing the live run. Drop it from --engines. --no-strict-budget is risky and overrides only this gate. "
+               "%s" % (", ".join(soft), NO_STRICT_TIER))
 
 def _live_auth(g):
     a = g.a
@@ -6086,16 +5901,18 @@ def _live_auth(g):
     if env: g.fail("subscription auth: " + " | ".join(env))
     if needs_claude_auth(a, g.engines):
         g.report.append(AUTH_STATUS_SKIPPED)
-    if grades_now(a) and grader_engine_of(a) == "codex":
-        g.report.append(CODEX_AUTH_SKIPPED)
 
-def _live_grader_model(g):
+def _live_grader_tier(g):
     a = g.a
-    if grader_engine_of(a) == "claude":  # the grader must differ from the model under test
-        same = [e.label() for e in g.engines if e.name == "claude" and e.model and e.model == a.grader_model]
-        if same and a.cmd in ("run", "loop"):
-            g.fail("grader %s is the model under test %s; pick another --grader-model or --grader-engine codex"
-                   % (a.grader_model, ", ".join(same)))
+    if a.cmd == "grade":
+        try:
+            check_grader_model(os.path.join(g.ws, "iteration-%d" % g.n), a.grader_model)
+        except EvalError as ex:
+            g.fail(str(ex))
+        return
+    under_test = [(e.name, e.model) for e in g.engines] if a.cmd in ("run", "loop") else []
+    builder = a.builder_model if _str_opt(a, "builder_prompt") else None
+    for x in grader_tier_problems(a.grader_model, under_test, builder): g.fail(x)
 
 def _live_rule_review(g):
     for x in rule_review_problems(g.spec, g.ws, g.verdict_of): g.fail(x)
@@ -6131,8 +5948,8 @@ def _live_estimate(g):
 
 # The order policy/gates.json declares (live); gate_declaration_problem() compares the two.
 LIVE_GATES = (("eval-set-valid", _live_eval_set), ("strict-budget", _live_strict_budget),
-              ("codex-grader-not-under-test", _live_codex_grader), ("subscription-auth", _live_auth),
-              ("grader-not-model-under-test", _live_grader_model), ("rule-review", _live_rule_review),
+              ("subscription-auth", _live_auth), ("grader-tier-distinct", _live_grader_tier),
+              ("rule-review", _live_rule_review),
               ("approvals", _live_approvals), ("priced-models", _live_priced), ("preflight", _live_preflight),
               ("per-call-bound", _live_call_bound), ("estimate-within-budget", _live_estimate))
 BUDGET_GATES = ("per-call-bound", "estimate-within-budget")
@@ -6191,7 +6008,7 @@ def live_gate_states(a, spec, problems, ws, engines, tokens, prices, pf, verdict
             out.append((gid, "fail: " + (str(ex).splitlines() or [type(ex).__name__])[0]))
             continue
         said = g.report[start:]
-        fails = [m for m in said if m not in (AUTH_STATUS_SKIPPED, CODEX_AUTH_SKIPPED)]
+        fails = [m for m in said if m != AUTH_STATUS_SKIPPED]
         out.append((gid, "fail: " + fails[0].splitlines()[0] if fails else "skipped: " + said[0] if said else "pass"))
     return out
 
@@ -6203,8 +6020,7 @@ def live_dry_run(a, spec, problems, ws, n, engines, tokens, prices, budget_left=
     report = []
     live_est = check_live_gates(a, spec, problems, ws, n, engines, tokens, prices,
                                 a.budget_usd if budget_left is None else budget_left, report=report)
-    skipped = (AUTH_STATUS_SKIPPED, CODEX_AUTH_SKIPPED)
-    fails = [r for r in report if r not in skipped]
+    fails = [r for r in report if r != AUTH_STATUS_SKIPPED]
     print(plan_text(spec, problems, a, engines, ws, live_est, tokens, prices))
     print("\nLIVE DRY RUN: nothing was executed (no model call, no `claude auth status`, no files written).")
     left = a.budget_usd if budget_left is None else budget_left
@@ -6214,8 +6030,7 @@ def live_dry_run(a, spec, problems, ws, n, engines, tokens, prices, budget_left=
         "fits" if live_est["total_usd"] <= left else "EXCEEDS"))
     print("live gates that would refuse this command (%d):" % len(fails))
     for r in fails: print("  - " + r.replace("\n", "\n    "))
-    for r in skipped:
-        if r in report: print("  (%s)" % r)
+    if AUTH_STATUS_SKIPPED in report: print("  (%s)" % AUTH_STATUS_SKIPPED)
     if any(e.name == "claude" for e in engines) or getattr(a, "grader_engine", None) == "claude":
         info, bs = claude_builtin_plugins(), claude_bundled_skills()
         print("claude --settings (executor launches; grader/builder use separate settings): %s"
@@ -6297,8 +6112,7 @@ def plan_estimate_usd(unit_dir, ws):
         engines = make_engines(a, spec)
         n_cases, n_llm, n_trig = spec_counts(spec, a)
         est = estimate(n_cases, n_llm, n_trig, a.runs, [(e.name, e.model) for e in engines], a.baseline,
-                       DEFAULT_GRADER_MODEL, parse_token_overrides(a.tokens), parse_price_overrides(a.price),
-                       grader_engine=a.grader_engine)
+                       DEFAULT_GRADER_MODEL, parse_token_overrides(a.tokens), parse_price_overrides(a.price))
         return float(est["total_usd"])
     except (EvalError, ValueError, KeyError, TypeError):
         return None
@@ -6404,13 +6218,14 @@ def machine_waiver_show():
     return 0 if mw["status"] == "approved" else 1
 
 def build_parser():
+    from engine import install
     p = argparse.ArgumentParser(prog="skill_eval", description=__doc__.split("\n")[0])
     sp = p.add_subparsers(dest="cmd", required=True)
     def common(s, run_opts=True):
         s.add_argument("skill")
         s.add_argument("--workspace")
         if run_opts:
-            s.add_argument("--engines", default="claude,codex")
+            s.add_argument("--engines", default="claude")
             s.add_argument("--runs", type=int, default=DEFAULT_RUNS)
             s.add_argument("--baseline", choices=sorted(BASELINES), default="none", help="none: without_skill, old: old_skill")
             s.add_argument("--old-skill")
@@ -6422,14 +6237,9 @@ def build_parser():
                            "(claude --effort); default: CLI/account default")
             s.add_argument("--codex-effort", choices=CODEX_EFFORTS)
             s.add_argument("--grader-engine", choices=GRADER_ENGINES, default="claude",
-                           help="grader and blind pairwise judge: claude (claude -p, no tools, capped) or codex (codex "
-                                "exec --sandbox read-only, CLI default model, soft budget; its auth.json copy is "
-                                "readable by the grader). Codex is never an eval target through this option")
-            s.add_argument("--grader-model", default=None,
-                           help="default: %s for --grader-engine claude, the CLI default model for codex"
-                                % DEFAULT_GRADER_MODEL)
-            s.add_argument("--grader-effort", help="grader effort: claude %s, codex %s (codex: -c %s, UNVERIFIED)"
-                           % ("|".join(CLAUDE_EFFORTS), "|".join(CODEX_EFFORTS), CODEX_EFFORT_CONFIG % "<level>"))
+                           help="grader and blind pairwise judge: claude (claude -p, no tools, capped)")
+            s.add_argument("--grader-model", default=None, help="default: %s" % DEFAULT_GRADER_MODEL)
+            s.add_argument("--grader-effort", help="grader effort: %s" % "|".join(CLAUDE_EFFORTS))
             s.add_argument("--price", action="append", help="KEY=IN,OUT USD/MTok; KEY = engine name, model id or 'grader'")
             s.add_argument("--tokens", action="append", help="KIND=IN,OUT assumed tokens per call; KIND exec|trigger|grader|pairwise")
             s.add_argument("--cases", type=int); s.add_argument("--llm-cases", type=int); s.add_argument("--trigger-queries", type=int)
@@ -6442,8 +6252,9 @@ def build_parser():
             s.add_argument("--strict-budget", dest="strict_budget", action="store_true", default=True,
                            help="(default) refuse --live runs of engines without an enforceable per-call cap (codex)")
             s.add_argument("--no-strict-budget", dest="strict_budget", action="store_false",
-                           help="RISKY: allow codex --live runs: its budget is only a soft limit (one call can exceed "
-                                "--budget-usd) and its auth.json copy is readable by the agent under test")
+                           help="RISKY: override only the strict-budget gate. A codex budget is only a soft limit (one "
+                                "call can exceed --budget-usd) and its auth.json copy is readable by the agent under "
+                                "test. " + NO_STRICT_TIER)
             s.add_argument("--dry-run", action="store_true",
                            help="with --live: check every live gate for this exact command and print the plan; executes "
                                 "nothing (no model call, no `claude auth status`)")
@@ -6515,8 +6326,8 @@ def build_parser():
     x.add_argument("--out", required=True, help="an absent or empty folder")
     x.add_argument("--templates", help="a folder with index.html, unit.html and style.css (default engine/hub_templates)")
     gates = ("`agent run --live` and `agent loop --live` need a current requirements_eval_set approval (or requirements "
-             "and eval_set) and a current rule_review decision for the agent's review rows, and `agent plan` prints "
-             "those gates")
+             "and eval_set), a current rule_review decision for the agent's review rows and " + AGENT_GRADER_TIER +
+             ", and `agent plan` prints those gates")
     text = ("evaluate an AGENT.md v2 agent per tool from its typed scenarios (validate, plan, run, grade, report) and "
             "improve it in a loop whose builder may change only AGENT.md (loop); " + gates)
     s = sp.add_parser("agent", help=text, description=text)
@@ -6527,7 +6338,7 @@ def build_parser():
         if n != "validate": x.add_argument("--workspace")
         if n in ("grade", "report"): x.add_argument("--iteration", type=int)
         if n in ("plan", "run", "loop"):
-            x.add_argument("--engines", default="claude,codex")
+            x.add_argument("--engines", default="claude")
             x.add_argument("--runs", type=int, default=DEFAULT_RUNS)
             x.add_argument("--old-agent", help="the previous AGENT.md v2 version of this agent (its baseline)")
             x.add_argument("--claude-model", default=DEFAULT_EXECUTOR_MODELS["claude"])
@@ -6538,7 +6349,8 @@ def build_parser():
             x.add_argument("--codex-effort", choices=CODEX_EFFORTS)
             x.add_argument("--strict-budget", dest="strict_budget", action="store_true", default=True)
             x.add_argument("--no-strict-budget", dest="strict_budget", action="store_false",
-                           help="RISKY: allow codex --live runs (soft budget limit, auth.json copy readable by the agent)")
+                           help="RISKY: override only the strict-budget gate (soft budget limit, auth.json copy readable "
+                                "by the agent). " + NO_STRICT_TIER)
             x.add_argument("--run-root", help="folder for the per-run sandboxes (default: system temp folder)")
         if n in ("plan", "run", "grade", "loop"):
             x.add_argument("--grader-engine", choices=GRADER_ENGINES, default="claude")
@@ -6558,7 +6370,7 @@ def build_parser():
                       ".json; references/install.md): project scope under --target, or the Claude agent at user scope "
                       "after a recorded approval of the manifest")
     s.add_argument("unit")
-    s.add_argument("--tools", default=",".join(approvals.COVERAGE_TOOLS))
+    s.add_argument("--tools", default=",".join(install.TOOLS))
     s.add_argument("--scope", choices=("project", "user"), default="project")
     s.add_argument("--target", help="the project folder (project scope)")
     s.add_argument("--dry-run", action="store_true", help="print the plan and a diff per overwrite; write nothing")
@@ -6702,7 +6514,7 @@ def _dispatch(a):
     n_cases, n_llm, n_trig = spec_counts(spec, a)
     make_grader(a.grader_engine, a.grader_model, a.grader_effort)  # validates --grader-effort before anything runs
     est = estimate(n_cases, n_llm, n_trig, a.runs, [(e.name, e.model) for e in engines], a.baseline, a.grader_model,
-                   tokens, prices, grader_engine=a.grader_engine)
+                   tokens, prices)
     if a.cmd == "estimate":
         print(format_estimate(est)); return 0
     live_cmds = ("run", "grade", "calibrate", "loop")
@@ -6715,8 +6527,8 @@ def _dispatch(a):
             "--live --auth-profile %s --budget-usd X (a hard cap in USD: API-key calls are billed per token, and each "
             "call starts only when the spend so far plus its per-call cap fits), no claude call (the claude engine, the "
             "claude grader and the builder are refused in API-key mode: --max-budget-usd is not an enforceable per-call "
-            "cap), no engine or grader without a per-call cap (codex and the codex grader: no enforceable per-call cap "
-            "in API-key mode; --no-strict-budget does not reopen them)" % AUTH["profile"].name if api_key_mode() else
+            "cap), no engine without a per-call cap (codex: no enforceable per-call cap in API-key mode; "
+            "--no-strict-budget does not reopen it)" % AUTH["profile"].name if api_key_mode() else
             "--live --budget-usd X (API-equivalent USD), subscription auth only")
               + ", approved requirements/eval_set, no validation or preflight problems, and an estimate within budget.")
         return 0
@@ -6739,7 +6551,7 @@ def _dispatch(a):
     def prepare():  # every gate that starts no process, before the live start is recorded
         report = []
         check_live_gates(a, spec, problems, ws, n, engines, tokens, prices, left, report=report)
-        fails = [r for r in report if r not in (AUTH_STATUS_SKIPPED, CODEX_AUTH_SKIPPED)]
+        fails = [r for r in report if r != AUTH_STATUS_SKIPPED]
         if fails: raise EvalError(fails[0])
         rules = ruleset_sha256()
         return approvals.Prepared(spec["skill_name"], live_plan_hash(a, spec, ws, builder_text), rules,
@@ -6755,7 +6567,7 @@ def _dispatch(a):
                 print("WARNING: budget " + SOFT_LIMIT_NOTE % e.name, file=sys.stderr)
                 print("WARNING: " + NO_STRICT_WARNING % e.name, file=sys.stderr)
     budget = Budget(a.budget_usd)
-    grader = make_grader(a.grader_engine, a.grader_model, a.grader_effort, budget=budget, prices=prices, tokens=tokens)
+    grader = make_grader(a.grader_engine, a.grader_model, a.grader_effort, budget=budget, prices=prices)
     if live_plan_hash(a, spec, ws, builder_text) != grant.sha256:
         raise EvalError("the command's inputs changed after signing (skill folder, eval set, requirements or a file named "
                         "by an option); nothing was run, sign again")

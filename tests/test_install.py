@@ -94,10 +94,10 @@ class Base(T.Base):
 
 
 def register_agent_at(case, agent, ws, runs):
-    """A fake claude iteration, waivers for the other three tools, the registration gate and the record, all recorded
-    by the case's test approver."""
+    """A fake claude iteration, waivers for the other two coverage tools, the registration gate and the record, all
+    recorded by the case's test approver."""
     fake_iteration(agent, ws, runs)
-    for tool in ("codex", "opencode", "hermes"):
+    for tool in ("opencode", "hermes"):
         rc, out, err = cli("approve", agent, "--gate", "coverage_waiver:" + tool)
         case.assertEqual(rc, 0, out + err)
     rc, out, err = cli("agent", "report", agent)
@@ -653,19 +653,19 @@ class TestAgentRecords(Base):
         fake_iteration(self.agent, self.ws, self.runs)
         rc, out, err = cli("agent", "report", self.agent)
         self.assertEqual(rc, 3, out + err)
-        for tool in ("codex", "opencode", "hermes"):
+        for tool in ("opencode", "hermes"):
             self.assertIn("coverage-missing:%s" % tool, out)
-        self.assertEqual(cli("approve", self.agent, "--gate", "coverage_waiver:codex")[0], 0)
+        self.assertEqual(cli("approve", self.agent, "--gate", "coverage_waiver:opencode")[0], 0)
         rc, out, err = cli("agent", "report", self.agent)
         gate = rjson(os.path.join(self.ws, "iteration-1", "gate.json"))
-        self.assertFalse(any(p.startswith("coverage-missing:codex") for p in gate["problems"]), gate)
-        self.assertTrue(any(p.startswith("coverage-missing:opencode") for p in gate["problems"]), gate)
-        self.assertEqual(gate["coverage"]["codex"], "waived by %s" % T.TEST_PRINCIPAL)
+        self.assertFalse(any(p.startswith("coverage-missing:opencode") for p in gate["problems"]), gate)
+        self.assertTrue(any(p.startswith("coverage-missing:hermes") for p in gate["problems"]), gate)
+        self.assertEqual(gate["coverage"]["opencode"], "waived by %s" % T.TEST_PRINCIPAL)
         scen = os.path.join(self.agent, "scenarios", "02-drill.json")
         write(scen, read(scen) + "\n")
         cli("agent", "report", self.agent)
         gate = rjson(os.path.join(self.ws, "iteration-1", "gate.json"))
-        self.assertTrue(any(p.startswith("coverage-missing:codex") for p in gate["problems"]),
+        self.assertTrue(any(p.startswith("coverage-missing:opencode") for p in gate["problems"]),
                         "a scenario edit invalidates the waiver")
 
     def test_the_agent_eval_set_hash_covers_the_scenarios(self):
@@ -688,8 +688,7 @@ class TestAgentRecords(Base):
         self.assertEqual(rec["skill_md_sha256"], se.sha256_files(os.path.join(self.agent, "AGENT.md")))
         spec = {"skill_name": NAME, "skill_dir": os.path.realpath(self.agent), "kind": "agent"}
         self.assertEqual(rec["eval_set_sha256"], se.gate_hash("eval_set", spec, self.ws))
-        self.assertEqual(sorted(rec["approvals"]), ["coverage_waiver:codex", "coverage_waiver:hermes",
-                                                    "coverage_waiver:opencode", "registration"])
+        self.assertEqual(sorted(rec["approvals"]), ["coverage_waiver:hermes", "coverage_waiver:opencode", "registration"])
         self.assertEqual(se.registration_schema_errors(rec), [])
         self.assertEqual(se.registration_state(self.agent)[:2], ("registered", ""))
         p = os.path.join(self.agent, "AGENT.md")
@@ -708,7 +707,7 @@ class TestAgentRecords(Base):
         shutil.rmtree(self.agent)
         self.agent = agent_copy(os.path.join(self.tmp, "agents"), version=None)
         fake_iteration(self.agent, self.ws, self.runs)
-        for tool in ("codex", "opencode", "hermes"):
+        for tool in ("opencode", "hermes"):
             self.assertEqual(cli("approve", self.agent, "--gate", "coverage_waiver:" + tool)[0], 0)
         cli("agent", "report", self.agent)
         self.assertEqual(cli("approve", self.agent, "--gate", "registration")[0], 0)
@@ -719,8 +718,7 @@ class TestAgentRecords(Base):
 
     def test_an_agent_with_a_missing_waiver_is_not_recorded(self):
         fake_iteration(self.agent, self.ws, self.runs)
-        for tool in ("codex", "opencode"):
-            self.assertEqual(cli("approve", self.agent, "--gate", "coverage_waiver:" + tool)[0], 0)
+        self.assertEqual(cli("approve", self.agent, "--gate", "coverage_waiver:opencode")[0], 0)
         cli("agent", "report", self.agent)
         self.assertEqual(cli("approve", self.agent, "--gate", "registration")[0], 0)
         rc, out, err = cli("register", self.agent)
@@ -774,7 +772,7 @@ class TestIndexAndHub(Base):
         want = {"kind": "agent", "name": NAME, "version": "1.0.0", "path": NAME, "workspace": NAME + "-workspace",
                 "iteration": rec["iteration"], "registered_at": rec["registered_at"], "registered_by": T.TEST_PRINCIPAL,
                 "approvals": [{"gate": "coverage_waiver:%s" % t, "principal": T.TEST_PRINCIPAL, "reason": T.TEST_REASON}
-                              for t in ("codex", "hermes", "opencode")] +
+                              for t in ("hermes", "opencode")] +
                              [{"gate": "registration", "principal": T.TEST_PRINCIPAL}]}
         want.update((k, rec[k]) for k in RECORD_HASHES)
         self.assertEqual(doc["units"], [want])
@@ -785,10 +783,10 @@ class TestIndexAndHub(Base):
         page = self.page()
         self.assertEqual(badge(page, "registration"), "registered 1.0.0 by %s" % T.TEST_PRINCIPAL)
         self.assertEqual([badge(page, "coverage-" + t) for t in eva.TOOLS],
-                         ["Claude Code coverage: run", "Codex CLI coverage: " + T.NOT_SELECTED,
+                         ["Claude Code coverage: run",
                           "OpenCode coverage: " + T.NOT_AVAILABLE, "Hermes Agent coverage: " + T.NOT_AVAILABLE])
         self.assertIn("recomputed from the runs of iteration-1.", page)
-        for gate in ("coverage_waiver:codex", "coverage_waiver:opencode", "coverage_waiver:hermes", "registration"):
+        for gate in ("coverage_waiver:opencode", "coverage_waiver:hermes", "registration"):
             self.assertIn("<li>%s by %s" % (gate, T.TEST_PRINCIPAL), page)
         self.assertIn(T.TEST_REASON, page)
         self.assertNotIn("no agent registration", page)

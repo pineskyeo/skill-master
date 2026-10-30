@@ -9,7 +9,7 @@ from engine.primitives import script_denylist
 
 TEMPLATES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hub_templates")
 TEMPLATE_FILES = ("index.html", "unit.html", "style.css")
-TOOLS = ("claude", "codex", "opencode", "hermes")
+TOOLS = ("claude", "opencode", "hermes")
 _ESC = {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}
 PLACEHOLDER_RE = re.compile(r"\{\{([a-z_]+)\}\}")
 LINK_RE = re.compile(r"""\b(?:href|src|srcset|action|formaction|poster)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>"']+))""",
@@ -20,14 +20,11 @@ REFERENCE_RE = re.compile(r"&(?!(?:amp|lt|gt|quot|#39);)")
 LOCAL_PATHS = ("/Users/", "/home/", "/private/", "/var/folders/", "/Volumes/")
 SAFE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 SAFE_PATH_RE = re.compile(r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*")
-SKILL_DIRS = {"claude": ".claude/skills", "codex": ".agents/skills", "opencode": ".opencode/skills",
-              "hermes": ".hermes/skills"}
-SKILL_NOTES = {"claude": "Claude Code reads project skills from .claude/skills.",
-               "codex": "Codex CLI reads project skills from .agents/skills."}
-AGENT_COPIES = {"claude": (".claude/agents", "%s.md"), "codex": (".codex/agents", "%s.toml")}
-AGENT_NOTES = {"claude": "Claude Code reads project agents from .claude/agents.",
-               "codex": "Codex CLI reads project agents from .codex/agents."}
-WRAPPER_FILES = {"claude": "wrappers/claude/%s.md", "codex": "wrappers/codex/%s.toml", "opencode": "wrappers/opencode/%s.md",
+SKILL_DIRS = {"claude": ".claude/skills", "opencode": ".opencode/skills", "hermes": ".hermes/skills"}
+SKILL_NOTES = {"claude": "Claude Code reads project skills from .claude/skills."}
+AGENT_COPIES = {"claude": (".claude/agents", "%s.md")}
+AGENT_NOTES = {"claude": "Claude Code reads project agents from .claude/agents."}
+WRAPPER_FILES = {"claude": "wrappers/claude/%s.md", "opencode": "wrappers/opencode/%s.md",
                  "hermes": "wrappers/hermes/SOUL.md"}
 UNVERIFIED = "UNVERIFIED: no %s engine here (gates.md G33)"
 TONES = {"pass": "ok", "PASS": "ok", "run": "ok", "registered": "ok", "fail": "bad", "FAIL": "bad", "invalid": "bad",

@@ -11,7 +11,6 @@ sys.path.insert(0, os.path.join(ROOT, "tests"))
 import eva, skill_eval
 from engine import loaders, rule_runner as RR, schema as S
 import test_multi_tool_parity as P
-import test_codex_permissions as C
 
 TOOLS = ("claude", "codex", "opencode", "hermes")
 # The eva.py constants that the legacy parity and English bodies read, at the P7 commit 53edf4c. A6 deleted them with
@@ -95,6 +94,14 @@ def row(r, cid):
     if len(rows) != 1:
         raise AssertionError("%d rows for %s" % (len(rows), cid))
     return rows[0]
+
+
+REMOVE = "sandbox_mode in a Codex custom agent file does not override the parent session; remove it"
+
+
+def codex_wrapper():
+    desc = eva.parse_frontmatter(P.AGENT_MD)[0]["description"]
+    return 'name = "code-scout"\ndescription = %s\ndeveloper_instructions = """\nYou are code-scout.\n"""\n' % json.dumps(desc)
 
 
 class Tmp(unittest.TestCase):
@@ -234,7 +241,7 @@ def target_pins():
         "wrapper.fields.%s.kind" % P7.CODEX_AGENT_OPTIONAL_KEYS[0]: ("string", None),
         "wrapper.fields.%s.kind" % P7.CODEX_AGENT_OPTIONAL_KEYS[1]: ("string", None),
         "wrapper.fields.features.shell_tool.kind": ("boolean", None),
-        "wrapper.forbidden.sandbox_mode": (C.REMOVE, C.REMOVE),
+        "wrapper.forbidden.sandbox_mode": (REMOVE, REMOVE),
         "wrapper.unknown_keys": ("fail", "are not in the recorded Codex custom-agent key list"),
         "wrapper.extra_files": ([], None), "permissions.compare": ("none", 'elif tool == "codex":'),
         "permissions.derive.shell.key": ("features.shell_tool", None), "permissions.derive.shell.off": ([False], None),
@@ -338,7 +345,7 @@ class TestTargets(Tmp):
         self.assertEqual(strings, list(P7.CODEX_AGENT_OPTIONAL_KEYS))
         self.assertEqual(t["wrapper"]["fields"]["features.shell_tool"], {"kind": "boolean"})
         self.assertEqual(list(t["wrapper"]["forbidden"]), ["sandbox_mode"])
-        self.assertEqual(t["wrapper"]["forbidden"]["sandbox_mode"], C.REMOVE)
+        self.assertEqual(t["wrapper"]["forbidden"]["sandbox_mode"], REMOVE)
         self.assertEqual(t["wrapper"]["unknown_keys"], "fail")
         self.assertEqual(t["permissions"]["unrestrictable"], list(P7.CODEX_UNRESTRICTABLE))
         self.assertIn("shell", t["permissions"]["unrestrictable"])
@@ -411,7 +418,7 @@ class TestTargets(Tmp):
     def test_rule_protects_follow_the_parity_row_tools(self):
         for rule in RR.default_bundle().rules:
             if rule.id in eva.PARITY_ROW_TOOLS:
-                self.assertEqual(tuple(rule.protects), eva.PARITY_ROW_TOOLS[rule.id], rule.id)
+                self.assertEqual(tuple(t for t in rule.protects if t in eva.TOOLS), eva.PARITY_ROW_TOOLS[rule.id], rule.id)
 
     def test_every_target_field_is_pinned_to_its_p7_value(self):
         pins = target_pins()
@@ -691,7 +698,7 @@ class TestProvenance(Tmp):
                     self.assertIn("verified", src)
                     self.assertTrue(src["verified"] is None or re.match(r"^\d{4}-\d{2}-\d{2}$", src["verified"]), src)
                     seen.add(c["id"])
-        self.assertGreaterEqual(len(seen), 25)
+        self.assertGreaterEqual(len(seen), 23)
 
     def test_the_rules_without_a_date_are_named(self):
         nulls = sorted(r.id for r in RR.default_bundle().rules
@@ -733,34 +740,21 @@ class TestEnglishOperands(unittest.TestCase):
 
 
 class TestCodexFeatures(Tmp):
+    """engine/primitives/parity.py wrapper_states still parses the Codex wrapper for agent_rows, though no rule reads the
+    Codex rows."""
     def wrapper(self, features):
-        return C.codex_wrapper() + features
+        return codex_wrapper() + features
 
-    def test_lane2_shell_tool_false_parses_and_the_review_still_names_shell(self):
+    def problems(self, d):
+        return "; ".join(parity().wrapper_states(d, parity().targets())["codex"]["problems"])
+
+    def test_shell_tool_false_parses(self):
         d = self.agent(codex=self.wrapper("[features]\nshell_tool = false\n"))
-        r = eva.check(d)
-        self.assertEqual(row(r, "parity-wrapper-codex")["status"], "pass", row(r, "parity-wrapper-codex")["reason"])
-        c = row(r, "parity-permissions-codex")
-        self.assertEqual(c["status"], "needs-review")
-        self.assertEqual(c["reason"], "needs-review: [codex] " + C.READ_ONLY)
-        self.assertIn("shell", c["reason"])
-        self.assertEqual(parity().wrapper_states(d, parity().targets())["codex"]["problems"], [])
-
-    def test_lane3_the_key_removed_gives_the_same_review(self):
-        d = self.agent(codex=self.wrapper(""))
-        c = row(eva.check(d), "parity-permissions-codex")
-        self.assertEqual(c["reason"], "needs-review: [codex] " + C.READ_ONLY)
+        self.assertEqual(self.problems(d), "")
 
     def test_a_dotted_key_form_is_read_the_same(self):
-        d = self.agent(codex=C.codex_wrapper().replace('name = "code-scout"', 'features.shell_tool = false\nname = "code-scout"'))
-        self.assertEqual(row(eva.check(d), "parity-wrapper-codex")["status"], "pass")
-
-    def test_shell_tool_is_never_read_as_a_permission(self):
-        for value in ("false", "true"):
-            d = self.agent(codex=self.wrapper("[features]\nshell_tool = %s\n" % value), name="code-scout")
-            c = row(eva.check(d), "parity-permissions-codex")
-            self.assertIn(", shell,", c["reason"], value)
-            shutil.rmtree(d)
+        d = self.agent(codex=codex_wrapper().replace('name = "code-scout"', 'features.shell_tool = false\nname = "code-scout"'))
+        self.assertEqual(self.problems(d), "")
 
     def test_wrong_types_and_other_table_keys_fail_naming_the_dotted_path(self):
         cases = (("[features]\nshell_tool = \"no\"\n", "features.shell_tool must be a boolean"),
@@ -772,32 +766,19 @@ class TestCodexFeatures(Tmp):
         for text, frag in cases:
             with self.subTest(text):
                 d = self.agent(codex=self.wrapper(text))
-                c = row(eva.check(d), "parity-wrapper-codex")
-                self.assertEqual(c["status"], "fail")
-                self.assertIn(frag, c["reason"])
-                self.assertNotEqual(row(eva.check(d), "parity-permissions-codex")["status"], "pass")
+                self.assertIn(frag, self.problems(d))
                 shutil.rmtree(d)
-
-    def test_an_agent_with_every_class_still_passes(self):
-        d = self.agent(md=C.ALL_CAPS_MD, codex=self.wrapper("[features]\nshell_tool = false\n"))
-        self.assertEqual(row(eva.check(d), "parity-permissions-codex")["status"], "pass")
 
     def test_a_dotted_key_then_its_table_header_fails_the_wrapper(self):
         d = self.agent(codex=self.wrapper("features.shell_tool = false\n[features]\n"))
-        c = row(eva.check(d), "parity-wrapper-codex")
-        self.assertEqual(c["status"], "fail")
-        self.assertIn("table 'features' is defined twice", c["reason"])
+        self.assertIn("table 'features' is defined twice", self.problems(d))
 
     def test_a_deep_dotted_key_or_header_fails_without_a_traceback(self):
         self.skill()
         for extra in (".".join(["a"] * 900) + " = 1\n", "[" + ".".join(["a"] * 900) + "]\n"):
             with self.subTest(extra[:12]):
                 d = self.agent(codex=self.wrapper(extra))
-                r = eva.check(d)
-                c = row(r, "parity-wrapper-codex")
-                self.assertEqual(c["status"], "fail")
-                self.assertIn("deeper than %d levels" % S.MAX_DEPTH, c["reason"])
-                self.assertNotEqual(row(r, "parity-permissions-codex")["status"], "pass")
+                self.assertIn("deeper than %d levels" % S.MAX_DEPTH, self.problems(d))
                 rc, out, err = quiet(eva.main, ["check-all", self.tmp])
                 self.assertEqual(rc, 1)
                 self.assertNotIn("Traceback", err)
@@ -864,7 +845,7 @@ class TestNameOnce(Tmp):
         d = self.skill(name="other-name", folder="word-count")
         self.assertEqual(eva.parity_violations(d),
                          ["[opencode] name 'other-name' must equal the folder name 'word-count' exactly"])
-        self.assertEqual(eva.parity_line(eva.parity_status(d)), "claude=pass codex=pass opencode=fail hermes=pass")
+        self.assertEqual(eva.parity_line(eva.parity_status(d)), "claude=pass opencode=fail hermes=pass")
         self.assertEqual(self.folder_rows(eva.check(d)), ["name-matches-folder"])
 
     def test_validate_refuses_a_clean_skill_whose_name_differs_from_its_folder(self):
@@ -1095,7 +1076,7 @@ class TestAsciiFiles(unittest.TestCase):
         for rid in ids:
             for dp, dn, fn in os.walk(os.path.join(ROOT, "tests", "rules", rid)):
                 files += [os.path.join(dp, n) for n in fn]
-        self.assertGreater(len(files), 300)
+        self.assertGreater(len(files), 290)
         for fp in files:
             with open(fp, "rb") as f:
                 self.assertTrue(f.read().isascii(), fp)

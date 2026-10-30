@@ -280,6 +280,7 @@ class TestCodexSoftBudget(Base):
         self.assertEqual(calls, []); self.assertEqual(se.iterations(self.ws), []); self.assertFalse(se._LIVE["on"])
 
     def test_strict_budget_allows_claude_and_default_mode_warns_for_codex(self):
+        self.allow_codex_under_test()
         d = self.approved_skill(evals=evals_doc(human=False))
         fc, fx = FakeClaude(), FakeCodex()
         live = lambda cmd, cwd, timeout, env=None: (fc if cmd[0] == "claude" else fx)(cmd, cwd, timeout, env)

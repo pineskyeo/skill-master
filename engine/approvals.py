@@ -25,7 +25,7 @@ RULES_CHANGED = "rules changed since approval"
 UNSIGNED = "no signature (a record from before signed approvals)"
 UNSIGNED_RULES = UNSIGNED + "; " + RULES_CHANGED
 
-COVERAGE_TOOLS = ("claude", "codex", "opencode", "hermes")
+COVERAGE_TOOLS = ("claude", "opencode", "hermes")
 WAIVER_PREFIX = "coverage_waiver:"
 WAIVER_GATES = tuple(WAIVER_PREFIX + t for t in COVERAGE_TOOLS)
 REASON_MAX = 200

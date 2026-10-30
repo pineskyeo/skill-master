@@ -83,7 +83,7 @@ class TestCsvCleanerRound16(unittest.TestCase):
         self.assertEqual(se.static_check(chk, {}, self.tmp.name, SKILL), (False, "file path escapes its root"))
 
     def test_run_budget_estimate_excludes_later_grading(self):
-        a = mock.Mock(cmd="run", grader_engine="codex", grader_model=None, baseline="none", runs=1)
+        a = mock.Mock(cmd="run", grader_engine="claude", grader_model=None, baseline="none", runs=1)
         est = se.live_estimate(a, self.spec, self.tmp.name, None,
                                [se.ClaudeCodeEngine("claude-sonnet-5-5")], se.DEFAULT_TOKENS, {})
         self.assertEqual({row["kind"] for row in est["rows"]}, {"exec", "trigger"})

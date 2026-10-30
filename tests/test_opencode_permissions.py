@@ -1,6 +1,6 @@
 """OpenCode agent permissions (plan C3). The OpenCode wrapper must set every recorded permission key, because an unset key
 keeps an UNVERIFIED default. Unknown keys fail, external_directory must be deny, and parity-permissions-opencode is REVIEW,
-never PASS, while the recorded key list is not verified complete. Mocked like tests/test_codex_permissions.py: subprocess is
+never PASS, while the recorded key list is not verified complete. Mocked like tests/test_review_round2.py: subprocess is
 patched to fail for the whole module, no claude/codex/opencode/hermes call, no network."""
 import contextlib, io, json, os, shutil, subprocess, sys, unittest
 from unittest import mock

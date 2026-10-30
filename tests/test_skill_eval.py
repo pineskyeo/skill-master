@@ -101,9 +101,7 @@ def coverage_missing(tool, status, waiver="missing"):
 
 NOT_SELECTED, NOT_AVAILABLE = "not-run: engine not selected", "not-run: engine not available"
 NO_COVERAGE_ENTRY = "unknown (no valid tool_coverage entry)"
-CLAUDE_ONLY_MISSING = [coverage_missing("codex", NOT_SELECTED), coverage_missing("opencode", NOT_AVAILABLE),
-                       coverage_missing("hermes", NOT_AVAILABLE)]
-CLAUDE_CODEX_MISSING = CLAUDE_ONLY_MISSING[1:]
+CLAUDE_ONLY_MISSING = [coverage_missing("opencode", NOT_AVAILABLE), coverage_missing("hermes", NOT_AVAILABLE)]
 NO_COVERAGE_MISSING = [coverage_missing(t, NO_COVERAGE_ENTRY) for t in eva.TOOLS]
 
 def waive_coverage(spec, ws, tools=tuple(t for t in eva.TOOLS if t != "claude")):
@@ -296,8 +294,16 @@ class Base(unittest.TestCase):
         spec, problems = se.load_eval_set(make_skill(self.tmp, **kw))
         return spec, problems
     def engines(self, regress=False):
-        self.fc, self.fx = FakeClaude(regress), FakeCodex()
-        return [se.ClaudeCodeEngine("claude-opus-5-5", exec_fn=self.fc), se.CodexEngine(exec_fn=self.fx)]
+        self.fc = FakeClaude(regress)
+        return [se.ClaudeCodeEngine("claude-opus-5-5", exec_fn=self.fc)]
+    def engines_with_codex(self):
+        """Claude and Codex under test. A codex model has no tier, so a test that grades or reaches a live gate also
+        needs allow_codex_under_test."""
+        self.fx = FakeCodex()
+        return self.engines() + [se.CodexEngine(exec_fn=self.fx)]
+    def allow_codex_under_test(self):
+        """Keeps a test whose subject is not the grader gate running with codex under test."""
+        pt = mock.patch.object(se, "grader_tier_problems", return_value=[]); pt.start(); self.addCleanup(pt.stop)
     def grader(self, **kw):
         self.fg = FakeGraderExec(**kw)
         return se.LLMGrader("claude-sonnet-5-5", exec_fn=self.fg)
@@ -414,7 +420,8 @@ class TestRunAndGrade(Base):
         return spec, n
 
     def test_layout_and_timing(self):
-        spec, n = self.run_one(runs=2)
+        spec, _ = self.spec()
+        se.run_iteration(spec, self.ws, self.engines_with_codex(), runs=2, log=quiet)
         it = os.path.join(self.ws, "iteration-1")
         rd = os.path.join(it, "claude", "eval-1-start-the-login-fix-task", "with_skill", "run-2")
         t = rjson(os.path.join(rd, "timing.json"))
@@ -452,7 +459,7 @@ class TestRunAndGrade(Base):
         gb = rjson(os.path.join(it, "claude", "eval-1-start-the-login-fix-task", "without_skill", "run-1", "grading.json"))
         self.assertEqual(gb["summary"]["passed"], 0)
         hr = rjson(os.path.join(it, "human_review.json"))
-        self.assertEqual(len(hr["items"]), 4)  # case 3 x 2 configs x 1 run x 2 engines
+        self.assertEqual(len(hr["items"]), 2)  # case 3 x 2 configs x 1 run x 1 engine
         hr["items"][0]["passed"] = False; hr["items"][0]["note"] = "deleted the branch"
         wjson(os.path.join(it, "human_review.json"), hr)
         se.grade_iteration(spec, self.ws, n, None, log=quiet)
@@ -508,14 +515,14 @@ class TestRunAndGrade(Base):
         n2 = se.run_iteration(spec, self.ws, [se.ClaudeCodeEngine(None, exec_fn=FakeClaude())], runs=1, log=quiet)
         with self.assertRaises(se.EvalError) as cm:
             se.grade_iteration(spec, self.ws, n2, self.grader(), log=quiet)
-        self.assertIn("plan.json", str(cm.exception))
+        self.assertIn("claude model under test (CLI default)", str(cm.exception))
 
     def test_benchmark_report_gate_clean(self):
         spec, n = self.run_one(runs=3)
         se.grade_iteration(spec, self.ws, n, self.grader(), seed=1, log=quiet)
         waive_coverage(spec, self.ws, ("opencode", "hermes"))
         _, gate = se.report_iteration(spec, self.ws, n)
-        self.assertEqual(gate["problems"], ["ungraded: 12 human item(s) pending review (fill human_review.json, re-run grade)"])
+        self.assertEqual(gate["problems"], ["ungraded: 6 human item(s) pending review (fill human_review.json, re-run grade)"])
         self.assertTrue(gate["human_pending_only"])
         hp = os.path.join(self.ws, "iteration-1", "human_review.json")
         hr = rjson(hp)
@@ -575,7 +582,7 @@ class TestRunAndGrade(Base):
         spec, n = self.run_one(runs=1, evals=evals_doc(human=False))
         se.grade_iteration(spec, self.ws, n, self.grader(), seed=1, log=quiet)
         it = os.path.join(self.ws, "iteration-1")
-        self.assertEqual(se.report_iteration(spec, self.ws, n)[1]["problems"], CLAUDE_CODEX_MISSING)
+        self.assertEqual(se.report_iteration(spec, self.ws, n)[1]["problems"], CLAUDE_ONLY_MISSING)
         # a trigger query that failed, a run that errored, a missing run, and a stopped plan
         tp = os.path.join(it, "claude", "trigger", "with_skill", "results.json")
         tr = rjson(tp); tr["results"][0]["pass"] = False; tr["results"][0]["errors"] = 1
@@ -591,7 +598,7 @@ class TestRunAndGrade(Base):
         joined = "\n".join(gate["problems"])
         for frag in ("incomplete: run stopped early (budget exhausted", "incomplete [claude]: 3 of 4 eval runs graded",
                      "execution failed [claude]: 1 trigger run(s)", "execution failed in 1 eval run(s)",
-                     "trigger criteria failed [claude]: 1 of 20 queries", "ungraded: 3 LLM item(s) not graded"):
+                     "trigger criteria failed [claude]: 1 of 20 queries", "ungraded: 1 LLM item(s) not graded"):
             self.assertIn(frag, joined)
         self.assertTrue(gate["needs_approval"]); self.assertFalse(gate["human_pending_only"])
         self.assertIn("incomplete: no plan.json", "\n".join(se.compute_gate({"per_engine": {}})["problems"]))
@@ -751,7 +758,7 @@ class TestCLI(Base):
     def test_plan_is_dry_and_writes_nothing(self):
         d = make_skill(self.tmp)
         for cmd in ("plan", "run", "loop"):
-            rc, out, _ = self.cli(cmd, d, "--workspace", self.ws, "--price", "codex=5,30")
+            rc, out, _ = self.cli(cmd, d, "--workspace", self.ws, "--engines", "claude,codex", "--price", "codex=5,30")
             self.assertEqual(rc, 0)
             self.assertIn("DRY RUN: nothing was executed", out)
             self.assertFalse(os.path.exists(self.ws))
@@ -762,7 +769,7 @@ class TestCLI(Base):
 
     def test_estimate_overrides_and_eva_passthrough(self):
         d = make_skill(self.tmp)
-        rc, out, _ = self.cli("estimate", d, "--cases", "3", "--llm-cases", "1", "--trigger-queries", "20")
+        rc, out, _ = self.cli("estimate", d, "--engines", "claude,codex", "--cases", "3", "--llm-cases", "1", "--trigger-queries", "20")
         self.assertEqual(rc, 0); self.assertIn("total calls 186", out); self.assertIn("UNPRICED: codex CLI default", out)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -770,6 +777,7 @@ class TestCLI(Base):
         self.assertIn("claude-opus-5-5", buf.getvalue())
 
     def test_live_requires_budget_approvals_and_fit(self):
+        self.allow_codex_under_test()
         d = make_skill(self.tmp)
         rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live")
         self.assertEqual(rc, 2); self.assertIn("--budget-usd", err)
@@ -778,9 +786,10 @@ class TestCLI(Base):
         os.makedirs(self.ws); write(os.path.join(self.ws, "requirements.md"), "goal")
         self.cli("approve", d, "--workspace", self.ws, "--gate", "requirements")
         self.cli("approve", d, "--workspace", self.ws, "--gate", "eval_set")
-        rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "100")
-        self.assertEqual(rc, 2); self.assertIn("--strict-budget (default)", err)  # round 6: default engines include codex
-        rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "100", "--no-strict-budget")
+        rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "100", "--engines", "claude,codex")
+        self.assertEqual(rc, 2); self.assertIn("--strict-budget (default)", err)
+        rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "100", "--engines", "claude,codex",
+                              "--no-strict-budget")
         self.assertEqual(rc, 2); self.assertIn("no price for", err)
         rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "1", "--engines", "claude")
         self.assertEqual(rc, 2); self.assertIn("exceeds budget", err)
@@ -838,6 +847,7 @@ class TestCLI(Base):
 
     # P1b
     def test_budget_must_be_finite_and_codex_bound_must_fit(self):
+        self.allow_codex_under_test()
         d = self.approved_skill()
         for b in ("inf", "nan", "0", "-1"):
             rc, _, err = self.cli("run", d, "--workspace", self.ws, "--live", "--budget-usd", b, "--engines", "claude")
@@ -873,7 +883,7 @@ class TestCLI(Base):
         est = se.grader_estimate(*se.grade_counts(se.load_eval_set(d)[0], os.path.join(self.ws, "iteration-%d" % n)),
                                  "claude-sonnet-5-5", se.DEFAULT_TOKENS, {})
         self.assertEqual([r["calls"] for r in est["rows"]], [2, 3])
-        rc, _, err = self.cli("grade", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "10", "--grader-model", "x-model")
+        rc, _, err = self.cli("grade", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "10", "--grader-model", "x-sonnet-model")
         self.assertEqual(rc, 2); self.assertIn("no price for", err)
         self.assertFalse(se._LIVE["on"])
 
@@ -935,7 +945,7 @@ class TestCLI(Base):
         # the grade command's own --claude-model (default opus) differs from the grader, but the runs used sonnet
         rc, _, err = self.cli("grade", d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "10", "--engines", "claude",
                               "--grader-model", "claude-sonnet-5-5", "--iteration", str(n))
-        self.assertEqual(rc, 2); self.assertIn("equals the executor model of ['claude']", err)
+        self.assertEqual(rc, 2); self.assertIn("has the same tier (sonnet) as claude model under test", err)
 
     def test_validate_and_snapshot(self):
         d = make_skill(self.tmp, triggers=None)

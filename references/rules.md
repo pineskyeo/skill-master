@@ -97,7 +97,6 @@ The source codes name what the rule follows. S is the agentskills.io specificati
 | `english-output-matchers` [needs-review] | skill, agent | language | the run-output matchers that `english-evals` and `english-scenarios` skip | H |
 | `english-ruleset` [required] | repository | language | `rules/`, `schemas/`, `targets/` and `policy/`, at bundle load | H |
 | `parity-skill-claude` [required] | skill | parity | the frontmatter parses with a `name` and a `description`; no reserved word, no name or description over the limits of `targets/claude.json`, no `<` or `>` | B, H |
-| `parity-skill-codex` [required] | skill | parity | the frontmatter parses with a `name` and a `description`, and `agents/openai.yaml`, when present, passes; a field other than the verified `policy.allow_implicit_invocation` gives needs-review | H |
 | `parity-skill-opencode` [required] | skill | parity | `name` matches `^[a-z0-9]+(-[a-z0-9]+)*$` and equals the folder name exactly; every `metadata` value is a string; `metadata.opencode/autoinvoke`, when present, is `"true"` or `"false"` | H |
 | `parity-skill-hermes` [required] | skill | parity | the frontmatter parses with a `name` and a `description`; no `metadata.hermes` mapping or list | H |
 | `parity-invocation-control` [required] | skill | parity | `disable-model-invocation: true` comes with the Codex and OpenCode controls; `n/a` when the key is absent or false | H |
@@ -105,11 +104,9 @@ The source codes name what the rule follows. S is the agentskills.io specificati
 | `tool-metadata-generated` [required] | skill | parity | `agents/openai.yaml` and the `metadata.opencode/autoinvoke` line equal what `eva.py generate` renders | H |
 | `parity-agent-name` [required] | agent | parity | the agent name matches `^[a-z0-9]+(-[a-z0-9]+)*$` | H |
 | `parity-wrapper-claude` [required] | agent | parity | `wrappers/claude/<name>.md` is present, parseable and consistent with AGENT.md | T |
-| `parity-wrapper-codex` [required] | agent | parity | `wrappers/codex/<name>.toml` is present, parseable and consistent with AGENT.md | T |
 | `parity-wrapper-opencode` [required] | agent | parity | `wrappers/opencode/<name>.md` is present, parseable and consistent with AGENT.md | T |
 | `parity-wrapper-hermes` [required] | agent | parity | `wrappers/hermes/SOUL.md` is present, parseable and consistent with AGENT.md | T |
 | `parity-permissions-claude` [required] | agent | parity | the Claude wrapper grants exactly the AGENT.md capabilities | T |
-| `parity-permissions-codex` [required] | agent | parity | the Codex wrapper against the AGENT.md capabilities; needs-review unless all six unrestrictable capabilities are declared | T |
 | `parity-permissions-opencode` [required] | agent | parity | the OpenCode wrapper grants exactly the AGENT.md capabilities; a match still gives needs-review (G3) | T |
 | `parity-permissions-hermes` [required] | agent | parity | fails for every agent (G4) | T |
 | `wrappers-generated` [required] | agent | parity | the four wrappers equal what `eva.py generate` renders | H |
@@ -178,12 +175,11 @@ Run-output matchers are `check.pattern`, `check.input_regex` and `check.rows` in
 
 ## Multi-tool parity
 
-A unit is built for Claude Code, Codex CLI, OpenCode and Hermes Agent together. `engine/primitives/parity.py` checks it against one target file per tool, `targets/<tool>.json`, which holds the tool's skill limits, invocation control, wrapper path and format, permission model, model mapping and render template. The `parity-*`, `tool-metadata-generated` and `wrappers-generated` rows in [All rules](#all-rules) apply it.
+A unit is built for Claude Code, OpenCode and Hermes Agent together. `engine/primitives/parity.py` checks it against one target file per tool, `targets/<tool>.json`, which holds the tool's skill limits, invocation control, wrapper path and format, permission model, model mapping and render template. The `parity-*`, `tool-metadata-generated` and `wrappers-generated` rows in [All rules](#all-rules) apply it.
 
 Each tool's permission row has its own limit:
 
 - Claude Code compares the wrapper `tools` by capability class.
-- Codex CLI cannot restrict `write`, `shell`, `web_fetch`, `web_search`, `delegate` or `skill` per agent (`targets/codex.json` `unrestrictable`). The row is needs-review unless the AGENT.md declares all six capabilities.
 - OpenCode (gates.md G3): the recorded permission key list stays `complete: false` in `targets/opencode.json`. A wrapper that grants exactly the needed capabilities still gets needs-review, never PASS.
 - Hermes Agent (gates.md G4): no verified per-agent permission format exists, so `targets/hermes.json` sets `fixed: fail`. `parity-permissions-hermes` fails for every agent. The rule has severity `fail`, so the row is must and every agent's verdict is FAIL under the default bundle. `eva.py generate` writes only `SOUL.md` for Hermes, because the `config.yaml` keys are UNVERIFIED.
 

@@ -663,7 +663,7 @@ class TestAgentRows(Tmp):
             r = eva.check(unit)
             bad = {c["id"] for c in r.failed if c["category"] != "parity"}
             self.assertEqual(bad, set(), unit)
-            self.assertEqual({c["id"] for c in r.failed}, {"parity-wrapper-claude", "parity-wrapper-codex",
+            self.assertEqual({c["id"] for c in r.failed}, {"parity-wrapper-claude",
                                                            "parity-wrapper-opencode", "parity-wrapper-hermes",
                                                            "parity-permissions-hermes", "wrappers-generated"})
 

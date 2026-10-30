@@ -59,18 +59,18 @@ class TestStrictBudgetDefault(Base):
         calls = []
         with mock.patch.object(se, "live_exec", lambda *a, **k: calls.append(a) or (0, "", "")):
             for argv in (("run",), ("loop", "--builder-prompt", bp)):
-                for engines in (None, "codex", "claude,codex"):  # None: the default --engines includes codex
-                    extra = ("--engines", engines) if engines else ()
+                for engines in ("codex", "claude,codex"):
                     rc, out, err = self.cli(*(argv + (d, "--workspace", self.ws, "--live", "--auth-profile", "personal-mac", "--budget-usd", "50",
-                                                      "--price", "codex=2,10", "--runs", "1", "--run-root", self.runs)
-                                              + extra))
+                                                      "--price", "codex=2,10", "--runs", "1", "--run-root", self.runs,
+                                                      "--engines", engines)))
                     self.assertEqual(rc, 2, (argv, engines, err))
                     self.assertIn("--strict-budget (default): codex has no enforceable per-call budget cap", err)
-                    self.assertIn("--no-strict-budget overrides this, risky", err)
+                    self.assertIn("--no-strict-budget is risky and overrides only this gate", err)
         self.assertEqual(calls, []); self.assertEqual(self.status_calls, []); self.assertEqual(se.iterations(self.ws), [])
         self.assertFalse(se._LIVE["on"])
 
     def test_opt_out_runs_codex_with_both_warnings_and_claude_is_unaffected(self):
+        self.allow_codex_under_test()
         d = self.approved_skill(evals=evals_doc(human=False))
         fc, fx = FakeClaude(), FakeCodex()
         live = lambda cmd, cwd, timeout, env=None: (fc if cmd[0] == "claude" else fx)(cmd, cwd, timeout, env)

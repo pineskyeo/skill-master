@@ -25,7 +25,6 @@
       "properties": {
         "registration": {"$ref": "#/$defs/signed"},
         "coverage_waiver:claude": {"$ref": "#/$defs/waiver"},
-        "coverage_waiver:codex": {"$ref": "#/$defs/waiver"},
         "coverage_waiver:opencode": {"$ref": "#/$defs/waiver"},
         "coverage_waiver:hermes": {"$ref": "#/$defs/waiver"}
       }

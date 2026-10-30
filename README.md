@@ -1,6 +1,6 @@
 # Skill Master
 
-Skill Master checks, evaluates and installs agent skills and agents built for four tools: Claude Code, Codex CLI, OpenCode and Hermes Agent. A skill is a folder with a `SKILL.md`. An agent is a folder with an AGENT.md v2 file, scenario files under `scenarios/` and one generated wrapper per tool under `wrappers/`. `eva.py` and `skill_eval.py` run on Python 3.9 with the standard library only.
+Skill Master checks, evaluates and installs agent skills and agents built for three tools: Claude Code, OpenCode and Hermes Agent. A skill is a folder with a `SKILL.md`. An agent is a folder with an AGENT.md v2 file, scenario files under `scenarios/` and one generated wrapper per tool under `wrappers/`. `eva.py` and `skill_eval.py` run on Python 3.9 with the standard library only.
 
 ## Two command-line tools
 

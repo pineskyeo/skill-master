@@ -42,7 +42,7 @@ def wrapper_texts(agent_dir, caps=None):
     """{relative path: text} of a complete, consistent wrapper set generated from the AGENT.md in agent_dir. caps: the
     capability set the Claude and OpenCode wrappers grant (default: exactly the AGENT.md v2 capabilities, or for a v1
     AGENT.md the classes its tools map to, rules/data/capabilities.json). The Codex wrapper sets no sandbox_mode: a
-    custom agent file cannot restrict the parent session (tests/test_codex_permissions.py). The OpenCode wrapper sets
+    custom agent file cannot restrict the parent session. The OpenCode wrapper sets
     every recorded permission key (tests/test_opencode_permissions.py)."""
     with open(os.path.join(agent_dir, "AGENT.md"), encoding="utf-8") as f: meta, _ = eva.parse_frontmatter(f.read())
     name, desc = meta["name"], " ".join(meta["description"].split())
@@ -169,11 +169,11 @@ class TestSkillParity(E.SkillMixin, unittest.TestCase):
     def failed_rows(self, r):
         return {i for i in ids(r) if i.startswith("parity-")}
 
-    def test_base_skill_passes_every_parity_row_for_all_four_tools(self):
+    def test_base_skill_passes_every_parity_row_for_every_tool(self):
         r = self.skill()
         self.assertEqual(r.verdict, "PASS", r.failed)
         rows = {c["id"]: c["status"] for c in r.checks if c["category"] == "parity"}
-        self.assertEqual(rows, {"parity-skill-claude": "pass", "parity-skill-codex": "pass", "parity-skill-opencode": "pass",
+        self.assertEqual(rows, {"parity-skill-claude": "pass", "parity-skill-opencode": "pass",
                                 "parity-skill-hermes": "pass", "parity-invocation-control": "n/a", "parity-invocation-hermes": "n/a",
                                 "tool-metadata-generated": "n/a"})
         self.assertEqual(tool_status(self.skill_dir()), {t: "pass" for t in eva.TOOLS})
@@ -196,33 +196,16 @@ class TestSkillParity(E.SkillMixin, unittest.TestCase):
     def openai_yaml(self, text, **kw):
         return self.skill(files={"agents/openai.yaml": text}, **kw)
 
-    def test_codex_openai_yaml_valid_forms_pass(self):
+    def test_openai_yaml_valid_forms_pass(self):
         for text in ("policy:\n  allow_implicit_invocation: false\n", "policy:\n  allow_implicit_invocation: true\n",
                      "# only a comment\n", ""):
             r = self.openai_yaml(text); self.assertEqual(r.verdict, "PASS", (text, r.failed))
-            self.assertIn("agents/openai.yaml", row(r, "parity-skill-codex")["reason"])
             self.assertTrue(row(r, "english-tool-files")["passed"])
             shutil.rmtree(self.skill_dir())
 
-    def test_codex_openai_yaml_invalid_forms_fail_only_codex(self):
-        for text, frag in (("policy:\n  allow_implicit_invocation: \"false\"\n", "unquoted boolean"),
-                           ("policy:\n  allow_implicit_invocation: maybe\n", "unquoted boolean"),
-                           ("policy: strict\n", "policy must be a mapping"),
-                           ("policy:\n  deep:\n    x: 1\n", "cannot be parsed"),
-                           ("just text\n", "cannot be parsed"), ("a: 1\n---\nb: 2\n", "document markers")):
-            r = self.openai_yaml(text)
-            self.assertEqual(self.failed_rows(r), {"parity-skill-codex"}, text)
-            self.assertIn(frag, row(r, "parity-skill-codex")["reason"], text)
-            self.assertEqual(tool_status(self.skill_dir()), {"claude": "pass", "codex": "fail", "opencode": "pass", "hermes": "pass"})
-            shutil.rmtree(self.skill_dir())
-
-    def test_codex_parse_error_lines_are_relative_to_the_file(self):
-        r = self.openai_yaml("a: 1\nb: 2\nc d\n")
-        self.assertIn("line 3:", row(r, "parity-skill-codex")["reason"]); self.assertNotIn("line 4", row(r, "parity-skill-codex")["reason"])
-
-    def test_codex_directory_named_openai_yaml_is_not_a_file(self):
+    def test_a_directory_named_openai_yaml_is_not_a_file(self):
         r = self.skill(files={"agents/openai.yaml/x.txt": "x"})
-        self.assertIn("parity-skill-codex", ids(r))
+        self.assertIn("tool-metadata-generated", ids(r))
 
     def test_opencode_name_regex_is_stricter_than_the_skill_name_rule(self):
         for name in ("word--count", "word_count", "Word-Count", "word-count-", "-word"):
@@ -293,7 +276,7 @@ class TestSkillParity(E.SkillMixin, unittest.TestCase):
         self.assertEqual(r.failed, []); self.assertEqual(r.verdict, "REVIEW")
         self.assertEqual([c["id"] for c in r.needs_review], ["parity-invocation-hermes"])
         self.assertIn("Hermes", row(r, "parity-invocation-hermes")["reason"])
-        self.assertEqual(tool_status(self.skill_dir()), {"claude": "pass", "codex": "pass", "opencode": "pass", "hermes": "review"})
+        self.assertEqual(tool_status(self.skill_dir()), {"claude": "pass", "opencode": "pass", "hermes": "review"})
 
     def test_disable_model_invocation_false_is_not_a_reliance(self):
         r = self.disabled(value="false")
@@ -312,7 +295,7 @@ class TestSkillParity(E.SkillMixin, unittest.TestCase):
     def test_status_line_and_violations(self):
         self.skill(name="word-count", raw=E.GOOD_FM.format(name="other", extra="", body=""))
         d = self.skill_dir()
-        self.assertEqual(eva.parity_line(eva.parity_status(d)), "claude=pass codex=pass opencode=fail hermes=pass")
+        self.assertEqual(eva.parity_line(eva.parity_status(d)), "claude=pass opencode=fail hermes=pass")
         self.assertEqual(len(eva.parity_violations(d)), 1); self.assertTrue(eva.parity_violations(d)[0].startswith("[opencode]"))
 
     def test_unusable_skill_md_fails_every_tool(self):
@@ -341,13 +324,13 @@ class AgentBase(E.TmpMixin):
         self.assertIn(HERMES_ROW, ids(r)); self.assertEqual(r.verdict, "FAIL")
 
 class TestAgentParity(AgentBase, unittest.TestCase):
-    def test_complete_wrappers_are_consistent_and_codex_and_opencode_review_a_read_only_agent(self):
+    def test_complete_wrappers_are_consistent_and_opencode_reviews_a_read_only_agent(self):
         d, r = self.agent()
         self.consistent(r); self.assertEqual(r.kind, "agent")
-        self.assertEqual(tool_status(d), {"claude": "pass", "codex": "review", "opencode": "review", "hermes": "fail"})
+        self.assertEqual(tool_status(d), {"claude": "pass", "opencode": "review", "hermes": "fail"})
         self.assertEqual(row(r, HERMES_ROW)["status"], "fail")
         self.assertIn("UNVERIFIED", row(r, HERMES_ROW)["reason"])
-        self.assertEqual(eva.parity_line(eva.parity_status(d)), "claude=pass codex=review opencode=review hermes=fail")
+        self.assertEqual(eva.parity_line(eva.parity_status(d)), "claude=pass opencode=review hermes=fail")
         for t in eva.TOOLS: self.assertIn("[%s]" % t, row(r, "parity-wrapper-" + t)["reason"])
 
     def test_missing_wrapper_fails_only_that_tool(self):
@@ -370,7 +353,6 @@ class TestAgentParity(AgentBase, unittest.TestCase):
     def test_unparsable_wrappers_fail(self):
         cases = {"wrappers/claude/code-scout.md": ("no frontmatter at all\n", "frontmatter unusable"),
                  "wrappers/opencode/code-scout.md": ("---\ndescription: x\n", "frontmatter unusable"),
-                 "wrappers/codex/code-scout.toml": ("[agent]\nname = 'x'\n", "keys ['agent.name'] are not in the recorded"),
                  "wrappers/hermes/SOUL.md": ("   \n", "is empty")}
         for rel, (text, frag) in cases.items():
             d, r = self.agent(replace={rel: text})
@@ -381,14 +363,16 @@ class TestAgentParity(AgentBase, unittest.TestCase):
     def test_toml_edge_cases_are_failures_not_guesses(self):
         for text, frag in (('name = "code-scout"\nname = "x"\n', "duplicate key"), ('name = code-scout\n', "unsupported value"),
                            ('[mcp_servers.x]\ncommand = "y"\n', "'mcp_servers.x.command'"),
+                           ('[agent]\nname = \'x\'\n', "keys ['agent.name'] are not in the recorded"),
                            ('name = "code-scout"\ndescription = "x"\ndeveloper_instructions = "a\nb"\n', "unterminated string")):
             d, r = self.agent(replace={"wrappers/codex/code-scout.toml": text})
-            self.only(r, "parity-wrapper-codex"); self.assertIn(frag, row(r, "parity-wrapper-codex")["reason"], text)
+            self.assertIn(frag, "; ".join(PR.wrapper_states(d, PR.targets())["codex"]["problems"]), text)
             shutil.rmtree(d)
 
     def test_missing_required_keys_fail(self):
         d, r = self.agent(replace={"wrappers/codex/code-scout.toml": 'name = "code-scout"\ndescription = "x"\n'})
-        self.assertIn("developer_instructions: non-empty string required", row(r, "parity-wrapper-codex")["reason"]); shutil.rmtree(d)
+        self.assertIn("developer_instructions: non-empty string required",
+                      "; ".join(PR.wrapper_states(d, PR.targets())["codex"]["problems"])); shutil.rmtree(d)
         d, r = self.agent(replace={"wrappers/claude/code-scout.md": lambda t: t.replace("tools: Glob, Grep, Read\n", "")})
         self.assertIn("tools:", row(r, "parity-wrapper-claude")["reason"]); shutil.rmtree(d)
         d, r = self.agent(replace={"wrappers/opencode/code-scout.md": lambda t: re.sub(r"permission:\n(  .*\n)+", "", t)})
@@ -398,12 +382,11 @@ class TestAgentParity(AgentBase, unittest.TestCase):
 
     def test_name_and_description_must_match_agent_md(self):
         edits = {"claude": ("wrappers/claude/code-scout.md", lambda t: t.replace("name: code-scout", "name: other")),
-                 "codex": ("wrappers/codex/code-scout.toml", lambda t: t.replace('name = "code-scout"', 'name = "other"')),
                  "hermes": ("wrappers/hermes/SOUL.md", lambda t: t.replace("code-scout", "other"))}
         for tool, (rel, fn) in edits.items():
             d, r = self.agent(replace={rel: fn})
             self.only(r, "parity-wrapper-" + tool); shutil.rmtree(d)
-        for tool, rel in (("claude", "wrappers/claude/code-scout.md"), ("codex", "wrappers/codex/code-scout.toml"),
+        for tool, rel in (("claude", "wrappers/claude/code-scout.md"),
                           ("opencode", "wrappers/opencode/code-scout.md"), ("hermes", "wrappers/hermes/SOUL.md")):
             d, r = self.agent(replace={rel: lambda t: t.replace("Reads a repository", "Scans a repository")})
             self.only(r, "parity-wrapper-" + tool); self.assertIn("description", row(r, "parity-wrapper-" + tool)["reason"])
@@ -418,8 +401,7 @@ class TestAgentParity(AgentBase, unittest.TestCase):
 
     def test_invalid_optional_fields_fail(self):
         for rel, fn, tool in (("wrappers/opencode/code-scout.md", lambda t: t.replace("subagent", "sidekick"), "opencode"),
-                              ("wrappers/claude/code-scout.md", lambda t: t.replace("---\nYou", "model:\n---\nYou"), "claude"),
-                              ("wrappers/codex/code-scout.toml", lambda t: t + 'model = ""\n', "codex")):
+                              ("wrappers/claude/code-scout.md", lambda t: t.replace("---\nYou", "model:\n---\nYou"), "claude")):
             d, r = self.agent(replace={rel: fn}); self.only(r, "parity-wrapper-" + tool); shutil.rmtree(d)
 
     def test_hermes_config_yaml_is_optional_and_empty_is_refused(self):
@@ -445,7 +427,6 @@ class TestAgentPermissions(AgentBase, unittest.TestCase):
     def test_matching_write_web_agent_passes(self):
         d, r = self.agent(md=self.WRITE_MD)
         self.consistent(r)
-        self.assertEqual(row(r, "parity-permissions-codex")["status"], "needs-review")
         self.assertIn("edit: allow", open(os.path.join(d, "wrappers/opencode/code-scout.md")).read())
 
     def test_wrapper_grants_more_than_agent_md_fails_per_tool(self):
@@ -460,13 +441,6 @@ class TestAgentPermissions(AgentBase, unittest.TestCase):
         d, r = self.agent(md=self.WRITE_MD, caps={"read"})
         self.assertTrue({"parity-permissions-claude", "parity-permissions-opencode"} <= ids(r))
 
-    def test_codex_reviews_what_agent_md_lacks_whatever_the_other_wrappers_grant(self):
-        d, r = self.agent(md=self.WRITE_MD.replace("web_fetch", "shell"), caps={"read", "write", "web_fetch"})
-        self.assertNotIn("parity-permissions-codex", ids(r)); self.assertIn("parity-permissions-claude", ids(r))
-        self.assertEqual(row(r, "parity-permissions-codex")["reason"],
-                         "needs-review: [codex] Codex cannot restrict web_fetch, web_search, delegate, skill per agent; the agent "
-                         "runs with the parent session's sandbox")
-
     def test_opencode_permission_values_and_extras(self):
         for old, new, frag in (("edit: deny", "edit: sometimes", "permission.edit must be one of allow/ask/deny"),
                                ("webfetch: deny", "webfetch: deny\n  foo: deny", "['foo']")):
@@ -478,7 +452,7 @@ class TestAgentPermissions(AgentBase, unittest.TestCase):
 
     def test_unmapped_agent_tool_fails_every_permission_row_with_the_name(self):
         d, r = self.agent(md=AGENT_MD.replace("[search, read]", "[read, crm_lookup]"))
-        for t in ("claude", "codex", "opencode"):
+        for t in ("claude", "opencode"):
             self.assertIn("parity-permissions-" + t, ids(r)); self.assertIn("crm_lookup", row(r, "parity-permissions-" + t)["reason"])
         self.assertEqual(row(r, HERMES_ROW)["status"], "fail")
 
@@ -529,9 +503,9 @@ class TestIndexAndGoldenParity(E.SkillMixin, unittest.TestCase):
         by = {e["name"]: e for e in reg}
         self.assertEqual(by["word-count"]["parity"], {t: "pass" for t in eva.TOOLS}); self.assertEqual(by["word-count"]["english"], "pass")
         self.assertEqual(by["other"]["parity"]["opencode"], "fail")
-        self.assertEqual(by["code-scout"]["parity"], {"claude": "pass", "codex": "review", "opencode": "review", "hermes": "fail"})
+        self.assertEqual(by["code-scout"]["parity"], {"claude": "pass", "opencode": "review", "hermes": "fail"})
         self.assertEqual(by["code-scout"]["english"], "pass")
-        self.assertIn("| english | parity |", md); self.assertIn("claude=pass codex=review opencode=review hermes=fail", md)
+        self.assertIn("| english | parity |", md); self.assertIn("claude=pass opencode=review hermes=fail", md)
 
     def test_golden_skills_pass_every_parity_row_and_golden_agents_fail_only_on_missing_wrappers(self):
         for rel in ("skills/csv-cleaner", "skills/korean-proofreader", "skills/pdf-summarizer"):
@@ -554,7 +528,7 @@ class CliBase(T.Base):
 class TestValidateAndPlan(CliBase):
     def test_validate_prints_the_per_tool_parity_line(self):
         rc, out, _ = self.cli("validate", T.make_skill(self.tmp))
-        self.assertEqual(rc, 0, out); self.assertIn("multi-tool parity: claude=pass codex=pass opencode=pass hermes=pass", out)
+        self.assertEqual(rc, 0, out); self.assertIn("multi-tool parity: claude=pass opencode=pass hermes=pass", out)
 
     def test_parity_failure_is_a_validation_problem_and_names_the_tool(self):
         d = T.make_skill(self.tmp)
@@ -562,12 +536,14 @@ class TestValidateAndPlan(CliBase):
         with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as f: f.write(text.replace("name: branch-setup", "name: branch_setup"))
         rc, out, _ = self.cli("validate", d)
         self.assertEqual(rc, 1); self.assertIn("multi-tool parity rule: [opencode]", out)
-        self.assertIn("multi-tool parity: claude=pass codex=pass opencode=fail hermes=pass", out)
+        self.assertIn("multi-tool parity: claude=pass opencode=fail hermes=pass", out)
 
     def test_live_gate_refuses_a_parity_failure(self):
-        d = T.make_skill(self.tmp, extra_files={"agents/openai.yaml": "policy: strict\n"})
+        d = T.make_skill(self.tmp)
+        with open(os.path.join(d, "SKILL.md"), encoding="utf-8") as f: text = f.read()
+        with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as f: f.write(text.replace("metadata:\n", "metadata:\n  v: 1.0\n", 1))
         spec, problems = se.load_eval_set(d)
-        self.assertTrue(any(p.startswith("multi-tool parity rule: [codex]") for p in problems), problems)
+        self.assertTrue(any(p.startswith("multi-tool parity rule: [opencode]") for p in problems), problems)
         with self.assertRaises(se.EvalError) as cm:
             se.check_live_gates(mock.Mock(cmd="run", strict_budget=True), spec, problems, self.ws, None, [], se.DEFAULT_TOKENS, {}, 100.0)
         self.assertIn("validation problem", str(cm.exception))
@@ -590,16 +566,16 @@ class TestValidateAndPlan(CliBase):
             src = inspect.getsource(fn)
             self.assertNotIn("PORTABLE_NAME_RE", src); self.assertNotIn("parse_flat_toml", src)
 
-    def test_plan_shows_parity_and_tool_coverage_for_the_four_tools(self):
+    def test_plan_shows_parity_and_tool_coverage_for_every_tool(self):
         rc, out, _ = self.cli("plan", T.make_skill(self.tmp), "--workspace", self.ws)
         self.assertEqual(rc, 0, out)
-        self.assertIn("multi-tool parity (static, eva.py): claude=pass codex=pass opencode=pass hermes=pass", out)
-        self.assertIn("tool coverage (dynamic): claude=planned, codex=planned, opencode=not-run: engine not available, "
+        self.assertIn("multi-tool parity (static, eva.py): claude=pass opencode=pass hermes=pass", out)
+        self.assertIn("tool coverage (dynamic): claude=planned, opencode=not-run: engine not available, "
                       "hermes=not-run: engine not available", out)
 
-    def test_plan_with_one_engine_marks_the_other_not_selected(self):
-        rc, out, _ = self.cli("plan", T.make_skill(self.tmp), "--workspace", self.ws, "--engines", "claude")
-        self.assertIn("claude=planned, codex=not-run: engine not selected, opencode=not-run: engine not available", out)
+    def test_plan_with_another_engine_marks_claude_not_selected(self):
+        rc, out, _ = self.cli("plan", T.make_skill(self.tmp), "--workspace", self.ws, "--engines", "codex")
+        self.assertIn("claude=not-run: engine not selected, opencode=not-run: engine not available", out)
 
 class TestEnginesFailClosed(CliBase):
     def test_engine_table_is_unchanged(self):
@@ -654,25 +630,21 @@ class TestBuilderParityGate(T.Base):
         self.assertEqual(len(calls), 1); self.assertEqual(se.iterations(self.ws), [1])
 
     def test_each_tool_can_trip_the_gate(self):
-        """agents/openai.yaml is outside the builder's writable set (plan.md:501), so a builder write to it stops the
-        loop with builder-wrote-outside before the parity gate runs (plan.md:502). The codex case still trips the gate
-        when the bad agents/openai.yaml is planted before the loop and the builder writes nothing."""
         cases = {"claude": ("SKILL.md", lambda t: t.replace("Creates a git", "Creates a <git>")),
-                 "codex": ("agents/openai.yaml", lambda t: "policy: strict\n"),
                  "opencode": ("SKILL.md", lambda t: t.replace("---\n# Branch", "metadata:\n  v: 1.0\n---\n# Branch", 1)),
                  "hermes": ("SKILL.md", lambda t: t.replace("---\n# Branch", "metadata:\n  hermes: [a]\n---\n# Branch", 1))}
         for tool, (rel, fn) in cases.items():
-            for planted in ((False, True) if tool == "codex" else (False,)):
-                spec, _ = self.spec()
-                if planted: self.rewrite(spec, fn, rel)
-                r = self.loop(lambda it, sd, rel=rel, fn=fn, planted=planted:
-                              (None if planted else self.rewrite(spec, fn, rel)) or 0, spec)
-                if tool == "codex" and not planted:
-                    self.assertEqual(r["status"], "builder-wrote-outside", tool); self.assertIn(rel, r["problems"])
-                else:
-                    self.assertEqual(r["status"], "builder-parity-missing", (tool, planted))
-                    self.assertTrue(any(p.startswith("[%s]" % tool) for p in r["problems"]), (tool, r["problems"]))
-                shutil.rmtree(self.ws, ignore_errors=True); shutil.rmtree(spec["skill_dir"])
+            spec, _ = self.spec()
+            r = self.loop(lambda it, sd, rel=rel, fn=fn: self.rewrite(spec, fn, rel) or 0, spec)
+            self.assertEqual(r["status"], "builder-parity-missing", tool)
+            self.assertTrue(any(p.startswith("[%s]" % tool) for p in r["problems"]), (tool, r["problems"]))
+            shutil.rmtree(self.ws, ignore_errors=True); shutil.rmtree(spec["skill_dir"])
+
+    def test_a_builder_write_to_openai_yaml_stops_before_the_parity_gate(self):
+        """agents/openai.yaml is outside the builder's writable set (plan.md:501, :502)."""
+        spec, _ = self.spec()
+        r = self.loop(lambda it, sd: self.rewrite(spec, lambda t: "policy: strict\n", "agents/openai.yaml") or 0, spec)
+        self.assertEqual(r["status"], "builder-wrote-outside"); self.assertIn("agents/openai.yaml", r["problems"])
 
     def test_disable_model_invocation_without_equivalents_trips_the_gate(self):
         spec, _ = self.spec()
@@ -699,14 +671,14 @@ class TestBuilderParityGate(T.Base):
         import inspect
         self.assertIn("eva.parity_violations", inspect.getsource(se.loop))
 
-    def test_builder_prompt_requires_all_four_tools(self):
+    def test_builder_prompt_requires_every_tool(self):
         seen = []
         def fx(cmd, cwd, timeout, env=None):
             seen.append(cmd[2]); return 0, json.dumps({"type": "result", "total_cost_usd": 0.5}), ""
         it = os.path.join(self.tmp, "it"); os.makedirs(it)
         self.assertEqual(se.ClaudeBuilder("Improve it.", "claude-opus-5-5", se.Budget(10.0), exec_fn=fx)(it, "/skill"), 0)
         self.assertIn(eva.PARITY_BUILDER_RULE, seen[0]); self.assertIn(eva.ENGLISH_BUILDER_RULE, seen[0])
-        for word in ("Claude Code", "Codex CLI", "OpenCode", "Hermes Agent", "agents/openai.yaml", "opencode/autoinvoke",
+        for word in ("Claude Code", "OpenCode", "Hermes Agent", "agents/openai.yaml", "opencode/autoinvoke",
                      "disable-model-invocation", "^[a-z0-9]+(-[a-z0-9]+)*$"):
             self.assertIn(word, seen[0], word)
 
@@ -720,37 +692,32 @@ class TestToolCoverage(T.Base):
 
     def test_tool_coverage_function(self):
         c = se.tool_coverage(["claude", "codex"])
-        self.assertEqual({t: v["status"] for t, v in c.items()}, {"claude": "planned", "codex": "planned",
+        self.assertEqual({t: v["status"] for t, v in c.items()}, {"claude": "planned",
                          "opencode": "not-run: engine not available", "hermes": "not-run: engine not available"})
-        self.assertEqual(se.tool_coverage(["claude"])["codex"]["status"], "not-run: engine not selected")
-        c = se.tool_coverage(["claude", "codex"], {"claude": 4, "codex": 0})
+        self.assertEqual(se.tool_coverage(["codex"])["claude"]["status"], "not-run: engine not selected")
+        c = se.tool_coverage(["claude"], {"claude": 4})
         self.assertEqual((c["claude"]["status"], c["claude"]["graded_runs"]), ("run", 4))
-        self.assertEqual(c["codex"]["status"], "not-run: no graded runs")
-        self.assertEqual(se.tool_coverage(None, {"claude": 1})["codex"]["status"], "not-run: no graded runs")
+        self.assertEqual(se.tool_coverage(["claude"], {"claude": 0})["claude"]["status"], "not-run: no graded runs")
+        self.assertEqual(se.tool_coverage(None, {"codex": 1})["claude"]["status"], "not-run: no graded runs")
         self.assertNotIn("pass", " ".join(v["status"] for v in c.values()))
 
     def test_plan_json_records_coverage_at_run_start(self):
         spec, n, bench, gate = self.run_report()
         plan = T.rjson(os.path.join(self.ws, "iteration-%d" % n, "plan.json"))
         self.assertEqual({t: v["status"] for t, v in plan["tool_coverage"].items()},
-                         {"claude": "planned", "codex": "planned", "opencode": "not-run: engine not available",
+                         {"claude": "planned", "opencode": "not-run: engine not available",
                           "hermes": "not-run: engine not available"})
 
     def test_benchmark_records_which_tools_ran_and_never_marks_missing_engines_as_passed(self):
         spec, n, bench, gate = self.run_report()
         cov = bench["tool_coverage"]
-        self.assertEqual((cov["claude"]["status"], cov["codex"]["status"]), ("run", "run"))
+        self.assertEqual(cov["claude"]["status"], "run")
         self.assertGreater(cov["claude"]["graded_runs"], 0)
         for t in ("opencode", "hermes"):
             self.assertEqual(cov[t], {"status": "not-run: engine not available", "engine": None, "graded_runs": 0, "pending_runs": 0})
         self.assertEqual(bench["parity"], {t: "pass" for t in eva.TOOLS})
         on_disk = T.rjson(os.path.join(self.ws, "iteration-%d" % n, "benchmark.json"))
         self.assertEqual(on_disk["tool_coverage"], cov)
-
-    def test_one_engine_run_marks_the_other_not_selected(self):
-        spec, n, bench, gate = self.run_report(engines=self.engines()[:1])
-        self.assertEqual(bench["tool_coverage"]["codex"]["status"], "not-run: engine not selected")
-        self.assertEqual(bench["tool_coverage"]["claude"]["status"], "run")
 
     def test_comparison_md_has_a_tool_coverage_table(self):
         spec, n, bench, gate = self.run_report()
@@ -762,16 +729,16 @@ class TestToolCoverage(T.Base):
     def test_gate_lists_the_missing_tools_as_problems_and_adds_no_coverage_note(self):
         spec, n, bench, gate = self.run_report()
         self.assertFalse(any(x.startswith("per-tool dynamic coverage") for x in gate["notes"]), gate["notes"])
-        self.assertEqual([p for p in gate["problems"] if p.startswith("coverage-missing:")], T.CLAUDE_CODEX_MISSING)
+        self.assertEqual([p for p in gate["problems"] if p.startswith("coverage-missing:")], T.CLAUDE_ONLY_MISSING)
 
     def test_gate_problems_depend_on_coverage_and_a_bench_without_it_fails_closed(self):
         spec, n, bench, gate = self.run_report()
         a, b = dict(bench), dict(bench)
-        a["tool_coverage"] = se.tool_coverage(["claude", "codex"], {"claude": 1, "codex": 1})
+        a["tool_coverage"] = se.tool_coverage(["claude"], {"claude": 1})
         b.pop("tool_coverage"); b["gate"] = None
         ga, gb = se.compute_gate(a), se.compute_gate(b)
         other = [p for p in ga["problems"] if not p.startswith("coverage-missing:")]
-        self.assertEqual(ga["problems"], other + T.CLAUDE_CODEX_MISSING)
+        self.assertEqual(ga["problems"], other + T.CLAUDE_ONLY_MISSING)
         self.assertEqual(gb["problems"], other + T.NO_COVERAGE_MISSING)
         self.assertTrue(ga["needs_approval"] and gb["needs_approval"])
         self.assertEqual(ga["human_pending_only"], gb["human_pending_only"]); self.assertEqual(ga["notes"], gb["notes"])

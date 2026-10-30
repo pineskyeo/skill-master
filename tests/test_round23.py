@@ -39,7 +39,7 @@ class TestGradeScope(T.Base):
         full = se.grade_counts(self.sp, self.it)
         one = se.grade_counts(self.sp, self.it, (frozenset({1}), frozenset({1})))
         self.assertLess(one[0], full[0]); self.assertLess(one[1], full[1])
-        self.assertEqual(one[1], 2)  # case 1, run 1, one pair per engine
+        self.assertEqual(one[1], 1)  # case 1, run 1, one pair for the one engine
         self.assertEqual(se.grade_counts(self.sp, self.it, (None, None)), full)
 
     def test_unknown_case_refused(self):

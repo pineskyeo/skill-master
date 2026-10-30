@@ -176,7 +176,7 @@ class TestSymlinkEscape(Base):
     def assert_refused(self, spec, frag):
         n = se.run_iteration(spec, self.ws, self.engines(), runs=1, log=quiet)
         stopped = plan_of(self.ws, n)["stopped"]
-        self.assertIn(frag, stopped); self.assertEqual(self.fc.calls, []); self.assertEqual(self.fx.calls, [])
+        self.assertIn(frag, stopped); self.assertEqual(self.fc.calls, [])
         self.assertEqual(os.listdir(self.runs), [])
         self.assertNotIn(SECRET, json.dumps(plan_of(self.ws, n)))
 

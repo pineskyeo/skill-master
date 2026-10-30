@@ -447,6 +447,7 @@ class TestPinnedSandbox(Pinned):
         self.assertIn("a pinned skill of %s changed after the iteration started; nothing was run" % NAME, out + err)
 
     def test_codex_installs_the_pin_under_agents_skills_and_claims_nothing(self):
+        self.allow_codex_under_test()
         rc, out, err, fake = self.live("--engines", "codex", "--no-strict-budget", "--price", "codex=1,10")
         self.assertEqual(rc, 0, out + err)
         call = fake.calls[0]
@@ -621,7 +622,7 @@ class TestPinBinding(Pinned):
             self.assertEqual(eva.main(["generate", d]), 0)
         ws = REG.agent_workspace(d)
         I.fake_iteration(d, ws, self.runs)
-        for tool in ("codex", "opencode", "hermes"):
+        for tool in ("opencode", "hermes"):
             rc, out, err = AE.cli("approve", d, "--gate", "coverage_waiver:" + tool)
             self.assertEqual(rc, 0, out + err)
         rc, out, err = AE.cli("agent", "report", d)

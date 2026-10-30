@@ -7,7 +7,7 @@ one unwrapped form: an optional `env`, optional NAME=value assignments, sh, bash
 clusters of which only the last holds `c` (as its last letter), SCRIPT, then any positional arguments. Any other
 command whose program is a shell raises NormalizeError (fail closed: a write it hides must never pass no_writes).
 collab_tool_call is refused: a spawned agent's own tool calls are not in this stream (UNVERIFIED), so a write there
-could pass no_writes. An `error` item is a CLI notice, not a tool call (skill_eval.py CODEX_GRADER_ALLOWED_ITEMS)."""
+could pass no_writes. An `error` item is a CLI notice, not a tool call."""
 import os, re, shlex
 from engine.normalize import NormalizeError, checked, events, tokens
 

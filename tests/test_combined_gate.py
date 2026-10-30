@@ -106,7 +106,7 @@ class Combined(RB.Bound):
         self.assertEqual(self.line(self.plan(), "combined approval gate: "),
                          "combined approval gate: requirements_eval_set=approved by test-approver (the live gate needs "
                          "it, or both requirements and eval_set)")
-        self.assertIn((7, "approvals", "pass"), self.states(self.plan()))
+        self.assertIn((6, "approvals", "pass"), self.states(self.plan()))
 
     def test_the_gates_declaration_names_the_combined_gate(self):
         doc = rjson(os.path.join(T.ROOT, "policy", "gates.json"))
