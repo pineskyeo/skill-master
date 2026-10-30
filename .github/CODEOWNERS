@@ -1,0 +1,7 @@
+**/requirements*.md @pineskyeo
+**/evals.json @pineskyeo
+**/scenarios/ @pineskyeo
+/policy/ @pineskyeo
+/rules/ @pineskyeo
+/golden/ @pineskyeo
+/.github/CODEOWNERS @pineskyeo
