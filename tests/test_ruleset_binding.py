@@ -555,7 +555,7 @@ PREDICATE_IDS = ["regression-baseline", "regression-previous", "low-agreement", 
                  "stale-rules-unrecorded", "execution-errors", "trigger-failed", "llm-ungraded", "human-pending",
                  "coverage-missing", "coverage-waived", "coverage-not-required"]
 G1_COVERAGE = dict({name: T.NO_COVERAGE_MISSING for name in B1_FIXTURES}, everything=[
-    T.coverage_missing("claude", T.NO_COVERAGE_ENTRY), T.coverage_missing("codex", T.NOT_SELECTED),
+    T.coverage_missing("claude", T.NO_COVERAGE_ENTRY),
     T.coverage_missing("opencode", T.NOT_AVAILABLE), T.coverage_missing("hermes", T.NO_COVERAGE_ENTRY)])
 
 
@@ -667,7 +667,7 @@ class TestGateOrder(T.Base):
         trace, report = [], []
         with self.traced("LIVE_GATES", trace): self.check(report)
         self.assertEqual(trace, declared()[0])
-        self.assertEqual(len(trace), 11)
+        self.assertEqual(len(trace), 10)
         self.assertTrue(report, "control: the unapproved fixture fails some gates and every gate still ran")
 
     def test_check_live_gates_runs_every_declared_gate_when_all_pass(self):
@@ -756,8 +756,7 @@ class TestPlanLines(Bound):
         self.assertEqual(st["subscription-auth"], "skipped: " + se.AUTH_STATUS_SKIPPED)
         self.assertEqual((st["per-call-bound"], st["estimate-within-budget"]), (NO_BUDGET, NO_BUDGET))
         self.assertTrue(st["approvals"].startswith("fail: gate requirements not approved (write "), st["approvals"])
-        for gid in ("eval-set-valid", "strict-budget", "codex-grader-not-under-test", "grader-not-model-under-test",
-                    "rule-review", "priced-models"):
+        for gid in ("eval-set-valid", "strict-budget", "grader-tier-distinct", "rule-review", "priced-models"):
             self.assertEqual(st[gid], "pass", gid)
         self.assertEqual(self.status_calls, [])
 
@@ -773,7 +772,7 @@ class TestPlanLines(Bound):
         report = []
         se.check_live_gates(a, self.spec, [], self.ws, None, se.make_engines(a, self.spec), se.parse_token_overrides(None),
                             se.parse_price_overrides(None), 0.01, report=report)
-        fails = [r.splitlines()[0] for r in report if r not in (se.AUTH_STATUS_SKIPPED, se.CODEX_AUTH_SKIPPED)]
+        fails = [r.splitlines()[0] for r in report if r != se.AUTH_STATUS_SKIPPED]
         self.assertEqual([s[len("fail: "):] for s in st.values() if s.startswith("fail: ")], fails)
         self.assertTrue(st["estimate-within-budget"].startswith("fail: estimate $"), st)
         self.assertNotIn("\n", st["estimate-within-budget"])

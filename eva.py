@@ -186,7 +186,7 @@ def english_eval_problems(skill_dir):
 
 def review_items(path):
     """Findings that need a recorded human decision before anything is spent: the needs-review rows of the English-only
-    rule (non-English run-output matchers) and of the parity rule (for example unverified Codex metadata fields), as
+    rule (non-English run-output matchers) and of the parity rule (for example Hermes invocation control), as
     'check-id: reason' strings. skill_eval refuses --live and stops the loop on them until `approve --gate rule_review`."""
     r = Report(path, detect_kind(path) or "unknown")
     s = english_scan(path)
@@ -196,12 +196,12 @@ def review_items(path):
     return ["%s: %s" % (c["id"], c["reason"]) for c in r.needs_review]
 
 # The files whose bytes a rule-review decision covers, by unit kind, from the rows review_items collects (a trailing '/'
-# stands for every file under the folder). Skill: english-output-matchers reads the evals JSON, parity-skill-codex
-# agents/openai.yaml. Agent: english-output-matchers reads scenarios/, parity-permissions-codex and -opencode read the
-# AGENT.md tools and their own wrapper. SKILL.md only turns parity-invocation-hermes and parity-skill-codex on or off,
-# which already changes the findings, so a builder edit to it keeps the decision.
-REVIEW_SOURCES = {"skill": ("evals/evals.json", "evals/trigger_evals.json", "agents/openai.yaml"),
-                  "agent": ("AGENT.md", "scenarios/", "wrappers/codex/", "wrappers/opencode/")}
+# stands for every file under the folder). Skill: english-output-matchers reads the evals JSON. Agent:
+# english-output-matchers reads scenarios/, parity-permissions-opencode reads the AGENT.md tools and its own wrapper.
+# SKILL.md only turns parity-invocation-hermes on or off, which already changes the findings, so a builder edit to it
+# keeps the decision.
+REVIEW_SOURCES = {"skill": ("evals/evals.json", "evals/trigger_evals.json"),
+                  "agent": ("AGENT.md", "scenarios/", "wrappers/opencode/")}
 
 def review_sources(path):
     """Relative paths of the files whose bytes a recorded review_items decision also covers: a finding shows an excerpt
@@ -222,26 +222,26 @@ def review_sources(path):
 
 
 # ---------- Multi-tool parity rule (owner decision 2026-10-19 18:43 KST; design: notes/multi-tool-parity-plan.md) ----------
-# Every skill and agent must be created for all four tools together. Formats per ~/workspace/pstack-trial/runs/engrule/
+# Every skill and agent must be created for all three tools together. Formats per ~/workspace/pstack-trial/runs/engrule/
 # design.md sections 2-3; nothing here was re-verified against a primary source (UNVERIFIED items: plan section 8).
-# Skill: the shared SKILL.md is the single source; agents/openai.yaml (Codex) is optional. Agent: AGENT.md is the source and
-# wrappers/<tool>/ holds one thin file per tool.
-TOOLS = ("claude", "codex", "opencode", "hermes")
+# Skill: the shared SKILL.md is the single source. Agent: AGENT.md is the source and wrappers/<tool>/ holds one thin file
+# per tool.
+TOOLS = ("claude", "opencode", "hermes")
 TOOL_LABELS = {"claude": "Claude Code", "codex": "Codex CLI", "opencode": "OpenCode", "hermes": "Hermes Agent"}
 PARITY_BUILDER_RULE = (
-    "Keep the skill loadable by all four tools together (Claude Code, Codex CLI, OpenCode, Hermes Agent): SKILL.md is the "
+    "Keep the skill loadable by all three tools together (Claude Code, OpenCode, Hermes Agent): SKILL.md is the "
     "single shared source. The name must match ^[a-z0-9]+(-[a-z0-9]+)*$ and the folder name; every metadata value must be "
     "a string; do not put Hermes keys (metadata.hermes) in the frontmatter; do not use disable-model-invocation unless "
     "metadata 'opencode/autoinvoke: \"false\"' and agents/openai.yaml 'policy: allow_implicit_invocation: false' are "
-    "also set; keep agents/openai.yaml valid if it exists. The loop stops if the parity check fails.")
+    "also set. The loop stops if the parity check fails.")
 
 
 PARITY_ROW_TOOLS = {
-    "parity-skill-claude": ("claude",), "parity-skill-codex": ("codex",), "parity-skill-opencode": ("opencode",),
-    "parity-skill-hermes": ("hermes",), "parity-invocation-control": ("claude", "codex", "opencode"),
+    "parity-skill-claude": ("claude",), "parity-skill-opencode": ("opencode",),
+    "parity-skill-hermes": ("hermes",), "parity-invocation-control": ("claude", "opencode"),
     "parity-invocation-hermes": ("hermes",), "parity-agent-name": TOOLS,
-    "parity-wrapper-claude": ("claude",), "parity-wrapper-codex": ("codex",), "parity-wrapper-opencode": ("opencode",),
-    "parity-wrapper-hermes": ("hermes",), "parity-permissions-claude": ("claude",), "parity-permissions-codex": ("codex",),
+    "parity-wrapper-claude": ("claude",), "parity-wrapper-opencode": ("opencode",),
+    "parity-wrapper-hermes": ("hermes",), "parity-permissions-claude": ("claude",),
     "parity-permissions-opencode": ("opencode",), "parity-permissions-hermes": ("hermes",)}
 
 
@@ -305,7 +305,7 @@ def parity_violations(path):
     return [c["reason"] for c in parity_report(path).failed]
 
 def parity_line(status):
-    """One line: 'claude=pass codex=pass opencode=fail hermes=pass' (+ '(unverified: ...)' for tools with open items)."""
+    """One line: 'claude=pass opencode=fail hermes=pass' (+ '(unverified: ...)' for tools with open items)."""
     return " ".join("%s=%s%s" % (t, status[t]["status"], " (unverified: %s)" % ",".join(
         x.replace("parity-", "") for x in status[t]["unverified"]) if status[t]["unverified"] else "") for t in TOOLS)
 

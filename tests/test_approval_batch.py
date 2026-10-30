@@ -9,6 +9,7 @@ import contextlib, hashlib, io, json, os, re, subprocess, sys, unittest
 from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_skill_eval as T
+import test_multi_tool_parity as P
 from test_skill_eval import se, evals_doc, make_skill, write, wjson, rjson
 from engine import approvals as A, spend
 
@@ -159,8 +160,11 @@ class TestPendingKinds(Batch):
         wjson(os.path.join(it, "benchmark.json"), {"tool_coverage": coverage, "gate": gate})
 
     def test_a_rule_review_item(self):
-        os.makedirs(os.path.join(self.units["alpha"][0], "agents"))
-        write(os.path.join(self.units["alpha"][0], "agents", "openai.yaml"), "interface:\n  display_name: X\n")
+        d = self.units["alpha"][0]
+        os.makedirs(os.path.join(d, "agents"))
+        write(os.path.join(d, "agents", "openai.yaml"), P.GENERATED_OPENAI_YAML)
+        write(os.path.join(d, "SKILL.md"), T.read(os.path.join(d, "SKILL.md")).replace(
+            "metadata:\n", 'disable-model-invocation: true\nmetadata:\n  opencode/autoinvoke: "false"\n', 1))
         items = self.alpha()
         self.assertEqual([i["gate"] for i in items], ["rule_review"])
         self.assert_row(items[0], "alpha", "skill", "rule_review", self.wsp("alpha"), self.spec("alpha"))
@@ -178,7 +182,7 @@ class TestPendingKinds(Batch):
         self.assertEqual(items[0]["review"], [("problem", "p1: a gate problem")])
 
     def test_a_coverage_waiver_item(self):
-        self.iteration(False, {"claude": RAN, "codex": RAN, "opencode": NOT_RUN, "hermes": RAN})
+        self.iteration(False, {"claude": RAN, "opencode": NOT_RUN, "hermes": RAN})
         items = self.alpha()
         self.assertEqual([i["gate"] for i in items], ["coverage_waiver:opencode"])
         self.assert_row(items[0], "alpha", "skill", "coverage_waiver:opencode", self.wsp("alpha"), self.spec("alpha"))
@@ -194,8 +198,7 @@ class TestPendingKinds(Batch):
         rc, out, err = self.cli("agent", "report", agent, "--workspace", ws)
         self.assertEqual(rc, 3, out + err)
         items = se.pending_items(se.unit_pairs([agent], [ws]))
-        gates = [COMBINED, "rule_review", "registration", "coverage_waiver:codex", "coverage_waiver:opencode",
-                 "coverage_waiver:hermes"]
+        gates = [COMBINED, "rule_review", "registration", "coverage_waiver:opencode", "coverage_waiver:hermes"]
         self.assertEqual([i["gate"] for i in items], gates)
         spec = se.agent_spec(se.Agent(agent))
         for item, gate in zip(items, gates):
@@ -209,7 +212,7 @@ class TestBatchRecording(Batch):
         it = os.path.join(self.wsp(name), "iteration-1"); os.makedirs(it)
         gate = {"needs_approval": False, "problems": []}
         wjson(os.path.join(it, "gate.json"), gate)
-        cov = {"claude": RAN, "codex": RAN, "opencode": NOT_RUN, "hermes": NOT_RUN}
+        cov = {"claude": RAN, "opencode": NOT_RUN, "hermes": NOT_RUN}
         wjson(os.path.join(it, "benchmark.json"), {"tool_coverage": cov, "gate": gate})
 
     def test_each_item_is_its_own_record_and_nothing_is_asked(self):

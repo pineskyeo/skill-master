@@ -1,13 +1,12 @@
 """Round-13 tests: the skill scanner keeps the shallowest visible depth per real folder, so visiting a deeper alias
 first (root/a/b/link -> root/z with root/z/s/SKILL.md, depth limit 3) does not hide the shallower root/z/s. Checked
-for skills_under itself, preflight and the Codex grader's prelaunch check. Everything is mocked."""
+for skills_under itself and preflight. Everything is mocked."""
 import os, subprocess, sys, unittest
 from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_skill_eval as T
 from test_skill_eval import se
 from test_round3_isolation import Base
-from test_round10 import FakeCodexGrader, CASE, ITEMS
 from test_round11 import skill
 
 _patches = []
@@ -62,18 +61,6 @@ class TestShallowestDepthWins(Base):
             alias_tree(ag, link_top, real_top, "hidden-" + real_top)
             probs = se.preflight(self.spec()[0], ["codex"], self.runs)
             self.assertTrue(any("hidden-" + real_top in p for p in probs), (link_top, real_top, probs))
-            T.shutil.rmtree(os.path.join(self.tmp, ".agents"))
-
-    def test_codex_grader_refuses_before_launch(self):
-        for link_top, real_top in LAYOUTS:
-            ag = os.path.join(self.tmp, ".agents", "skills")
-            alias_tree(ag, link_top, real_top, "hidden-" + real_top)
-            fx, b = FakeCodexGrader(), se.Budget(10.0)
-            with self.assertRaises(se.EvalError) as cm: se.CodexGrader(exec_fn=fx, budget=b).grade(CASE, {}, ITEMS)
-            self.assertIn("codex grader launch refused", str(cm.exception))
-            self.assertIn("hidden-" + real_top, str(cm.exception))
-            self.assertEqual((fx.calls, b.spent), ([], 0.0))
-            self.assertEqual(os.listdir(self.runs), [])
             T.shutil.rmtree(os.path.join(self.tmp, ".agents"))
 
 if __name__ == "__main__":

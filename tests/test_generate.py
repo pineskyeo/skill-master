@@ -279,7 +279,7 @@ class TestExpectedBytes(Base):
                 self.assert_check(d, 0)
                 rows = {c["id"]: c["status"] for c in eva.check(d).checks}
                 for rid in ("agent-frontmatter-v2", "wrappers-generated", "parity-agent-name", "parity-wrapper-claude",
-                            "parity-wrapper-codex", "parity-wrapper-opencode", "parity-wrapper-hermes"):
+                            "parity-wrapper-opencode", "parity-wrapper-hermes"):
                     self.assertEqual(rows[rid], "pass", rid)
 
     def test_every_file_is_utf8_without_bom_with_one_trailing_newline_and_mode_0644(self):
@@ -982,27 +982,26 @@ class TestParityRowsOnGeneratedOutput(Base):
         r = eva.check(d)
         return {c["id"]: c["status"] for c in r.checks}
 
-    def assert_rows(self, rows, codex):
+    def assert_rows(self, rows):
         self.assertEqual(rows["parity-agent-name"], "pass")
-        for tool in ("claude", "codex", "opencode", "hermes"):
+        for tool in ("claude", "opencode", "hermes"):
             self.assertEqual(rows["parity-wrapper-" + tool], "pass", tool)
         self.assertEqual(rows["parity-permissions-claude"], "pass")
-        self.assertEqual(rows["parity-permissions-codex"], codex)
         self.assertEqual(rows["parity-permissions-opencode"], "needs-review")
         self.assertEqual(rows["parity-permissions-hermes"], "fail")
         self.assertEqual(rows["wrappers-generated"], "pass")
         self.assertEqual(rows["english-wrappers"], "pass")
 
     def test_a_read_only_agent(self):
-        self.assert_rows(self.rows(self.generated()), "needs-review")
+        self.assert_rows(self.rows(self.generated()))
 
-    def test_an_agent_with_all_six_unrestrictable_classes_passes_codex(self):
+    def test_an_agent_with_every_capability(self):
         d = self.generated(md=agent_md(caps=", ".join(VOCAB)))
-        self.assert_rows(self.rows(d), "pass")
+        self.assert_rows(self.rows(d))
 
     def test_the_shell_capable_path_end_to_end(self):
         d = self.generated("shell-runner", shell_md())
-        self.assert_rows(self.rows(d), "needs-review")
+        self.assert_rows(self.rows(d))
         self.assert_check(d, 0)
         rc, out, _ = run_main(["check", d, "--json"])
         data = json.loads(out)

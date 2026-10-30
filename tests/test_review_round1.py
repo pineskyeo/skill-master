@@ -113,7 +113,7 @@ class TestHermesFailsClosed(P.AgentBase, unittest.TestCase):
     def test_the_other_tools_are_still_judged_on_their_own(self):
         d, r = self.agent()
         self.assertEqual({t: s["status"] for t, s in eva.parity_status(d).items()},
-                         {"claude": "pass", "codex": "review", "opencode": "review", "hermes": "fail"})
+                         {"claude": "pass", "opencode": "review", "hermes": "fail"})
 
 # ---------- P1-3: review findings stop the loop and the live gates until a decision is recorded ----------
 def matcher_doc(**check):
@@ -125,10 +125,10 @@ class TestReviewDecision(P.CliBase):
     def skill(self, doc=None, **kw):
         return T.make_skill(self.tmp, evals=doc if doc is not None else matcher_doc(), **kw)
 
-    def test_review_items_name_the_matcher_and_the_codex_metadata(self):
+    def test_review_items_name_the_matcher_and_no_openai_yaml_field(self):
         d = self.skill(extra_files={"agents/openai.yaml": "interface:\n  display_name: X\n"})
         items = eva.review_items(d)
-        self.assertEqual(sorted(i.split(":")[0] for i in items), ["english-output-matchers", "parity-skill-codex"])
+        self.assertEqual(sorted(i.split(":")[0] for i in items), ["english-output-matchers"])
         clean = os.path.join(self.tmp, "clean"); os.makedirs(clean)
         self.assertEqual(eva.review_items(T.make_skill(clean, evals=T.evals_doc(human=False))), [])
 
@@ -151,7 +151,7 @@ class TestReviewDecision(P.CliBase):
     def test_live_gate_refuses_until_recorded_and_the_decision_is_bound_to_the_findings(self):
         d = self.skill(); spec, problems = se.load_eval_set(d); os.makedirs(self.ws, exist_ok=True)
         self.assertEqual(problems, [])
-        a = mock.Mock(cmd="plan", strict_budget=True)
+        a = mock.Mock(cmd="plan", strict_budget=True, grader_model=se.DEFAULT_GRADER_MODEL)
         def messages():
             rep = []
             with mock.patch.object(se, "live_estimate", return_value={"unpriced_models": [], "total_usd": 0.0}):
@@ -414,32 +414,6 @@ class TestScenarioFileNames(P.AgentBase, unittest.TestCase):
         d, r = self.agent(); os.makedirs(os.path.join(d, "scenarios", "sub")); E.wtext(os.path.join(d, "scenarios", "sub", CHEROKEE + ".txt"), "x")
         self.assertIn("(file name) [Cherokee]", row(eva.check(d), "english-scenarios")["reason"])
 
-# ---------- parity-1: unverified openai.yaml fields are a review, never a pass ----------
-class TestCodexUnverifiedFields(E.SkillMixin, unittest.TestCase):
-    def yaml(self, text):
-        return self.skill(files={"agents/openai.yaml": text})
-
-    def test_unrecognized_fields_give_review_and_never_codex_pass(self):
-        for text, fields in (("interface:\n  display_name: Word Count\n", "interface.display_name"),
-                             ("policy:\n  allow_implicit_invocation: false\n  other: 1\n", "policy.other"),
-                             ("dependencies:\n  tools: [a]\n", "dependencies.tools"), ("unknown_key: x\n", "unknown_key")):
-            r = self.yaml(text); c = row(r, "parity-skill-codex")
-            self.assertEqual(c["status"], "needs-review", text); self.assertIn(fields, c["reason"]); self.assertEqual(r.verdict, "REVIEW")
-            self.assertNotIn("parity-skill-codex", ids(r)); self.assertNotIn("satisfies the Codex CLI rules", c["reason"])
-            self.assertEqual(eva.parity_status(os.path.join(self.tmp, "word-count"))["codex"]["status"], "review", text)
-            self.assertIn("codex=review", eva.parity_line(eva.parity_status(os.path.join(self.tmp, "word-count"))))
-            self.assertTrue(any(i.startswith("parity-skill-codex") for i in eva.review_items(os.path.join(self.tmp, "word-count"))))
-            shutil.rmtree(os.path.join(self.tmp, "word-count"))
-
-    def test_only_the_verified_field_passes(self):
-        for text in ("policy:\n  allow_implicit_invocation: true\n", "# comment only\n", ""):
-            r = self.yaml(text); self.assertEqual(r.verdict, "PASS", (text, r.failed, r.needs_review))
-            self.assertIn("agents/openai.yaml", row(r, "parity-skill-codex")["reason"]); shutil.rmtree(os.path.join(self.tmp, "word-count"))
-
-    def test_a_real_problem_is_still_a_fail_not_a_review(self):
-        r = self.yaml("policy: strict\ninterface:\n  x: 1\n")
-        self.assertIn("parity-skill-codex", ids(r))
-
 # ---------- parity-2: escapes only where the format interprets them ----------
 class TestEscapeContexts(unittest.TestCase):
     ESC = "\\uAC00"
@@ -494,9 +468,8 @@ class TestWrapperEscapes(P.AgentBase, unittest.TestCase):
 # ---------- reporting-3: coverage uses the summarize() criterion ----------
 class TestCoverageCriterion(T.Base):
     def test_collected_but_ungraded_runs_are_pending_not_run(self):
-        c = se.tool_coverage(["claude", "codex"], {"claude": 0, "codex": 2}, {"claude": 3, "codex": 2})
+        c = se.tool_coverage(["claude"], {"claude": 0}, {"claude": 3})
         self.assertEqual(c["claude"]["status"], se.PENDING); self.assertEqual((c["claude"]["graded_runs"], c["claude"]["pending_runs"]), (0, 3))
-        self.assertEqual((c["codex"]["status"], c["codex"]["pending_runs"]), ("run", 0))
         self.assertEqual(se.tool_coverage(["claude"], {"claude": 0}, {"claude": 0})["claude"]["status"], se.NOT_GRADED)
         self.assertNotIn("pass", c["claude"]["status"].replace("pending", ""))
         self.assertIn(T.coverage_missing("claude", se.PENDING), se.compute_gate({"tool_coverage": c})["problems"])
@@ -514,7 +487,7 @@ class TestCoverageCriterion(T.Base):
         bench = se.build_benchmark(spec, self.ws, n)
         cov = bench["tool_coverage"]
         self.assertEqual(cov["claude"]["status"], se.PENDING); self.assertEqual(cov["claude"]["graded_runs"], 0)
-        self.assertEqual(cov["claude"]["pending_runs"], touched); self.assertEqual(cov["codex"]["status"], "run")
+        self.assertEqual(cov["claude"]["pending_runs"], touched)
         gate = se.compute_gate(bench)
         self.assertIn(T.coverage_missing("claude", se.PENDING), gate["problems"])
         md = se.comparison_md(bench, gate, n)

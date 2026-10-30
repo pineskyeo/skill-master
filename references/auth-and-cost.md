@@ -13,7 +13,7 @@ This page is for the operator of `skill_eval.py`. It covers the two auth profile
 | `claude auth status` and the Codex ChatGPT login check | yes | no |
 | API-key variables allowed | none | the names listed per engine (shipped: `ANTHROPIC_API_KEY` for Claude) |
 | gateway base URLs allowed | none | the URLs listed per engine (shipped: none) |
-| engines without a per-call cap (Codex) and the Codex grader | allowed under `--no-strict-budget` | always refused |
+| engines without a per-call cap (Codex) | refused by default; `--no-strict-budget` opens only the strict-budget gate | always refused |
 | Claude calls (engine, grader, builder) | allowed, each with `--max-budget-usd` | always refused, before the call starts |
 | `--budget-usd` | required for a live start | required, and it is a hard cap |
 
@@ -53,7 +53,7 @@ Under `company`, such a call starts only when both hold:
 |---|---|
 | a call of an engine with an enforceable per-call cap | that per-call cap |
 | any Claude call (exec, trigger, grader, pairwise, calibrate, builder) | not admitted: refused in API-key mode (`--max-budget-usd` is not an enforceable per-call cap) |
-| Codex engine, Codex grader | none enforceable: refused in API-key mode |
+| Codex engine | none enforceable: refused in API-key mode |
 
 Under `personal-mac` each Claude call still gets `--max-budget-usd`, which is `CLAUDE_CAP_HEADROOM` (0.5) of the remaining budget, floored to cents.
 

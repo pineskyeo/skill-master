@@ -295,7 +295,7 @@ class TestCodeReviewer(TmpMixin, unittest.TestCase):
     def test_static_criteria(self):
         r = eva.check(CR)
         self.assertEqual(r.verdict, "FAIL")  # no wrappers/: only the parity rows fail
-        self.assertEqual(self.ids(r), {"parity-wrapper-claude", "parity-wrapper-codex", "parity-wrapper-opencode",
+        self.assertEqual(self.ids(r), {"parity-wrapper-claude", "parity-wrapper-opencode",
                                        "parity-wrapper-hermes", "parity-permissions-hermes", "wrappers-generated"})
         r = minus_parity(minus_language(r))
         self.assertEqual(r.verdict, "PASS", r.failed)

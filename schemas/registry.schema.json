@@ -42,7 +42,7 @@
             "additionalProperties": false,
             "required": ["gate", "principal"],
             "properties": {
-              "gate": {"enum": ["registration", "coverage_waiver:claude", "coverage_waiver:codex", "coverage_waiver:opencode",
+              "gate": {"enum": ["registration", "coverage_waiver:claude", "coverage_waiver:opencode",
                                 "coverage_waiver:hermes"]},
               "principal": {"$ref": "#/$defs/principal"},
               "reason": {"type": "string", "pattern": "^[!-~]([ -~]{0,198}[!-~])?\\Z"}

@@ -278,7 +278,7 @@ class TestAgents(E.TmpMixin, unittest.TestCase):
         d, r = self.agent(s1=dict(self.S1, must_include=[KO]))
         self.assertEqual(failed_ids(r), {P.HERMES_ROW, "wrappers-generated"}, r.failed)
         self.assertEqual([c["id"] for c in r.needs_review],
-                         ["english-output-matchers", "parity-permissions-codex", "parity-permissions-opencode"])
+                         ["english-output-matchers", "parity-permissions-opencode"])
         self.assertIn("scenarios/01.json:", reason(r, "english-output-matchers"))
 
     def test_scenario_json_escapes_are_decoded(self):

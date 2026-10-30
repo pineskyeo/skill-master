@@ -67,16 +67,13 @@ class TestClears(Waiver):
             self.assertEqual(gate["coverage"][tool], "waived by machine policy %s" % st["sha256"][:12])
             self.assertIn("coverage waived: %s (dynamic eval %s) by machine policy %s (%s, expires %s): %s" % (
                 tool, NOT_AVAILABLE, st["sha256"], T.TEST_PRINCIPAL, st["expires"], REASON), gate["notes"])
-        for tool in ("claude", "codex"):
-            self.assertEqual(gate["coverage"][tool], "run")
+        self.assertEqual(gate["coverage"]["claude"], "run")
         md = T.read(os.path.join(self.ws, "iteration-%d" % n, "comparison.md"))
         self.assertIn("| waived by machine policy %s |" % st["sha256"][:12], md)
 
-    def test_codex_not_run_is_not_cleared_by_the_machine_waiver(self):
+    def test_claude_not_run_is_not_cleared_by_the_machine_waiver(self):
         self.sign()
-        n, bench, gate = CG.RB.Bound.report(self)
-        self.assertEqual(CG.missing_tools(gate), ["codex"])
-        self.assertNotEqual(bench["coverage_waivers"]["codex"].get("source"), "machine")
+        self.assertNotEqual(se.waiver_verdicts(self.spec, self.ws)["claude"].get("source"), "machine")
 
     def test_a_per_unit_waiver_still_counts_and_is_shown_as_its_own(self):
         self.sign()
@@ -159,21 +156,29 @@ class TestClearsNothing(Waiver):
         wjson(self.path, dict(rec, reason=REASON + "!"))
         self.assertEqual(self.state()["status"], "invalid")
 
+    def test_a_record_that_lists_a_tool_outside_machine_waivable(self):
+        with self.assertRaises(A.Refused) as cm: self.sign(("claude", "opencode"))
+        self.assertIn("claude", str(cm.exception)); self.assertIn("nothing was recorded", str(cm.exception))
+        self.assertFalse(os.path.exists(self.path))
+        T.install_test_approver(self, signers=T.shared_keys()["signers"], run=T.keygen_runner(T.shared_keys()["dir"]))
+        wjson(self.path, self.signed(tools=("claude", "opencode")))
+        st = self.state()
+        self.assertEqual(st["status"], "invalid"); self.assertIn("claude", st["why"])
+        rec = dict(self.signed(), method="recorded", recorded_by=T.TEST_PRINCIPAL, tools=["claude", "opencode"])
+        del rec["principal"], rec["signature"]
+        wjson(self.path, rec)
+        st = self.state()
+        self.assertEqual(st["status"], "invalid"); self.assertIn("claude", st["why"])
+        n, (bench, gate) = self.covered()
+        self.assertEqual(CG.missing_tools(gate), ["opencode", "hermes"])
+
     def test_a_record_that_lists_codex(self):
         with self.assertRaises(A.Refused) as cm: self.sign(("opencode", "codex"))
         self.assertIn("codex", str(cm.exception)); self.assertIn("nothing was recorded", str(cm.exception))
         self.assertFalse(os.path.exists(self.path))
-        T.install_test_approver(self, signers=T.shared_keys()["signers"], run=T.keygen_runner(T.shared_keys()["dir"]))
-        wjson(self.path, self.signed(tools=("codex", "opencode")))
+        wjson(self.path, dict(self.sign(), tools=["codex", "opencode"]))
         st = self.state()
-        self.assertEqual(st["status"], "invalid"); self.assertIn("codex", st["why"])
-        rec = dict(self.signed(), method="recorded", recorded_by=T.TEST_PRINCIPAL, tools=["codex", "opencode"])
-        del rec["principal"], rec["signature"]
-        wjson(self.path, rec)
-        st = self.state()
-        self.assertEqual(st["status"], "invalid"); self.assertIn("codex", st["why"])
-        n, (bench, gate) = self.covered()
-        self.assertEqual(CG.missing_tools(gate), ["opencode", "hermes"])
+        self.assertEqual(st["status"], "invalid"); self.assertIn("field tools", st["why"])
 
     def test_a_record_from_the_future(self):
         self.sign()
@@ -301,7 +306,7 @@ class TestAgentReport(Waiver):
         self.assertEqual(gate["coverage"]["opencode"], "waived by machine policy %s" % st["sha256"][:12])
         self.assertIn("machine waiver: approved by %s, sha256 %s, tools opencode,hermes, expires %s, reason: %s\n"
                       % (T.TEST_PRINCIPAL, st["sha256"], st["expires"], REASON), out)
-        self.assertEqual(CG.missing_tools(gate), ["codex"])
+        self.assertEqual(CG.missing_tools(gate), [])
 
 
 class TestTestProcessGuard(unittest.TestCase):

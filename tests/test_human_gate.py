@@ -335,7 +335,7 @@ class CommandLineApprover(T.Base):
         it = os.path.join(self.ws, "iteration-1"); os.makedirs(it)
         gate = {"needs_approval": False, "problems": []}
         wjson(os.path.join(it, "gate.json"), gate)
-        cov = {"claude": B.RAN, "codex": B.RAN, "opencode": B.NOT_RUN, "hermes": B.RAN}
+        cov = {"claude": B.RAN, "opencode": B.NOT_RUN, "hermes": B.RAN}
         wjson(os.path.join(it, "benchmark.json"), {"tool_coverage": cov, "gate": gate})
         feed(self, REASON + "\n")
         rc, out, err = cli("approve", "--batch", "--unit", self.d, "--workspace", self.ws)
@@ -359,7 +359,7 @@ class CommandLineApprover(T.Base):
         self.assertIn("recorded run --live by %s (plan sha256 " % USER, err)
         n = se.iterations(self.ws)[-1]
         se.grade_iteration(self.spec, self.ws, n, self.grader(), log=quiet)
-        for t in ("codex", "opencode", "hermes"):
+        for t in ("opencode", "hermes"):
             feed(self, REASON + "\n")
             rc, out, err = cli("approve", self.d, "--workspace", self.ws, "--gate", "coverage_waiver:" + t)
             self.assertEqual(rc, 0, err)

@@ -100,11 +100,11 @@ Every refusal exits with status 2. [Approval gates](approval-gates.md) lists the
 | Flag | Meaning |
 |---|---|
 | `--workspace` | The workspace folder. The default is `<skill parent>/<skill name>-workspace`. |
-| `--engines` | Comma-separated engines, default `claude,codex`. Only `claude` and `codex` have an engine. `opencode` and `hermes` are refused as not available. |
+| `--engines` | Comma-separated engines, default `claude`. Only `claude` and `codex` have an engine. `opencode` and `hermes` are refused as not available. |
 | `--runs` | Runs per case. |
 | `--baseline {none,old}`, `--old-skill` | Compare with no skill (`without_skill`) or with an older skill folder (`old_skill`). |
 | `--claude-model`, `--codex-model`, `--claude-arg`, `--codex-arg`, `--claude-effort`, `--codex-effort` | The models, extra CLI arguments and effort of the engines under test. |
-| `--grader-engine {claude,codex}`, `--grader-model`, `--grader-effort` | The grader and blind pairwise judge. Codex is never an eval target through this option. |
+| `--grader-engine {claude}`, `--grader-model`, `--grader-effort` | The grader and blind pairwise judge. |
 | `--price KEY=IN,OUT`, `--tokens KIND=IN,OUT` | Price and token overrides for the estimate. |
 | `--cases`, `--llm-cases`, `--trigger-queries` | Counts for `estimate` and `plan` only. Other commands refuse them. |
 | `--live` | Start a real run. Human-only. |
@@ -172,13 +172,15 @@ Each flag means what it means for the skill commands.
 
 ## The eval harness (skill_eval.py)
 
-`skill_eval.py` runs a skill's eval set with Claude Code and Codex CLI, with the skill and without it (`--baseline none`), or against an older copy (`--baseline old` with `--old-skill`, or `<workspace>/skill-snapshot`). It then grades the runs, aggregates them and writes a gate. [Eval set format](eval-set-format.md) describes the input files, the workspace layout and the deviations from skill-creator. The first proposed live target is `golden/skills/csv-cleaner`, because it lives in this repository, its `scripts/clean.py` is deterministic and its input files are in `evals/files/`.
+`skill_eval.py` runs a skill's eval set with Claude Code, with the skill and without it (`--baseline none`), or against an older copy (`--baseline old` with `--old-skill`, or `<workspace>/skill-snapshot`). It then grades the runs, aggregates them and writes a gate. [Eval set format](eval-set-format.md) describes the input files, the workspace layout and the deviations from skill-creator. The first proposed live target is `golden/skills/csv-cleaner`, because it lives in this repository, its `scripts/clean.py` is deterministic and its input files are in `evals/files/`.
 
 ### Live gates
 
-No `claude` or `codex` CLI and no model runs for `run`, `grade`, `calibrate` or `loop` unless the command line holds `--live`, a finite `--budget-usd` above 0 and `--auth-profile`, and the start is recorded as an unsigned approval bound to the plan hash and the budget ([Approval gates](approval-gates.md)). The exception is `check-builtin-plugins`, which starts the `claude` CLI without `--live` and makes no model call. `run`, `grade`, `calibrate` and `loop` then check the live gates in the order that `policy/gates.json` declares under `live`: `eval-set-valid`, `strict-budget`, `codex-grader-not-under-test`, `subscription-auth`, `grader-not-model-under-test`, `rule-review`, `approvals` (`requirements` and `eval_set`), `priced-models`, `preflight` (`run` and `loop` only), `per-call-bound` and `estimate-within-budget`. `loop` checks them again before every iteration, with the reloaded eval set and the remaining budget, and stops with `gates-failed` on a failure.
+No `claude` or `codex` CLI and no model runs for `run`, `grade`, `calibrate` or `loop` unless the command line holds `--live`, a finite `--budget-usd` above 0 and `--auth-profile`, and the start is recorded as an unsigned approval bound to the plan hash and the budget ([Approval gates](approval-gates.md)). The exception is `check-builtin-plugins`, which starts the `claude` CLI without `--live` and makes no model call. `run`, `grade`, `calibrate` and `loop` then check the live gates in the order that `policy/gates.json` declares under `live`: `eval-set-valid`, `strict-budget`, `subscription-auth`, `grader-tier-distinct`, `rule-review`, `approvals` (`requirements` and `eval_set`), `priced-models`, `preflight` (`run` and `loop` only), `per-call-bound` and `estimate-within-budget`. `loop` checks them again before every iteration, with the reloaded eval set and the remaining budget, and stops with `gates-failed` on a failure.
 
-`--strict-budget` is the default. Codex has no per-call budget cap, so its budget is a soft limit: one call can exceed `--budget-usd`, and the Codex `auth.json` copy is readable by the agent under test. So the default `--strict-budget` refuses every `--live` run that selects Codex, including the default `--engines claude,codex`. `--no-strict-budget` is the risky opt-out. It prints both risks as warnings to stderr, and `plan.json` records `budget_enforcement` (`per_call_cap` for Claude, `soft_limit` for Codex). The Codex grader is refused while Codex is also under test.
+`grader-tier-distinct` compares tiers, the word opus, sonnet or haiku in a model name (`MODEL_TIERS` in `policy/models.json`). The grader tier must differ from every model under test and from the builder. The gate refuses a name with no tier word or with two, and it refuses a model under test with no recorded name (the Codex CLI default). A Codex model name holds no tier word, so `run --live` and `loop --live` refuse Codex under test. `grade`, `agent run`, `agent loop` and `agent grade` apply the same rule; `grade` and `agent grade` read the engines and `builder_model` of `plan.json`; `calibrate` checks only the grader's own name, because it has no model under test and no builder.
+
+`--strict-budget` is the default. Codex has no per-call budget cap, so its budget is a soft limit: one call can exceed `--budget-usd`, and the Codex `auth.json` copy is readable by the agent under test. So the default `--strict-budget` refuses every `--live` run that selects Codex. `--no-strict-budget` is the risky opt-out of the `strict-budget` gate only. A Codex model name holds no tier word, so `grader-tier-distinct` still refuses Codex under test. A start that passes every gate prints both risks as warnings to stderr, and `plan.json` records `budget_enforcement` (`per_call_cap` for Claude, `soft_limit` for Codex).
 
 ### The loop builder
 

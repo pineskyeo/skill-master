@@ -199,8 +199,9 @@ class TestCodexChatGPTAuth(Base):
 
 class TestApiEquivalentCost(Base):
     def test_cost_recorded_apart_from_spend(self):
+        self.allow_codex_under_test()
         spec, _ = self.spec(evals=evals_doc(human=False))
-        engs = self.engines()
+        engs = self.engines_with_codex()
         b = se.Budget(1000.0)
         n = se.run_iteration(spec, self.ws, engs, runs=1, budget=b, prices={"codex": (2.0, 10.0)}, log=quiet)
         it = os.path.join(self.ws, "iteration-%d" % n)

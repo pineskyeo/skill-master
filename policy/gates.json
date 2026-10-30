@@ -4,9 +4,8 @@
   "live": [
     {"id": "eval-set-valid", "label": "The eval set has no validation problem."},
     {"id": "strict-budget", "label": "Under --strict-budget (the default) every engine under test has an enforceable per-call budget cap."},
-    {"id": "codex-grader-not-under-test", "label": "A codex grader is not used while codex is under test."},
     {"id": "subscription-auth", "label": "Subscription auth only: no API-key variable, and a claude.ai login wherever claude is called."},
-    {"id": "grader-not-model-under-test", "label": "The claude grader model differs from every claude model under test."},
+    {"id": "grader-tier-distinct", "label": "The grader tier (opus, sonnet, haiku) differs from every model-under-test tier and from the builder tier; the gate refuses an unknown tier."},
     {"id": "rule-review", "label": "Every rule-review finding has a signed decision bound to these exact findings."},
     {"id": "approvals", "label": "The requirements_eval_set gate, or both the requirements and eval_set gates, carry current signed approvals."},
     {"id": "priced-models", "label": "Every model the command calls has a price."},

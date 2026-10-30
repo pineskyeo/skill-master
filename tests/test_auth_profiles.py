@@ -22,8 +22,6 @@ NEEDS_FLAG = ("a live run requires --auth-profile (personal-mac or company); the
               "profile")
 CAP_REQUIRED = "a hard cap is required in API-key mode: pass a finite --budget-usd > 0 (auth profile company)"
 CODEX_REFUSED = "codex: no enforceable per-call cap in API-key mode (auth profile company); refusing it"
-CODEX_GRADER_REFUSED = ("codex grader: no enforceable per-call cap in API-key mode (its budget is a soft limit); "
-                        "refusing it")
 CLAUDE_TAIL = " refused in API-key mode (auth profile company): --max-budget-usd is not an enforceable per-call cap; refusing it"
 CLAUDE_REFUSED = "claude:" + CLAUDE_TAIL
 CLAUDE_GRADER_REFUSED = "claude grader:" + CLAUDE_TAIL
@@ -42,9 +40,9 @@ NO_REOPEN = " (--no-strict-budget does not reopen it)"
 API_KEY_TRAILER = ("DRY RUN: nothing was executed. Real runs need --live --auth-profile company --budget-usd X (a hard "
                    "cap in USD: API-key calls are billed per token, and each call starts only when the spend so far plus "
                    "its per-call cap fits), no claude call (the claude engine, the claude grader and the builder are "
-                   "refused in API-key mode: --max-budget-usd is not an enforceable per-call cap), no engine or grader "
-                   "without a per-call cap (codex and the codex grader: no "
-                   "enforceable per-call cap in API-key mode; --no-strict-budget does not reopen them), approved "
+                   "refused in API-key mode: --max-budget-usd is not an enforceable per-call cap), no engine "
+                   "without a per-call cap (codex: no "
+                   "enforceable per-call cap in API-key mode; --no-strict-budget does not reopen it), approved "
                    "requirements/eval_set, no validation or preflight problems, and an estimate within budget.")
 A5_TRAILER = ("DRY RUN: nothing was executed. Real runs need --live --budget-usd X (API-equivalent USD), subscription "
               "auth only, approved requirements/eval_set, no validation or preflight problems, and an estimate within "
@@ -271,11 +269,11 @@ class TestSelection(Profiled):
         spec, problems = se.load_eval_set(self.d)
         engines = se.make_engines(a, spec)
         est = se.estimate(*se.spec_counts(spec, a), a.runs, [(e.name, e.model) for e in engines], a.baseline,
-                          a.grader_model, se.DEFAULT_TOKENS, {}, grader_engine=a.grader_engine)
+                          a.grader_model, se.DEFAULT_TOKENS, {})
         self.assertIsNone(se.AUTH["profile"])
         a5 = se.plan_text(spec, problems, a, engines, os.path.realpath(self.ws), est, se.DEFAULT_TOKENS, {}).splitlines()
         self.assertEqual([x for x in lines if x != PERSONAL_LINE][:len(a5)], a5)
-        self.assertEqual(len(states(out)), 11)
+        self.assertEqual(len(states(out)), 10)
         self.assertEqual(states(out), states("\n".join(a5)))
         rc, out2, _ = self.cli("plan", self.d, "--workspace", self.ws, "--auth-profile", "personal-mac")
         self.assertIn("auth profile: personal-mac (billing subscription)", out2.splitlines())
@@ -508,40 +506,13 @@ class TestCompanyCodex(Profiled):
                                       "--budget-usd", "1", "--engines", "claude,codex", "--price", "codex=1,1", *extra)
                 self.assertEqual(rc, 2, extra); self.assertIn(CODEX_REFUSED, err)
 
-    def test_the_codex_grader_is_refused_in_the_gate_state_and_at_a_live_start(self):
-        se.run_iteration(se.load_eval_set(self.d)[0], self.ws, [se.ClaudeCodeEngine("claude-opus-5-5", exec_fn=T.FakeClaude())],
-                         runs=1, log=quiet)
-        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": KEY}), mock.patch.object(se, "live_exec", T._forbidden):
-            rc, out, _ = self.cli("grade", self.d, "--workspace", self.ws, "--live", "--dry-run", "--auth-profile",
-                                  "company", "--budget-usd", "5", "--grader-engine", "codex")
-            self.assertEqual(rc, 3); self.assertIn("  - " + CODEX_GRADER_REFUSED, out.splitlines())
-            for extra in ([], ["--no-strict-budget"]):
-                rc, _, err = self.cli("grade", self.d, "--workspace", self.ws, "--live", "--auth-profile", "company",
-                                      "--budget-usd", "5", "--grader-engine", "codex", *extra)
-                self.assertEqual(rc, 2, extra); self.assertIn(CODEX_GRADER_REFUSED, err)
-        a = se.build_parser().parse_args(["grade", self.d, "--grader-engine", "codex", "--budget-usd", "5"])
-        self.activate("company")
-        report = []
-        se._live_strict_budget(se._LiveGates(a, None, [], self.ws, 1, [], {}, {}, 5.0, None, report))
-        self.assertEqual(report, [CODEX_GRADER_REFUSED])
-        with self.assertRaises(se.EvalError) as cm:
-            se._live_strict_budget(se._LiveGates(a, None, [], self.ws, 1, [], {}, {}, 5.0, None, None))
-        self.assertEqual(str(cm.exception), CODEX_GRADER_REFUSED)
-
     def test_spend_refuses_codex_calls_that_skip_the_gate(self):
         from engine import spend
-        import test_round10
         self.activate("company")
         b = se.Budget(5.0)
         b.ledger = spend.Ledger(self.ws, "grade", "company", "api_key", 5.0)
         b.ledger.open([])
         self.addCleanup(b.ledger.close)
-        fx = test_round10.FakeCodexGrader()
-        with self.assertRaises(se.EvalError) as cm:
-            se.CodexGrader(exec_fn=fx, budget=b).grade(test_round10.CASE, {"final": "x", "tool_calls": []},
-                                                        test_round10.ITEMS)
-        self.assertEqual(str(cm.exception), CODEX_GRADER_REFUSED)
-        self.assertEqual(fx.calls, [])
         fc = T.FakeCodex()
         n = se.run_iteration(se.load_eval_set(self.d)[0], self.ws, [se.CodexEngine(exec_fn=fc)], runs=1, budget=b,
                              prices={"codex": (1.0, 1.0)}, log=quiet)
@@ -549,32 +520,7 @@ class TestCompanyCodex(Profiled):
         self.assertEqual(fc.calls, [])
         rows = spend.read_rows(os.path.join(self.ws, "spend.jsonl"))[0]
         self.assertEqual([(r["type"], r["decision"], r["engine"], r["reason"]) for r in rows],
-                         [("intent", "refused", "codex", CODEX_GRADER_REFUSED), ("intent", "refused", "codex", CODEX_REFUSED)])
-
-    def test_the_codex_grader_is_refused_under_loop_at_the_gate_and_in_spend(self):
-        from engine import spend
-        import test_round10
-        self.activate("company")
-        for extra in ([], ["--no-strict-budget"]):
-            a = se.build_parser().parse_args(["loop", self.d, "--grader-engine", "codex", "--budget-usd", "5",
-                                              "--engines", "claude", *extra])
-            report = []
-            se._live_strict_budget(se._LiveGates(a, None, [], self.ws, 1, [], {}, {}, 5.0, None, report))
-            self.assertEqual(report, [CODEX_GRADER_REFUSED], extra)
-        b = se.Budget(5.0)
-        b.ledger = spend.Ledger(self.ws, "loop", "company", "api_key", 5.0)
-        b.ledger.open([])
-        self.addCleanup(b.ledger.close)
-        fx = test_round10.FakeCodexGrader()
-        for kind in ("grader", "pairwise", "calibrate"):
-            g = se.CodexGrader(exec_fn=fx, budget=b)
-            with self.assertRaises(se.EvalError) as cm, se.spend_scope(g, kind=kind, iteration=1):
-                g.grade(test_round10.CASE, {"final": "x", "tool_calls": []}, test_round10.ITEMS)
-            self.assertEqual(str(cm.exception), CODEX_GRADER_REFUSED, kind)
-        self.assertEqual(fx.calls, [])
-        rows = spend.read_rows(os.path.join(self.ws, "spend.jsonl"))[0]
-        self.assertEqual([(r["command"], r["kind"], r["decision"], r["reason"]) for r in rows],
-                         [("loop", k, "refused", CODEX_GRADER_REFUSED) for k in ("grader", "pairwise", "calibrate")])
+                         [("intent", "refused", "codex", CODEX_REFUSED)])
 
 
 class TestCompanyText(Profiled):
@@ -593,17 +539,9 @@ class TestCompanyText(Profiled):
         out = self.plan("--auth-profile", "company", "--engines", "claude,codex", "--budget-usd", "1")
         self.assertIn(API_KEY_TOTAL, self.total(out))
         self.assertIn("budget: " + CODEX_REFUSED + NO_REOPEN, out.splitlines())
-        self.assertNotIn("--no-strict-budget allows it", out)
+        self.assertNotIn("--no-strict-budget opens only the strict-budget gate", out)
         self.assertEqual(self.trailer(out), API_KEY_TRAILER)
         self.assertNotIn("subscription", self.total(out) + self.trailer(out))
-
-    def test_the_company_plan_states_the_codex_grader_refusal(self):
-        out = self.plan("--auth-profile", "company", "--engines", "claude", "--grader-engine", "codex", "--budget-usd", "1")
-        lines = out.splitlines()
-        self.assertIn("grader budget: " + CODEX_GRADER_REFUSED + NO_REOPEN, lines)
-        self.assertIn("grader isolation: none: the codex grader never starts in API-key mode", lines)
-        self.assertNotIn("SOFT LIMIT", out)
-        self.assertNotIn(se.CODEX_GRADER_NOTE, out)
 
     def test_company_estimate_and_dry_run_text(self):
         rc, out, err = self.cli("estimate", self.d, "--workspace", self.ws, "--auth-profile", "company",
@@ -622,10 +560,6 @@ class TestCompanyText(Profiled):
             self.assertIn("(subscription: not billed per token)", self.total(out))
             self.assertIn("budget: " + se.SOFT_LIMIT_NOTE % "codex", out.splitlines())
             self.assertEqual(self.trailer(out), A5_TRAILER)
-            out = self.plan("--engines", "claude", "--grader-engine", "codex", *extra)
-            self.assertIn("grader isolation: " + se.CODEX_GRADER_NOTE, out.splitlines())
-            self.assertTrue(any(x.startswith("grader budget: SOFT LIMIT (codex has no per-call cap)")
-                                for x in out.splitlines()))
 
 
 class TestBindingAndHashes(Profiled):
@@ -847,11 +781,10 @@ class TestCompanyRefusesClaude(Profiled):
 
     def test_c4_pin_soft_texts(self):
         from engine import spend
-        self.assertEqual((spend.no_cap_reason("exec", "codex", "company"), spend.no_cap_reason("grader", "codex", "company")),
-                         (CODEX_REFUSED, CODEX_GRADER_REFUSED))
+        self.assertEqual(spend.no_cap_reason("exec", "codex", "company"), CODEX_REFUSED)
         self.activate("company")
-        self.assertEqual(se.api_key_soft_refusals([se.CodexEngine()], "codex", True, True),
-                         [CODEX_REFUSED, CODEX_GRADER_REFUSED])
+        self.assertEqual(se.api_key_soft_refusals([se.CodexEngine()], "claude", True, True),
+                         [CODEX_REFUSED, CLAUDE_GRADER_REFUSED])
         led = spend.Ledger(self.ws, "run", "company", "api_key", 1.0); led.open([]); self.addCleanup(led.close)
         t = led.admit("exec", "codex", None, 1, 0.0, None, 0.02, False)
         self.assertEqual((t.decision, t.reason), ("refused", CODEX_REFUSED))

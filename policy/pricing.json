@@ -5,7 +5,7 @@
   "codex": {
     "verified": false,
     "prices": null,
-    "note": "UNVERIFIED: Codex/OpenAI prices are not listed because they are not verified from a primary source; pass --price codex=IN,OUT. The Codex grader price assumption (skill_eval.py CODEX_GRADER_ASSUMED_PRICE) is the most expensive PRICES row by input + output, computed in code, and is also unverified: it is not shown to be an upper bound of the real price. Override with --price grader=IN,OUT."
+    "note": "UNVERIFIED: Codex/OpenAI prices are not listed because they are not verified from a primary source; pass --price codex=IN,OUT."
   },
   "values": {
     "PRICES": {
@@ -28,6 +28,6 @@
       "note": "Assumed tokens per call (input, output). Assumptions, not measurements: replace with --tokens after a pilot."
     },
     "CLAUDE_CAP_HEADROOM": {"value": 0.5, "type": "float", "source": "house", "note": "H: Claude --max-budget-usd gets only this share of the remaining budget, because how far the CLI can overshoot its cap is not documented."},
-    "WORST_CASE_FACTOR": {"value": 3.0, "type": "float", "source": "house", "note": "H: the worst-case bound of a call is assumed tokens x this factor x price. Codex has no per-call cap, so its budget is a SOFT LIMIT: a call starts only when this bound fits the remaining budget, and every Codex grader call is charged at least this bound."}
+    "WORST_CASE_FACTOR": {"value": 3.0, "type": "float", "source": "house", "note": "H: the worst-case bound of a call is assumed tokens x this factor x price. Codex has no per-call cap, so its budget is a SOFT LIMIT: a call starts only when this bound fits the remaining budget."}
   }
 }

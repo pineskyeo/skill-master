@@ -6,10 +6,10 @@ Iteration layout: <workspace>/iteration-N/<tool>/<scenario id>/<configuration>/r
 stream), transcript.json (the normalized transcript, only for a run whose agent load passed), run.json and, after
 `agent grade`, grading.json. configuration is new_agent, or old_agent for the previous version (--old-agent)."""
 import hashlib, json, os, re
-from engine import approvals, generate, registry
+from engine import generate, registry
 from engine.primitives import transcript as transcript_primitive
 
-TOOLS = approvals.COVERAGE_TOOLS
+TOOLS = ("claude", "codex", "opencode", "hermes")
 CONFIGS = ("new_agent", "old_agent")
 MULTI_TURN_VERIFIED = {t: False for t in TOOLS}
 WRAPPERS = {"claude": "wrappers/claude/{name}.md", "codex": "wrappers/codex/{name}.toml",

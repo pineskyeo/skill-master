@@ -1,6 +1,6 @@
 # Approval gates
 
-`approve` (every gate, `rule_review`, `requirements_eval_set` and the four `coverage_waiver:<tool>` gates included), `approve --batch`, `machine-waiver sign` and `machine-waiver revoke`, `register`, a user-scope `install`, and the start of every `--live` run of `run`, `grade`, `calibrate`, `loop` and the `agent` commands go through `engine/approvals.py`. `python3 eva.py eval ...` reaches the same code, because it calls `skill_eval.main`.
+`approve` (every gate, `rule_review`, `requirements_eval_set` and the three `coverage_waiver:<tool>` gates included), `approve --batch`, `machine-waiver sign` and `machine-waiver revoke`, `register`, a user-scope `install`, and the start of every `--live` run of `run`, `grade`, `calibrate`, `loop` and the `agent` commands go through `engine/approvals.py`. `python3 eva.py eval ...` reaches the same code, because it calls `skill_eval.main`.
 
 Approvals are unsigned recorded decisions (unit N1, pinesky's decision of 2026-10-28). No approver key, signers file, ssh-agent, passphrase, typed challenge, TTY, agent-ancestry check or approver session is needed. A command run from a script, a pipe or an agent session records the approval the same way a person at a Terminal does. Every other rail stays: the gate hashes, `ruleset_sha256`, the staleness checks, every gate problem list, a finite `--budget-usd` and `--auth-profile` for `--live`, the estimate within budget, the spend ledger and the API-key refusals.
 
@@ -91,9 +91,9 @@ A `HOME` that is not an absolute path makes the machine waiver read `invalid`. I
 
 ## Coverage waivers
 
-Registration needs a graded dynamic run on every tool that `coverage_required` in `policy/gate.rules.json` lists, or a recorded waiver for each listed tool that did not run (plan.md:1135, Appendix E Q5). The file lists claude, codex, opencode and hermes. OpenCode and Hermes have no engine, so a skill registers today only with `coverage_waiver:opencode` and `coverage_waiver:hermes` records or a machine waiver that lists them, plus `coverage_waiver:codex` when Codex was not selected. `coverage_required` is part of the rule bundle, so removing a tool from it moves `ruleset_sha256` and every existing approval reads stale. The loader refuses anything but a non-empty list of unique names from the four tools. The texts of `policy/gate.rules.json` still say "signed" waiver; that file feeds the ruleset hash, so N1 left it unchanged.
+Registration needs a graded dynamic run on every tool that `coverage_required` in `policy/gate.rules.json` lists, or a recorded waiver for each listed tool that did not run (plan.md:1135, Appendix E Q5). The file lists claude, opencode and hermes. OpenCode and Hermes have no engine, so a skill registers today only with `coverage_waiver:opencode` and `coverage_waiver:hermes` records or a machine waiver that lists them. `coverage_required` is part of the rule bundle, so removing a tool from it moves `ruleset_sha256` and every existing approval reads stale. The loader refuses anything but a non-empty list of unique names from the three tools. `approve --gate coverage_waiver:codex` exits 2. A `coverage_waiver:codex` record left in `approvals.json` never counts and `register` does not copy it. A `registration.json` that holds that key reads `invalid` (`does not match schemas/registration.schema.json`). The texts of `policy/gate.rules.json` still say "signed" waiver; that file feeds the ruleset hash, so N1 left it unchanged.
 
-`approve --gate coverage_waiver:<tool>` records one waiver. `engine/approvals.py` holds the four gate names.
+`approve --gate coverage_waiver:<tool>` records one waiver. `engine/approvals.py` holds the three gate names.
 
 **What a waiver binds.** The record's `sha256` is `gate_hash("coverage_waiver:<tool>")`, a sha256 over labeled lines for the tool, the skill tree hash and the eval set hash (`gate_hash("eval_set")`). The record also names the gate, the unit and `ruleset_sha256`. A waiver stops counting when the skill folder, the eval set or the rule bundle changes, and it reads `invalid` under another tool's key or for another unit.
 
@@ -129,7 +129,7 @@ A tool of `coverage_required` that did not run counts as waived when its own `co
 `agent run --live` and `agent loop --live` refuse to start without two things in the agent workspace (`--workspace`, else `<parent>/<name>-workspace`):
 
 - A current `requirements_eval_set` record, or current `requirements` and `eval_set` records. For an agent, `requirements` hashes `<workspace>/requirements.md` and `eval_set` hashes every `scenarios/*.json` of the agent folder.
-- A current `rule_review` decision whenever `eva.review_items` lists findings for the agent folder. For a generated agent these are `parity-permissions-codex` and `parity-permissions-opencode`. The decision binds the finding texts and the bytes of AGENT.md, every scenario and the Codex and OpenCode wrappers (`eva.review_sources`).
+- A current `rule_review` decision whenever `eva.review_items` lists findings for the agent folder. For a generated agent this is `parity-permissions-opencode`. The decision binds the finding texts and the bytes of AGENT.md, every scenario and the OpenCode wrapper (`eva.review_sources`).
 
 | Gate | Refusal |
 |---|---|

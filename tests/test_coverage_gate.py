@@ -20,7 +20,7 @@ REASON = "OpenCode and Hermes engines do not exist yet; parity checked by hand"
 AT = "2026-10-25T09:41:00Z"
 SHA, OTHER = "ab" * 32, "cd" * 32
 KOREAN = "".join(map(chr, (0xD55C, 0xAD6D, 0xC5B4)))
-TOOLS = ("claude", "codex", "opencode", "hermes")
+TOOLS = ("claude", "opencode", "hermes")
 NOT_AVAILABLE = "not-run: engine not available"
 _patches = []
 
@@ -88,12 +88,12 @@ class Cov(RB.Bound):
 
 
 class TestMissingTools(Cov):
-    def test_a_claude_and_codex_iteration_lists_opencode_and_hermes_as_gate_problems(self):
+    def test_a_claude_iteration_lists_opencode_and_hermes_as_gate_problems(self):
         n = self.run_both()
         bench, gate = self.report(n)
         self.assertEqual(missing_tools(gate), ["opencode", "hermes"], gate["problems"])
         self.assertEqual([p for p in gate["problems"] if not p.startswith("coverage-missing:")], [],
-                         "control: the claude and codex iteration is otherwise clean")
+                         "control: the claude iteration is otherwise clean")
         self.assertTrue(gate["needs_approval"])
         for tool in ("opencode", "hermes"):
             text = line_for(gate["problems"], tool)
@@ -101,12 +101,18 @@ class TestMissingTools(Cov):
         self.assertFalse(any(x.startswith("per-tool dynamic coverage") for x in gate["notes"]), gate["notes"])
         self.assertEqual(rjson(os.path.join(self.ws, "iteration-%d" % n, "gate.json")), gate)
 
-    def test_codex_not_selected_is_a_missing_tool(self):
-        n, bench, gate = RB.Bound.report(self)
-        self.assertEqual(missing_tools(gate), ["codex", "opencode", "hermes"])
-        self.assertIn("not-run: engine not selected", line_for(gate["problems"], "codex"))
+    def test_claude_not_selected_is_a_missing_tool(self):
+        cov = se.tool_coverage(["codex"], {"codex": 1})
+        gate = se.compute_gate(dict(RB.B1_FIXTURES["clean"][0], tool_coverage=cov))
+        self.assertEqual(missing_tools(gate), ["claude", "opencode", "hermes"])
+        self.assertIn("not-run: engine not selected", line_for(gate["problems"], "claude"))
 
-    def test_all_four_run_has_no_coverage_problem_and_a_bench_without_tool_coverage_fails_closed(self):
+    def test_codex_is_not_a_coverage_tool(self):
+        n, bench, gate = RB.Bound.report(self)
+        self.assertEqual(missing_tools(gate), ["opencode", "hermes"])
+        self.assertNotIn("codex", bench["tool_coverage"])
+
+    def test_all_tools_run_has_no_coverage_problem_and_a_bench_without_tool_coverage_fails_closed(self):
         clean = RB.B1_FIXTURES["clean"][0]
         ran = {t: {"status": "run", "engine": t, "graded_runs": 1, "pending_runs": 0} for t in TOOLS}
         self.assertEqual(se.compute_gate(dict(clean, tool_coverage=ran))["problems"], [])
@@ -128,11 +134,11 @@ class TestMissingTools(Cov):
         self.assertEqual(se.iterations(self.ws), [1])
 
     def test_coverage_problems_leave_human_pending_only_and_mark_coverage_only(self):
-        two = se.tool_coverage(["claude", "codex"], {"claude": 1, "codex": 1})
-        gate = se.compute_gate(dict(RB.B1_FIXTURES["human-only"][0], tool_coverage=two))
+        one = se.tool_coverage(["claude"], {"claude": 1})
+        gate = se.compute_gate(dict(RB.B1_FIXTURES["human-only"][0], tool_coverage=one))
         self.assertEqual(missing_tools(gate), ["opencode", "hermes"])
         self.assertTrue(gate["human_pending_only"]); self.assertFalse(gate["coverage_only"])
-        gate = se.compute_gate(dict(RB.B1_FIXTURES["clean"][0], tool_coverage=two))
+        gate = se.compute_gate(dict(RB.B1_FIXTURES["clean"][0], tool_coverage=one))
         self.assertEqual((missing_tools(gate), gate["coverage_only"], gate["human_pending_only"]),
                          (["opencode", "hermes"], True, False))
 
@@ -350,7 +356,7 @@ class TestRegistration(Cov):
 
     def test_a_stored_tool_coverage_forged_to_run_with_a_matching_gate_refuses_and_writes_nothing(self):
         n = self.run_both(); bench, gate = self.report(n)
-        self.assertEqual(sorted({r["engine"] for r in bench["runs"]}), ["claude", "codex"])
+        self.assertEqual(sorted({r["engine"] for r in bench["runs"]}), ["claude"])
         forged = dict(bench["tool_coverage"])
         for tool in ("opencode", "hermes"):
             forged[tool] = {"status": "run", "engine": tool, "graded_runs": 1, "pending_runs": 0}
@@ -378,7 +384,7 @@ class TestRegistration(Cov):
         ran = bench["tool_coverage"]
         for label, cov in (("null", None), ("a string", "run"), ("a list", []),
                            ("an entry not an object", dict(ran, claude="run")),
-                           ("an entry without a status", dict(ran, codex={"graded_runs": 1})),
+                           ("an entry without a status", dict(ran, claude={"graded_runs": 1})),
                            ("an unknown tool", dict(ran, gemini={"status": "run"}))):
             with self.subTest(label):
                 self.store(n, dict(bench, tool_coverage=cov), gate_of_bench=False)
@@ -404,7 +410,6 @@ class TestRegistration(Cov):
         shown = [s for e, s in self.events if e == "show"]
         self.assertEqual([s for s in shown if s.startswith("register coverage ")],
                          ["register coverage claude=run",
-                          "register coverage codex=run",
                           "register coverage opencode=%s (waived by test-approver, reason: %s)" % (NOT_AVAILABLE, REASON),
                           "register coverage hermes=%s (waived by test-approver, reason: Hermes has no engine yet)"
                           % NOT_AVAILABLE])
@@ -422,7 +427,7 @@ class TestPolicy(Cov):
         doc = rjson(fp); edit(doc); wjson(fp, doc)
         return d
 
-    def test_the_four_tools_are_pinned_to_eva(self):
+    def test_the_coverage_tools_are_pinned_to_eva(self):
         self.assertEqual(A.COVERAGE_TOOLS, eva.TOOLS)
         self.assertEqual(A.WAIVER_GATES, tuple("coverage_waiver:" + t for t in eva.TOOLS))
         self.assertEqual(rjson(os.path.join(ROOT, "policy", "gate.rules.json"))["coverage_required"], list(TOOLS))
@@ -436,7 +441,7 @@ class TestPolicy(Cov):
         cases = (("missing", lambda doc: doc.pop("coverage_required")), ("a string", put("hermes")),
                  ("empty", put([])), ("duplicate", put(["claude", "claude"])), ("unknown tool", put(["claude", "gemini"])),
                  ("not a name", put(["claude", 1])), ("null", put(None)), ("an object", put({"claude": True})),
-                 ("case", put(["Claude"])))
+                 ("case", put(["Claude"])), ("codex", put(["claude", "codex", "opencode", "hermes"])))
         for label, edit in cases:
             with self.subTest(label), mock.patch.object(se, "POLICY_DIR", self.policy_copy(edit)):
                 with self.assertRaises(se.PolicyError) as cm: se.load_coverage_required()
@@ -459,11 +464,11 @@ class TestPolicy(Cov):
 
     def test_a_machine_waived_entry_counts_as_waived_and_shows_its_source(self):
         clean = RB.B1_FIXTURES["clean"][0]
-        two = se.tool_coverage(["claude", "codex"], {"claude": 1, "codex": 1})
+        one = se.tool_coverage(["claude"], {"claude": 1})
         machine = {"status": "approved", "principal": "p", "verdict_reason": "", "reason": "r", "source": "machine",
                    "machine_waiver": {"sha256": SHA, "expires": AT}}
         waivers = {t: dict(machine) if t in ("opencode", "hermes") else {"status": "missing"} for t in TOOLS}
-        gate = se.compute_gate(dict(clean, tool_coverage=two, coverage_waivers=waivers))
+        gate = se.compute_gate(dict(clean, tool_coverage=one, coverage_waivers=waivers))
         self.assertEqual(missing_tools(gate), [])
         self.assertEqual(gate["coverage"]["hermes"], "waived by machine policy %s" % SHA[:12])
         self.assertIn("coverage waived: hermes (dynamic eval %s) by machine policy %s (p, expires %s): r"
@@ -481,7 +486,7 @@ class TestPolicy(Cov):
             self.assertEqual((v.status, v.reason), ("stale", A.RULES_CHANGED), gate)
         with mock.patch.object(se, "POLICY_DIR", os.path.join(self.root, "policy")):
             required = se.load_coverage_required()
-        self.assertEqual(required, ("claude", "codex", "opencode"))
+        self.assertEqual(required, ("claude", "opencode"))
         with mock.patch.object(se, "COVERAGE_REQUIRED", required):
             bench, gate = self.report(n)
         self.assertEqual(missing_tools(gate), ["opencode"])
@@ -520,9 +525,9 @@ class TestPayloadAndHash(Cov):
 
     def test_the_waiver_hash_binds_the_tool_the_skill_and_the_eval_set(self):
         with self.assertRaises(se.EvalError) as cm: se.gate_hash("coverage_waiver:gemini", self.spec, self.ws)
-        self.assertIn("claude, codex, opencode, hermes", str(cm.exception))
+        self.assertIn("claude, opencode, hermes", str(cm.exception))
         hashes = {t: se.gate_hash(waiver(t), self.spec, self.ws) for t in TOOLS}
-        self.assertEqual(len(set(hashes.values())), 4)
+        self.assertEqual(len(set(hashes.values())), 3)
         self.assertTrue(all(re.fullmatch("[0-9a-f]{64}", h) for h in hashes.values()))
         write(os.path.join(self.d, "SKILL.md"), T.SKILL_MD + "\nMore.\n")
         after_skill = se.gate_hash(waiver("hermes"), self.spec, self.ws)
@@ -531,13 +536,66 @@ class TestPayloadAndHash(Cov):
         self.assertNotEqual(se.gate_hash(waiver("hermes"), self.spec, self.ws), after_skill)
 
 
+class TestCodexWaiverRemoved(Cov):
+    def old_record(self):
+        rec = {"format": 1, "method": "recorded", "kind": "approve", "gate": waiver("codex"), "unit": "branch-setup",
+               "sha256": SHA, "ruleset_sha256": se.ruleset_sha256(), "recorded_by": T.TEST_PRINCIPAL, "at": AT,
+               "reason": REASON}
+        data = rjson(self.approvals) if os.path.exists(self.approvals) else {}
+        wjson(self.approvals, dict(data, **{waiver("codex"): rec}))
+        return rec
+
+    def test_the_gate_is_refused_with_exit_2_and_records_nothing(self):
+        rc, out, err = self.cli("approve", self.d, "--workspace", self.ws, "--gate", waiver("codex"), "--reason", REASON)
+        self.assertEqual(rc, 2, err)
+        self.assertIn("unknown coverage waiver 'coverage_waiver:codex'", err)
+        self.assertFalse(os.path.exists(self.approvals))
+
+    def test_the_schemas_no_longer_name_the_gate(self):
+        for name in ("registration.schema.json", "registry.schema.json"):
+            self.assertNotIn(waiver("codex"), T.read(os.path.join(ROOT, "schemas", name)), name)
+
+    def test_plan_report_and_pending_ignore_an_old_record(self):
+        self.old_record()
+        n = self.run_both()
+        before = state(self.approvals)
+        self.assertNotIn("codex=", self.line(self.plan(), "registration coverage: "))
+        bench, gate = self.report(n)
+        self.assertEqual(missing_tools(gate), ["opencode", "hermes"])
+        self.assertNotIn("codex", bench["coverage_waivers"])
+        self.assertFalse(any("codex" in x for x in gate["notes"]), gate["notes"])
+        rc, out, err = self.cli("pending", "--unit", self.d, "--workspace", self.ws)
+        self.assertEqual(rc, 0, err); self.assertNotIn(waiver("codex"), out)
+        self.assertEqual(state(self.approvals), before)
+
+    def test_register_does_not_copy_an_old_record(self):
+        self.old_record()
+        n = self.run_both(); self.waive("opencode"); self.waive("hermes"); self.report(n)
+        rec = se.register(self.spec, self.ws)
+        self.assertEqual(sorted(rec["approvals"]), [waiver("hermes"), waiver("opencode")])
+
+    def test_an_old_registration_with_the_key_reads_invalid_without_a_traceback(self):
+        n = self.run_both(); self.waive("opencode"); self.waive("hermes"); self.report(n)
+        rec = se.register(self.spec, self.ws)
+        path = os.path.join(self.ws, "registration.json")
+        wjson(path, dict(rec, approvals=dict(rec["approvals"], **{waiver("codex"): self.old_record()})))
+        self.assertEqual(se.registration_state(self.d, self.ws)[:2],
+                         ("invalid", "does not match schemas/registration.schema.json"))
+        shutil.copytree(self.ws, os.path.join(self.tmp, "branch-setup-workspace"))
+        rows, _ = eva.build_index(self.tmp)
+        self.assertEqual([r["registration"] for r in rows if r["name"] == "branch-setup"], ["invalid"])
+        out = os.path.join(self.tmp, "site")
+        rc, lines = se.hub_build(self.tmp, out, None)
+        self.assertEqual(rc, 0, lines)
+        self.assertEqual(rjson(os.path.join(out, "registry.json"))["units"], [])
+
+
 class TestPlan(Cov):
-    def test_plan_states_the_four_tool_or_signed_waiver_rule_and_each_waiver_state(self):
+    def test_plan_states_the_coverage_tool_or_signed_waiver_rule_and_each_waiver_state(self):
         line = self.line(self.plan(), "registration coverage: ")
-        self.assertIn("coverage_required (claude, codex, opencode, hermes)", line)
+        self.assertIn("coverage_required (claude, opencode, hermes)", line)
         self.assertIn("coverage_waiver:<tool>", line)
-        self.assertTrue(line.endswith("claude=NOT APPROVED, codex=NOT APPROVED, opencode=NOT APPROVED, "
-                                      "hermes=NOT APPROVED"), line)
+        self.assertTrue(line.endswith("claude=NOT APPROVED, opencode=NOT APPROVED, hermes=NOT APPROVED"), line)
         self.waive("hermes")
         line = self.line(self.plan(), "registration coverage: ")
         self.assertTrue(line.endswith("hermes=approved by test-approver"), line)
@@ -551,7 +609,7 @@ class TestGoldenCopy(T.Base):
         ws = shutil.copytree(os.path.join(src, "csv-cleaner-workspace"), os.path.join(self.tmp, "csv-cleaner-workspace"))
         spec, _ = se.load_eval_set(skill)
         bench, gate = se.report_iteration(spec, ws, 4)
-        self.assertEqual(missing_tools(gate), ["codex", "opencode", "hermes"], gate["problems"])
+        self.assertEqual(missing_tools(gate), ["opencode", "hermes"], gate["problems"])
         self.assertFalse(any(x.startswith("per-tool dynamic coverage") for x in gate["notes"]))
 
 

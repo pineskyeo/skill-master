@@ -34,8 +34,8 @@ OUTCOMES = {
 # Outcomes a rule reaches that also need a fixture side.
 EXTRA_SIDES = {
     "english-bundled-files": ("na",), "english-evals": ("na",), "english-tool-files": ("na",),
-    "english-scenarios": ("na",), "english-wrappers": ("na",), "parity-skill-codex": ("review",),
-    "parity-invocation-control": ("na",), "parity-permissions-claude": ("na",), "parity-permissions-codex": ("review", "na"),
+    "english-scenarios": ("na",), "english-wrappers": ("na",),
+    "parity-invocation-control": ("na",), "parity-permissions-claude": ("na",),
     "compatibility-length": ("na",), "reference-toc": ("na",), "version-format": ("na",),
     "wrappers-generated": ("na",), "tool-metadata-generated": ("na",),
 }
@@ -148,9 +148,9 @@ class TestBundleFixtures(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp)
         copy = os.path.join(tmp, "rules")
         shutil.copytree(RULES_TESTS, copy, ignore=shutil.ignore_patterns("_selftest"))
-        shutil.rmtree(os.path.join(copy, "parity-skill-codex", "review"))
+        shutil.rmtree(os.path.join(copy, "parity-invocation-hermes", "review"))
         problems = fixture_problems(RR.default_bundle(), copy, skip_underscore=True)
-        self.assertIn("parity-skill-codex: no review/ fixture folder", problems)
+        self.assertIn("parity-invocation-hermes: no review/ fixture folder", problems)
 
 
 class TestFixtureGaps(unittest.TestCase):

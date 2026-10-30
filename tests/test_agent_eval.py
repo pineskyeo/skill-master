@@ -500,7 +500,7 @@ class TestValidatePlan(AgentBase):
 
     def test_plan_lists_two_scenarios_against_four_tools(self):
         with mock.patch.object(se, "live_exec", FakeAgentExec()) as fake:
-            rc, out, err = cli("agent", "plan", self.agent, "--workspace", self.ws, "--runs", "1")
+            rc, out, err = cli("agent", "plan", self.agent, "--workspace", self.ws, "--runs", "1", "--engines", "claude,codex")
         self.assertEqual(rc, 0, out + err)
         self.assertEqual(fake.calls, [])
         self.assertFalse(os.path.exists(self.ws))
@@ -514,7 +514,7 @@ class TestValidatePlan(AgentBase):
         self.assertIn("cell overview hermes: %s" % NOT_AVAILABLE, cells)
         for tool in TOOLS:
             self.assertIn("cell drill %s: %s" % (tool, MULTI), cells)
-        self.assertIn("tool coverage (dynamic): claude=planned, codex=planned, opencode=%s, hermes=%s"
+        self.assertIn("tool coverage (dynamic): claude=planned, opencode=%s, hermes=%s"
                       % (NOT_AVAILABLE, NOT_AVAILABLE), out)
         self.assertIn("coverage_required", out)
         self.assertIn("multi-turn: non-interactive continuation is UNVERIFIED for claude, codex, opencode, hermes", out)
@@ -534,7 +534,7 @@ class TestValidatePlan(AgentBase):
         with open(os.path.join(self.agent, "wrappers", "claude", NAME + ".md"), "a", encoding="utf-8") as f:
             f.write("extra\n")
         os.remove(os.path.join(self.agent, "wrappers", "codex", NAME + ".toml"))
-        rc, out, _ = cli("agent", "plan", self.agent, "--workspace", self.ws)
+        rc, out, _ = cli("agent", "plan", self.agent, "--workspace", self.ws, "--engines", "claude,codex")
         self.assertIn("cell overview claude: not-run: wrapper out of date (eva.py generate)", out)
         self.assertIn("cell overview codex: not-run: wrapper missing (eva.py generate)", out)
 
@@ -600,7 +600,7 @@ class TestLiveRefusals(AgentBase):
                 rc, out, _ = cli("agent", "validate", self.agent)
                 self.assertEqual(rc, 1, out)
                 self.assertTrue(any(l.startswith("agent name: fail") for l in out.splitlines()), out)
-                cells, _ = self.plan_cells()
+                cells, _ = self.plan_cells("--engines", "claude,codex")
                 self.assertEqual(cells[("overview", "claude")], "error: reserved agent name")
                 self.assertTrue(cells[("overview", "codex")].startswith("planned"), cells)
                 self.assertEqual(cells[("drill", "claude")], MULTI)
@@ -616,7 +616,7 @@ class TestLiveRefusals(AgentBase):
             os.makedirs(os.path.dirname(planted))
             with open(planted, "w", encoding="utf-8") as f:
                 f.write("---\nname: %s\ndescription: another agent\n---\nWrite files freely.\n" % NAME)
-            cells, _ = self.plan_cells()
+            cells, _ = self.plan_cells("--engines", "claude,codex")
             self.assertTrue(cells[("overview", "claude")].startswith("error: "), cells)
             self.assertIn(planted, cells[("overview", "claude")])
             self.assertTrue(cells[("overview", "codex")].startswith("planned"), cells)
@@ -626,7 +626,7 @@ class TestLiveRefusals(AgentBase):
         os.makedirs(os.path.dirname(toml))
         with open(toml, "w", encoding="utf-8") as f:
             f.write('name = "%s"\n' % NAME)
-        cells, _ = self.plan_cells()
+        cells, _ = self.plan_cells("--engines", "claude,codex")
         self.assertIn(toml, cells[("overview", "codex")])
         self.assertIn(toml, self.refused("--engines", "codex", "--no-strict-budget", "--price", "codex=1,10"))
 
@@ -736,6 +736,7 @@ class TestLiveRun(AgentBase):
         self.assertIn(T.coverage_missing("claude", se.NOT_GRADED), gate["problems"])
 
     def test_codex_run_reads_unverified_and_the_report_says_so(self):
+        self.allow_codex_under_test()
         rc, out, err, fake = self.live("run", "--engines", "codex", "--no-strict-budget", "--price", "codex=1,10")
         self.assertEqual(rc, 0, out + err)
         call = fake.calls[0]
@@ -808,8 +809,7 @@ class TestLiveRun(AgentBase):
         bench, gate = rjson(os.path.join(it, "benchmark.json")), rjson(os.path.join(it, "gate.json"))
         self.assertEqual(bench["tool_coverage"]["claude"]["status"], "run")
         self.assertEqual(bench["tool_coverage"]["claude"]["graded_runs"], 1)
-        for tool, status, waiver in (("codex", se.NOT_SELECTED, "missing"), ("opencode", NOT_AVAILABLE, "unsigned"),
-                                     ("hermes", NOT_AVAILABLE, "missing")):
+        for tool, status, waiver in (("opencode", NOT_AVAILABLE, "unsigned"), ("hermes", NOT_AVAILABLE, "missing")):
             self.assertIn(T.coverage_missing(tool, status, waiver), gate["problems"])
         self.assertFalse(any(p.startswith("coverage-missing:claude") for p in gate["problems"]))
         self.assertTrue(os.path.isfile(os.path.join(it, "comparison.md")))
@@ -897,6 +897,7 @@ class TestLiveRun(AgentBase):
         self.assertIsNotNone(b[0]["old_agent"])
 
     def test_a_stream_that_reports_is_error_is_an_error_cell(self):
+        self.allow_codex_under_test()
         claude = read(CLAUDE_STREAM).replace('"is_error":false', '"is_error":true')
         codex = read(CODEX_STREAM).replace('{"type":"turn.completed"',
                                            '{"type":"error","message":"stream disconnected"}\n{"type":"turn.completed"')
@@ -913,7 +914,7 @@ class TestLiveRun(AgentBase):
             self.assertTrue(state.startswith("error: "), (tool, state))
             self.assertFalse(os.path.exists(os.path.join(rd, "grading.json")), tool)
             self.assertIn("run-error:overview/%s/new_agent/run-1: %s" % (tool, state), gate["problems"])
-            self.assertIn(T.coverage_missing(tool, se.NOT_GRADED), gate["problems"])
+        self.assertIn(T.coverage_missing("claude", se.NOT_GRADED), gate["problems"])
         agent = se.Agent(self.agent)
         scenario = [s for s in agent.scenarios if s["id"] == "overview"][0]
         for tool, stream in (("claude", claude), ("codex", codex)):
@@ -939,6 +940,7 @@ class TestLiveRun(AgentBase):
         self.assertTrue(any(p.startswith("criteria-ungraded:overview/claude/new_agent/run-1") for p in gate["problems"]))
 
     def test_multi_turn_scenarios_never_run(self):
+        self.allow_codex_under_test()
         rc, out, err, fake = self.live("run", "--engines", "claude,codex", "--no-strict-budget", "--price",
                                        "codex=1,10")
         self.assertEqual(rc, 0, out + err)

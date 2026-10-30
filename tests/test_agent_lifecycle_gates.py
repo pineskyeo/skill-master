@@ -19,12 +19,12 @@ from engine import approvals as A
 COMBINED = "requirements_eval_set"
 NAME = AE.NAME
 SCENARIO = "scenarios/01-overview.json"
-REVIEW_ROWS = ["parity-permissions-codex", "parity-permissions-opencode"]
+REVIEW_ROWS = ["parity-permissions-opencode"]
 HERMES_ROW = "parity-permissions-hermes"
 CODEX_FINDING = "agent-load-unverified:codex"
 MACHINE = "11111111-2222-3333-4444-555555555555"
 NO_APPROVALS = "live approvals missing: requirements_eval_set is missing, requirements is missing, eval_set is missing"
-NO_REVIEW = "rule review not recorded: 2 finding(s) need a human decision"
+NO_REVIEW = "rule review not recorded: 1 finding(s) need a human decision"
 GATES_LINE = "agent live gates (agent run --live and agent loop --live refuse until each passes): "
 INPUTS_CHANGED = "the command's inputs changed after signing"
 _patches = []
@@ -73,6 +73,10 @@ def late_edit(edit):
 
 def codex_wrapper(agent_dir):
     return os.path.join(agent_dir, "wrappers", "codex", NAME + ".toml")
+
+
+def opencode_wrapper(agent_dir):
+    return os.path.join(agent_dir, "wrappers", "opencode", NAME + ".md")
 
 
 class Gates(AE.AgentBase):
@@ -212,10 +216,10 @@ class TestLiveGate(Gates):
         self.assertEqual(fake.calls, [])
         self.assertFalse(se._LIVE["on"])
 
-    def test_a_codex_wrapper_edit_after_the_post_sign_check_is_refused_by_the_plan_hash(self):
+    def test_an_opencode_wrapper_edit_after_the_post_sign_check_is_refused_by_the_plan_hash(self):
         self.requirements()
         self.approve(COMBINED, "rule_review")
-        calls, hook = late_edit(lambda: append(codex_wrapper(self.agent), "# late edit\n"))
+        calls, hook = late_edit(lambda: append(opencode_wrapper(self.agent), "# late edit\n"))
         with hook:
             rc, out, err, fake = self.run_live()
         self.assertEqual(calls, [1], out + err)
@@ -277,7 +281,7 @@ class TestLiveGate(Gates):
 
 
 class TestRuleReview(Gates):
-    def test_the_agent_review_items_are_the_codex_and_opencode_rows(self):
+    def test_the_agent_review_item_is_the_opencode_row(self):
         self.assertEqual([x.split(":")[0] for x in se.rule_review_items(self.agent)], REVIEW_ROWS)
 
     def test_a_signed_decision_clears_the_review_rows_and_never_the_hermes_fail_row(self):
@@ -285,7 +289,7 @@ class TestRuleReview(Gates):
         self.assertEqual(se.rule_review_problems(self.spec(), self.ws), [])
         rows = {c["id"]: c["status"] for c in eva.check(self.agent).checks}
         self.assertEqual(rows[HERMES_ROW], "fail")
-        self.assertEqual([rows[r] for r in REVIEW_ROWS], ["needs-review", "needs-review"])
+        self.assertEqual([rows[r] for r in REVIEW_ROWS], ["needs-review"])
         I.fake_iteration(self.agent, self.ws, self.runs)
         out, gate = self.report()
         self.assertTrue(any(p.startswith(HERMES_ROW + ": ") for p in gate["problems"]), gate["problems"])
@@ -308,12 +312,12 @@ class TestRuleReview(Gates):
         self.assertEqual((self.verdict("rule_review"), self.verdict(COMBINED)), ("stale", "approved"))
         rc, out, err, fake = self.run_live()
         self.assertEqual(rc, 2, out + err)
-        self.refused(err, "rule review not recorded (stale): 2 finding(s) need a human decision", "--gate rule_review")
+        self.refused(err, "rule review not recorded (stale): 1 finding(s) need a human decision", "--gate rule_review")
         self.assertNotIn("live approvals missing", err)
         self.assertEqual(fake.calls, [])
 
     def test_the_decision_reads_stale_after_an_agent_md_or_review_wrapper_edit(self):
-        for rel in ("AGENT.md", "wrappers/codex/%s.toml" % NAME, "wrappers/opencode/%s.md" % NAME, SCENARIO):
+        for rel in ("AGENT.md", "wrappers/opencode/%s.md" % NAME, SCENARIO):
             with self.subTest(rel):
                 p = os.path.join(self.agent, *rel.split("/"))
                 before = T.read(p)
@@ -345,17 +349,17 @@ class TestPlan(Gates):
         self.assertEqual(line(out, "coverage waivers: "), "coverage waivers: " + ", ".join(
             "%s=NOT APPROVED" % t for t in se.COVERAGE_REQUIRED))
         self.assertEqual(line(out, "machine waiver: "), "machine waiver: missing (~/.config/skill-master/machine-waiver.json)")
-        self.assertEqual(line(out, GATES_LINE), GATES_LINE + "rule-review: fail: rule_review missing (2 finding(s)); "
+        self.assertEqual(line(out, GATES_LINE), GATES_LINE + "rule-review: fail: rule_review missing (1 finding(s)); "
                          "approvals: fail: requirements_eval_set missing, requirements missing, eval_set missing")
 
     def test_the_plan_reads_approved_after_recording_and_keeps_every_earlier_line_first(self):
         self.requirements()
-        self.approve(COMBINED, "rule_review", "coverage_waiver:codex")
+        self.approve(COMBINED, "rule_review", "coverage_waiver:opencode")
         out = self.plan()
         self.assertIn("combined approval gate: requirements_eval_set=approved by %s" % T.TEST_PRINCIPAL, out)
         self.assertIn("rule review (English-only / parity needs-review findings): RECORDED (by %s)"
                       % T.TEST_PRINCIPAL, out)
-        self.assertIn("codex=approved by %s" % T.TEST_PRINCIPAL, line(out, "coverage waivers: "))
+        self.assertIn("opencode=approved by %s" % T.TEST_PRINCIPAL, line(out, "coverage waivers: "))
         self.assertEqual(line(out, GATES_LINE), GATES_LINE + "rule-review: pass; approvals: pass")
         lines = out.splitlines()
         last_old = lines.index(line(out, "multi-turn: "))
@@ -372,8 +376,7 @@ class TestPlan(Gates):
         cov = line(out, "coverage waivers: ")
         for tool in ("opencode", "hermes"):
             self.assertIn("%s=machine-waived by %s" % (tool, T.TEST_PRINCIPAL), cov)
-        for tool in ("claude", "codex"):
-            self.assertIn("%s=NOT APPROVED" % tool, cov)
+        self.assertIn("claude=NOT APPROVED", cov)
 
     def test_a_corrupt_approvals_json_reads_invalid_in_the_plan(self):
         self.requirements()
@@ -403,33 +406,32 @@ class TestPendingAndBatch(Gates):
 class TestWaivers(Gates):
     def test_an_unsigned_agent_waiver_leaves_coverage_missing(self):
         I.fake_iteration(self.agent, self.ws, self.runs)
-        data = {"coverage_waiver:codex": {"sha256": se.gate_hash("coverage_waiver:codex", self.spec(), self.ws),
-                                          "reason": "codex is not installed here", "principal": T.TEST_PRINCIPAL}}
+        data = {"coverage_waiver:opencode": {"sha256": se.gate_hash("coverage_waiver:opencode", self.spec(), self.ws),
+                                             "reason": "opencode is not installed here", "principal": T.TEST_PRINCIPAL}}
         wjson(os.path.join(self.ws, "approvals.json"), data)
-        self.assertEqual(self.verdict("coverage_waiver:codex"), "unsigned")
+        self.assertEqual(self.verdict("coverage_waiver:opencode"), "unsigned")
         out, gate = self.report()
-        self.assertIn(T.coverage_missing("codex", T.NOT_SELECTED, "unsigned"), gate["problems"])
+        self.assertIn(T.coverage_missing("opencode", T.NOT_AVAILABLE, "unsigned"), gate["problems"])
 
     def test_a_signed_agent_waiver_clears_only_its_tool_with_its_typed_reason_and_binds_its_inputs(self):
         I.fake_iteration(self.agent, self.ws, self.runs)
-        self.approve("coverage_waiver:codex")
+        self.approve("coverage_waiver:opencode")
         out, gate = self.report()
-        self.assertEqual(gate["coverage"]["codex"], "waived by %s" % T.TEST_PRINCIPAL)
-        self.assertFalse(any(p.startswith("coverage-missing:codex") for p in gate["problems"]), gate["problems"])
-        for tool in ("opencode", "hermes"):
-            self.assertTrue(any(p.startswith("coverage-missing:%s" % tool) for p in gate["problems"]), tool)
-        w = se.waiver_verdicts(self.spec(), self.ws)["codex"]
+        self.assertEqual(gate["coverage"]["opencode"], "waived by %s" % T.TEST_PRINCIPAL)
+        self.assertFalse(any(p.startswith("coverage-missing:opencode") for p in gate["problems"]), gate["problems"])
+        self.assertTrue(any(p.startswith("coverage-missing:hermes") for p in gate["problems"]), gate["problems"])
+        w = se.waiver_verdicts(self.spec(), self.ws)["opencode"]
         self.assertEqual((w["status"], w["source"], w["reason"]), ("approved", "unit", T.TEST_REASON))
         for rel in ("AGENT.md", SCENARIO):
             with self.subTest(rel):
                 p = os.path.join(self.agent, *rel.split("/"))
                 before = T.read(p)
                 append(p)
-                self.assertEqual(self.verdict("coverage_waiver:codex"), "stale")
+                self.assertEqual(self.verdict("coverage_waiver:opencode"), "stale")
                 write(p, before)
-        self.assertEqual(self.verdict("coverage_waiver:codex"), "approved")
+        self.assertEqual(self.verdict("coverage_waiver:opencode"), "approved")
         with mock.patch.object(se, "ruleset_sha256", lambda: "0" * 64):
-            self.assertEqual(se.approval_verdict("coverage_waiver:codex", self.spec(), self.ws).status, "stale")
+            self.assertEqual(se.approval_verdict("coverage_waiver:opencode", self.spec(), self.ws).status, "stale")
 
     def test_the_machine_waiver_clears_opencode_and_hermes_and_never_claude_or_codex(self):
         with self.assertRaises(A.Refused):
@@ -440,7 +442,7 @@ class TestWaivers(Gates):
         I.fake_iteration(self.agent, self.ws, self.runs)
         out, gate = self.report()
         missing = sorted(p.split(":")[1] for p in gate["problems"] if p.startswith("coverage-missing:"))
-        self.assertEqual(missing, ["codex"])
+        self.assertEqual(missing, [])
         for tool in ("opencode", "hermes"):
             self.assertTrue(gate["coverage"][tool].startswith("waived by machine policy "), gate["coverage"])
         self.assertIn("machine waiver: approved by %s" % T.TEST_PRINCIPAL, out)
@@ -585,10 +587,10 @@ class TestRegistration(Gates):
         append(os.path.join(self.agent, "AGENT.md"), "\nOne more line.\n")
         self.assertEqual(se.registration_state(self.agent, self.ws)[:2], ("stale", "skill_sha256 changed"))
 
-    def test_index_and_hub_show_the_record_with_the_codex_waiver_and_the_machine_waiver(self):
+    def test_index_and_hub_show_the_record_with_a_unit_waiver_and_the_machine_waiver(self):
         I.fake_iteration(self.agent, self.ws, self.runs)
-        self.approve("coverage_waiver:codex")
-        mw = se.sign_machine_waiver(["opencode", "hermes"])
+        self.approve("coverage_waiver:opencode")
+        mw = se.sign_machine_waiver(["hermes"])
         out, gate = self.report()
         self.assertTrue(any(p.startswith(HERMES_ROW + ": ") for p in gate["problems"]), gate["problems"])
         self.approve("registration")
@@ -603,7 +605,7 @@ class TestRegistration(Gates):
         self.assertEqual(rc, 0, out + err)
         page = T.read(os.path.join(page_dir, "units", NAME + ".html"))
         self.assertEqual(I.badge(page, "registration"), "registered 1.0.0 by %s" % T.TEST_PRINCIPAL)
-        self.assertIn("<li>coverage_waiver:codex by %s" % T.TEST_PRINCIPAL, page)
+        self.assertIn("<li>coverage_waiver:opencode by %s" % T.TEST_PRINCIPAL, page)
         self.assertIn(T.TEST_REASON, page)
         self.assertIn(A.machine_waiver_sha256(mw), page)
 

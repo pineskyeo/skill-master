@@ -101,9 +101,7 @@ class TestRuleReviewBoundToContent(P.CliBase):
         for label, before, after, rel in (
                 ("sixth-matcher", self.matchers(six), self.matchers(six[:5] + ["\uc804\ud600"]), "evals/evals.json"),
                 ("long-matcher-tail", self.matchers([long_tail + "\uac00"]), self.matchers([long_tail + "\ub098"]),
-                 "evals/evals.json"),
-                ("codex-field-value", "interface:\n  display_name: Branch Setup\n", "interface:\n  display_name: Other\n",
-                 "agents/openai.yaml")):
+                 "evals/evals.json")):
             with self.subTest(label):
                 rc, out, _ = self.validate_after_change(label, before, after, rel)
                 self.assertEqual(rc, 3, ascii(out[-160:])); self.assertIn("RULE REVIEW NOT RECORDED", out)
@@ -203,7 +201,7 @@ class TestAgentLinksOutOfTheFolder(P.AgentBase, unittest.TestCase):
         self.assertEqual(P.row(r, "parity-permissions-opencode")["status"], "n/a")
         self.assertEqual([i for i in eva.review_items(d) if i.startswith("parity-permissions-opencode")], [])
         self.assertIn("wrappers/opencode (link)", P.row(r, "english-wrappers")["reason"])
-        self.assertEqual(P.row(r, "parity-wrapper-codex")["status"], "pass")
+        self.assertEqual(P.row(r, "parity-wrapper-claude")["status"], "pass")
 
     def test_a_hermes_config_linked_out_fails_the_hermes_wrapper_row(self):
         d, _ = self.agent()
@@ -248,10 +246,6 @@ class TestRuleReviewCoversAgentSources(P.AgentBase, unittest.TestCase):
         six = [KO + str(i) for i in range(6)]
         d = self.recorded(scenario=dict(P.S1, must_include=six))
         self.assert_voided(d, "scenarios/01.json", json.dumps(six[5]), json.dumps(KO + "x"))
-
-    def test_the_codex_wrapper_instructions(self):
-        self.assert_voided(self.recorded(), "wrappers/codex/code-scout.toml", "Load the skill and use the engine.",
-                           "Edit any file you need.")
 
     def test_the_opencode_wrapper_edit_permission_from_allow_to_ask(self):
         self.assert_voided(self.recorded(md=self.WRITE_MD), "wrappers/opencode/code-scout.md", "  edit: allow\n", "  edit: ask\n")

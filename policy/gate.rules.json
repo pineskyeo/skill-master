@@ -1,8 +1,8 @@
 {
-  "$comment": "compute_gate data that skill_eval.py reads at import (plan.md:846). values: the two gate thresholds, in the eval-policy.json entry shape. messages: one template per compute_gate predicate or note, keyed by the predicate id of skill_eval.GATE_PREDICATES, with %(field)s fields that the predicate supplies. The predicate bodies and the problem-or-note decision stay code. coverage_required: the tools whose graded dynamic run, or a signed coverage_waiver:<tool>, registration needs (plan.md:1135, Appendix E Q5); a non-empty list of unique names from claude, codex, opencode, hermes. machine_waivable: the tools a signed machine waiver of this Mac may clear (plan.md:1495, S1); a non-empty list of unique names from opencode and hermes (gates.md G33). Part of the rule bundle hash (ruleset_sha256).",
+  "$comment": "compute_gate data that skill_eval.py reads at import (plan.md:846). values: the two gate thresholds, in the eval-policy.json entry shape. messages: one template per compute_gate predicate or note, keyed by the predicate id of skill_eval.GATE_PREDICATES, with %(field)s fields that the predicate supplies. The predicate bodies and the problem-or-note decision stay code. coverage_required: the tools whose graded dynamic run, or a signed coverage_waiver:<tool>, registration needs (plan.md:1135, Appendix E Q5); a non-empty list of unique names from claude, opencode, hermes. machine_waivable: the tools a signed machine waiver of this Mac may clear (plan.md:1495, S1); a non-empty list of unique names from opencode and hermes (gates.md G33). Part of the rule bundle hash (ruleset_sha256).",
   "policy": "gate-rules",
   "version": "1.0.0",
-  "coverage_required": ["claude", "codex", "opencode", "hermes"],
+  "coverage_required": ["claude", "opencode", "hermes"],
   "machine_waivable": ["opencode", "hermes"],
   "values": {
     "AGREEMENT_MIN": {"value": 0.8, "type": "float", "source": "house", "note": "H: grader-vs-human agreement below this is a gate problem. Moved from eval-policy.json by A5."},

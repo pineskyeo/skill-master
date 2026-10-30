@@ -14,17 +14,6 @@
       "fix": "See notes/multi-tool-parity-plan.md section 2.1. Fix SKILL.md name/description for Claude Code."
     },
     {
-      "id": "parity-skill-codex",
-      "applies_to": ["skill"],
-      "category": "parity",
-      "severity": "fail",
-      "protects": ["codex"],
-      "source": {"house": "owner decision 2026-10-19 18:43 KST: every skill is created for Claude Code, Codex CLI, OpenCode and Hermes Agent together (notes/multi-tool-parity-plan.md section 2.1; tool facts in targets/codex.json)", "verified": "2026-10-19"},
-      "check": {"op": "parity_skill", "tool": "codex"},
-      "message": "{reason}",
-      "fix": {"fail": "See notes/multi-tool-parity-plan.md section 2.1. Fix SKILL.md or agents/openai.yaml (policy.allow_implicit_invocation must be an unquoted boolean).", "review": "A human confirms the fields against the Codex documentation, or remove them from agents/openai.yaml."}
-    },
-    {
       "id": "parity-skill-opencode",
       "applies_to": ["skill"],
       "category": "parity",

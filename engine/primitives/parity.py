@@ -178,7 +178,7 @@ def codex_policy(path, tgt):
 
 
 def skill_rows(path, tg, dedupe=True):
-    """{row id: (status, reason)} of the six skill parity rows. dedupe False keeps every folder cause, as the A2 rows
+    """{row id: (status, reason)} of the five skill parity rows. dedupe False keeps every folder cause, as the A2 rows
     that the skill_eval gates read through eva.parity_report."""
     raw, meta, err = _frontmatter_of(os.path.join(path, "SKILL.md"))
     typed = set(yaml_typed_keys(raw)) if raw is not None and meta else set()
@@ -200,17 +200,7 @@ def skill_rows(path, tg, dedupe=True):
         if any(c in name + desc for c in cl["forbidden_chars"]):
             p.append("name or description contains %s" % " or ".join("'%s'" % c for c in cl["forbidden_chars"]))
     row("parity-skill-claude", ("claude",), p, cl["ok"])
-    cx = tg["codex"]["skill"]
-    pol_problems, allow, unverified = codex_policy(path, tg["codex"])
-    p = bad + (_skill_core(meta) if not bad else []) + pol_problems
-    if not p and unverified:
-        out["parity-skill-codex"] = ("review", "[codex] %s declares fields this package cannot verify: %s (only %s is "
-                                     "verified); Codex loadability is unconfirmed"
-                                     % (cx["tool_file"], ", ".join(unverified), ", ".join(cx["verified_fields"])))
-    else:
-        row("parity-skill-codex", ("codex",), p, "SKILL.md satisfies the Codex CLI rules (%s)" % (
-            "%s: only the verified field %s" % (cx["tool_file"], ", ".join(cx["verified_fields"]))
-            if os.path.lexists(os.path.join(path, *cx["tool_file"].split("/"))) else "no %s" % cx["tool_file"]))
+    allow = codex_policy(path, tg["codex"])[1]
     oc = tg["opencode"]["skill"]
     p = list(bad)
     if not bad:

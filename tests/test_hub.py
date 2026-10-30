@@ -19,8 +19,8 @@ TEMPLATES = os.path.join(ROOT, "engine", "hub_templates")
 KOREAN = "".join(map(chr, (0xD55C, 0xAD6D, 0xC5B4)))
 GOLDEN_UNITS = ("agents/code-reviewer", "agents/research-assistant", "skills/csv-cleaner", "skills/korean-proofreader",
                 "skills/pdf-summarizer")
-TOOLS = ("claude", "codex", "opencode", "hermes")
-LABELS = {"claude": "Claude Code", "codex": "Codex CLI", "opencode": "OpenCode", "hermes": "Hermes Agent"}
+TOOLS = ("claude", "opencode", "hermes")
+LABELS = {"claude": "Claude Code", "opencode": "OpenCode", "hermes": "Hermes Agent"}
 LINK_RE = re.compile(r"""(?:href|src)\s*=\s*["']([^"']*)["']""", re.I)
 _patches = []
 
@@ -133,7 +133,7 @@ class TestGoldenSite(Golden):
             self.assertEqual(badge(self.page("agents/code-reviewer"), "coverage-" + tool),
                              "%s coverage: not-run: no eval iteration" % LABELS[tool])
 
-    def test_every_page_has_four_project_scope_snippet_blocks(self):
+    def test_every_page_has_a_project_scope_snippet_block_per_tool(self):
         for rel in GOLDEN_UNITS:
             got = blocks(self.page(rel))
             self.assertEqual([t for t, _ in got], list(TOOLS), rel)
@@ -147,7 +147,6 @@ class TestGoldenSite(Golden):
                     self.assertNotIn("UNVERIFIED", body)
         csv = dict(blocks(self.page("skills/csv-cleaner")))
         self.assertIn("mkdir -p .claude/skills\ncp -R &lt;clone&gt;/skills/csv-cleaner .claude/skills/csv-cleaner", csv["claude"])
-        self.assertIn("mkdir -p .agents/skills\ncp -R &lt;clone&gt;/skills/csv-cleaner .agents/skills/csv-cleaner", csv["codex"])
         self.assertIn("cp -R &lt;clone&gt;/skills/csv-cleaner .opencode/skills/csv-cleaner", csv["opencode"])
         self.assertIn("cp -R &lt;clone&gt;/skills/csv-cleaner .hermes/skills/csv-cleaner", csv["hermes"])
         for tool, body in blocks(self.page("agents/code-reviewer")):
@@ -302,7 +301,7 @@ class TestRegisteredSite(TR.Reg):
         for field in ("benchmark_sha256", "skill_sha256", "eval_set_sha256", "skill_md_sha256", "ruleset_sha256"):
             self.assertIn('data-hash="%s"><code>%s</code>' % (field, rec[field]), page)
         self.assertEqual([badge(page, "coverage-" + t) for t in TOOLS],
-                         ["Claude Code coverage: run", "Codex CLI coverage: run",
+                         ["Claude Code coverage: run",
                           "OpenCode coverage: not-run: engine not available",
                           "Hermes Agent coverage: not-run: engine not available"])
         self.assertIn("coverage_waiver:hermes", page); self.assertIn(TR.C.REASON, page)
@@ -350,7 +349,7 @@ class TestRegisteredSite(TR.Reg):
         self.assertEqual([u for u in units2 if u["kind"] == "skill"], units)
         self.assertEqual([(u["kind"], u["name"]) for u in units2], [("agent", TI.NAME), ("skill", "branch-setup")])
 
-    def test_an_agent_with_wrappers_gets_copy_snippets_for_claude_and_codex(self):
+    def test_an_agent_with_wrappers_gets_a_copy_snippet_for_claude(self):
         a = os.path.join(self.repo, "agents", "code-scout")
         os.makedirs(os.path.join(a, "scenarios"))
         write(os.path.join(a, "AGENT.md"), P.AGENT_MD)
@@ -362,8 +361,7 @@ class TestRegisteredSite(TR.Reg):
         got = dict(blocks(site(out)["units/agents--code-scout.html"].decode("ascii")))
         self.assertIn("mkdir -p .claude/agents\ncp &lt;clone&gt;/agents/code-scout/wrappers/claude/code-scout.md "
                       ".claude/agents/code-scout.md", got["claude"])
-        self.assertIn("mkdir -p .codex/agents\ncp &lt;clone&gt;/agents/code-scout/wrappers/codex/code-scout.toml "
-                      ".codex/agents/code-scout.toml", got["codex"])
+        self.assertNotIn("codex", got)
         self.assertIn("&lt;clone&gt;/agents/code-scout/wrappers/hermes/SOUL.md", got["hermes"])
         self.assertIn("UNVERIFIED", got["hermes"]); self.assertNotIn(".hermes", got["hermes"])
 

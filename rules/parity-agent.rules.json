@@ -25,17 +25,6 @@
       "fix": "See notes/multi-tool-parity-plan.md section 2.4. Create or repair {rel}."
     },
     {
-      "id": "parity-wrapper-codex",
-      "applies_to": ["agent"],
-      "category": "parity",
-      "severity": "fail",
-      "protects": ["codex"],
-      "source": {"url": "https://developers.openai.com/codex/subagents", "section": "Codex custom agents (targets/codex.json wrapper)", "verified": "2026-10-19"},
-      "check": {"op": "parity_wrapper", "tool": "codex"},
-      "message": "{reason}",
-      "fix": "See notes/multi-tool-parity-plan.md section 2.4. Create or repair {rel}."
-    },
-    {
       "id": "parity-wrapper-opencode",
       "applies_to": ["agent"],
       "category": "parity",
@@ -67,17 +56,6 @@
       "check": {"op": "parity_permissions", "tool": "claude"},
       "message": "{reason}",
       "fix": "See notes/multi-tool-parity-plan.md section 2.4. List wrapper tools whose capability classes (rules/data/capabilities.json) are exactly the AGENT.md capabilities."
-    },
-    {
-      "id": "parity-permissions-codex",
-      "applies_to": ["agent"],
-      "category": "parity",
-      "severity": "fail",
-      "protects": ["codex"],
-      "source": {"url": "https://developers.openai.com/codex/subagents", "section": "Codex custom agents (targets/codex.json permissions)", "verified": "2026-10-19"},
-      "check": {"op": "parity_permissions", "tool": "codex"},
-      "message": "{reason}",
-      "fix": {"fail": "See notes/multi-tool-parity-plan.md section 2.4. Use only vocabulary values (read, search, write, shell, web_fetch, web_search, delegate, skill) in the AGENT.md capabilities.", "review": "See notes/multi-tool-parity-plan.md section 2.4. Run the agent on Codex only from a session whose sandbox fits it, and record that decision with `skill_eval.py approve --gate rule_review`."}
     },
     {
       "id": "parity-permissions-opencode",
