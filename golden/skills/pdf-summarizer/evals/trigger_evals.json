@@ -1,0 +1,22 @@
+[
+  {"query": "Please summarize annual_report_2024.pdf for me", "should_trigger": true},
+  {"query": "Can you give me a one-page brief of whitepaper.pdf?", "should_trigger": true},
+  {"query": "Read market_analysis.pdf and summarize it in Korean", "should_trigger": true},
+  {"query": "I need a Korean summary of ~/Downloads/board_minutes.pdf", "should_trigger": true},
+  {"query": "What are the key points of research_paper.pdf? Keep the summary to one page", "should_trigger": true},
+  {"query": "Condense contract_review.pdf into a one-page summary", "should_trigger": true},
+  {"query": "My boss wants a quick summary of q3_results.pdf before the meeting", "should_trigger": true},
+  {"query": "Here is a PDF, handbook_v2.pdf. Give me the main points as a short summary", "should_trigger": true},
+  {"query": "Turn the English PDF proposal_final.pdf into a one-page brief in Korean", "should_trigger": true},
+  {"query": "Summarize this PDF for me: docs/safety_audit.pdf", "should_trigger": true},
+  {"query": "Summarize meeting_notes.docx in three lines", "should_trigger": false},
+  {"query": "Summarize the article at https://example.com/news/budget", "should_trigger": false},
+  {"query": "Translate manual.pdf into Korean page by page", "should_trigger": false},
+  {"query": "Extract the tables from financials.pdf into a CSV file", "should_trigger": false},
+  {"query": "Edit contract.pdf and change the date on page 2", "should_trigger": false},
+  {"query": "Merge part1.pdf and part2.pdf into one PDF", "should_trigger": false},
+  {"query": "Summarize notes.txt in a few bullet points", "should_trigger": false},
+  {"query": "Run OCR on scan_001.png and give me the text", "should_trigger": false},
+  {"query": "Write a quarterly sales report and export it as a PDF", "should_trigger": false},
+  {"query": "Split handbook.pdf into one file per chapter", "should_trigger": false}
+]

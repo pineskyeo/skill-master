@@ -30,7 +30,7 @@
     "kind": "skill",
     "name": "korean-proofreader",
     "version": "1.0.0",
-    "description": "한국어 문서의 맞춤법과 띄어쓰기를 교정한다. 사용자가 한국어 글의 교정을 요청할 때 사용한다.",
+    "description": "Corrects spelling and spacing in Korean documents. Use when the user asks to proofread Korean text.",
     "path": "skills/korean-proofreader",
     "verdict": "PASS",
     "score": 1.0

@@ -194,7 +194,8 @@ class TestRegistrationDecision(unittest.TestCase):
                 "approvals")
         self.assertEqual({k: v for k, v in rec.items() if k not in drop},
                          dict({k: v for k, v in reg.items() if k not in drop}, ruleset_sha256=se.ruleset_sha256(),
-                              skill_sha256=T.GOLDEN_SKILL_SHA256, eval_set_sha256=T.GOLDEN_EVAL_SET_SHA256))
+                              skill_sha256=T.GOLDEN_SKILL_SHA256, eval_set_sha256=T.GOLDEN_EVAL_SET_SHA256,
+                              skill_md_sha256=T.GOLDEN_SKILL_MD_SHA256))
         self.assertEqual(rec["benchmark_sha256"], se.sha256_files(bp))
         self.assertNotEqual(rec["benchmark_sha256"], reg["benchmark_sha256"])
         self.assertTrue(se.rjson(os.path.join(self.it, "gate.json"))["needs_approval"])

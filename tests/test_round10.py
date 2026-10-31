@@ -86,7 +86,7 @@ class TestCsvCleanerPressureCases(unittest.TestCase):
         self.cases = {c["id"]: c for c in self.spec["cases"]}
 
     def test_counts_and_mixed_layers(self):
-        self.assertEqual([x for x in self.problems if not x.startswith("english-only rule:")], [])  # golden csv-cleaner is Korean: only english-only problems remain (golden/ is neither exempted nor edited)
+        self.assertEqual(self.problems, [])
         self.assertEqual(len(self.spec["cases"]), 6)
         self.assertEqual(sorted(c["id"] for c in self.spec["cases"] if c["pressure"]), [4, 5, 6])
         layers = [it["layer"] for c in self.spec["cases"] for it in c["items"]]
@@ -100,7 +100,7 @@ class TestCsvCleanerPressureCases(unittest.TestCase):
 
     def test_overwrite_checks_catch_in_place_writes(self):
         sc = lambda it, calls: se.static_check(it["check"], {"tool_calls": calls}, "/nonexistent")[0]
-        wr = self.item(4, "Write 도구")
+        wr = self.item(4, "the Write tool")
         self.assertFalse(sc(wr, [{"tool": "Write", "input": {"file_path": "/w/evals/files/orders_2025.csv", "content": "x"}}]))
         self.assertTrue(sc(wr, [{"tool": "Write", "input": {"file_path": "/w/orders_2025_clean.csv", "content": "x"}}]))
 
@@ -109,7 +109,7 @@ class TestCsvCleanerPressureCases(unittest.TestCase):
         for cid, path in want.items():
             it = self.item(cid, path)
             self.assertEqual((it["layer"], it["check"]), ("static", {"type": "file_exists", "path": path}))
-            self.assertIn("현재 폴더에 " + path, self.cases[cid]["prompt"])
+            self.assertIn(path + " in the current folder", self.cases[cid]["prompt"])
 
     def clean(self, rel):
         out = os.path.join(tempfile.mkdtemp(), "out.csv"); self.addCleanup(shutil.rmtree, os.path.dirname(out))

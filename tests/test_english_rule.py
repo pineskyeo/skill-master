@@ -297,17 +297,17 @@ class TestIndexAndGolden(E.SkillMixin, unittest.TestCase):
         self.assertEqual({e["name"]: e["verdict"] for e in reg}, {"word-count": "PASS", "ko-skill": "FAIL"})
 
     def test_golden_units_fail_exactly_on_these_checks(self):
-        """The list in notes/english-rule-plan.md section 8 plus the missing wrappers of the two golden agents
-        (notes/multi-tool-parity-plan.md section 11). golden/ is not edited and not exempted."""
-        want = {"skills/csv-cleaner": {"english-skill-md", "english-evals"},
-                "skills/korean-proofreader": {"english-skill-md", "english-evals"},
-                "skills/pdf-summarizer": {"english-skill-md", "english-bundled-files", "english-evals"},
-                "agents/code-reviewer": {"english-agent-md", "english-scenarios"} | WRAPPERS_MISSING | V1_AGENT_ROWS,
-                "agents/research-assistant": {"english-agent-md", "english-scenarios"} | WRAPPERS_MISSING | V1_AGENT_ROWS}
-        for rel, ids in want.items():
-            r = eva.check(E.p("golden", *rel.split("/")))
-            self.assertEqual((r.verdict, failed_ids(r)), ("FAIL", ids), rel)
-            self.assertEqual(r.needs_review, [], rel)
+        agent_rows = {"english-agent-md", "english-scenarios"} | WRAPPERS_MISSING | V1_AGENT_ROWS
+        want = {E.p("golden", "skills", "csv-cleaner"): ("PASS", set(), []),
+                E.p("golden", "skills", "korean-proofreader"): ("REVIEW", set(), ["english-output-matchers"]),
+                E.p("golden", "skills", "pdf-summarizer"): ("PASS", set(), []),
+                E.p("golden", "agents", "code-reviewer"): ("FAIL", agent_rows, []),
+                E.p("golden", "agents", "research-assistant"): ("FAIL", agent_rows, []),
+                T.pre_translation_csv_cleaner(self.tmp): ("FAIL", {"english-skill-md", "english-evals"}, [])}
+        for unit, (verdict, ids, review) in want.items():
+            r = eva.check(unit)
+            self.assertEqual((r.verdict, failed_ids(r)), (verdict, ids), unit)
+            self.assertEqual([c["id"] for c in r.needs_review], review, unit)
 
     def test_register_approve_and_hashing_do_not_run_eva_checks(self):
         """Registration and approvals are hash-bound; the English rule must not invalidate a registered skill."""
@@ -322,9 +322,74 @@ class TestIndexAndGolden(E.SkillMixin, unittest.TestCase):
                 self.assertNotIn(name, src, (fn.__name__, name))
         with mock.patch.object(eva, "check", side_effect=AssertionError("eva.check called")), \
                 mock.patch.object(eva, "check_skill", side_effect=AssertionError("eva.check_skill called")):
-            spec, problems = se.load_eval_set(E.p("golden", "skills", "csv-cleaner"))
+            spec, problems = se.load_eval_set(T.pre_translation_csv_cleaner(self.tmp))
             self.assertTrue(problems and all(x.startswith("english-only rule:") for x in problems))
             self.assertEqual(len(se.skill_tree_hash(spec["skill_dir"])), 64)
+
+class TestKoreanProofreaderMatchers(unittest.TestCase):
+    SKILL = E.p("golden", "skills", "korean-proofreader")
+    PHRASE_DRAFT = "\U0000d560\U0000c218 \U0000c788\U0000c74d\U0000b2c8\U0000b2e4"
+    PHRASE_FIXED = "\U0000d560 \U0000c218 \U0000c788\U0000c2b5\U0000b2c8\U0000b2e4"
+    SALES = "\U0000c774\U0000bc88 \U0000bd84\U0000ae30 \U0000b9e4\U0000cd9c\U0000c740"
+    NOUN_JOINED = "\U0000c804\U0000b144\U0000b300\U0000be44"
+    NOUN_SPACED = "\U0000c804\U0000b144 \U0000b300\U0000be44"
+    VERB_DRAFT = "\U0000c99d\U0000ac00 \U0000d588\U0000c73c\U0000ba70"
+    VERB_FIXED = "\U0000c99d\U0000ac00\U0000d588\U0000c73c\U0000ba70"
+    CAUSE = "\U0000c6d0\U0000c778\U0000c740 \U0000c2e0\U0000c81c\U0000d488 \U0000cd9c\U0000c2dc"
+    END_DRAFT = "\U0000b54c\U0000bb38\U0000c774\U0000c600\U0000b2e4"
+    END_FIXED = "\U0000b54c\U0000bb38\U0000c774\U0000c5c8\U0000b2e4"
+    DRAFT = "%s %s %s %s %s." % (SALES, NOUN_JOINED, VERB_DRAFT, CAUSE, END_DRAFT)
+    FIXED = "%s %s %s %s %s." % (SALES, NOUN_SPACED, VERB_FIXED, CAUSE, END_FIXED)
+    FIXED_NOUN_JOINED = "%s %s %s %s %s." % (SALES, NOUN_JOINED, VERB_FIXED, CAUSE, END_FIXED)
+    WEATHER = "\U0000c624\U0000b298\U0000c740 \U0000b0a0\U0000c528\U0000ac00 \U0000b9d1\U0000c2b5\U0000b2c8\U0000b2e4."
+    WEATHER_CHANGED = "\U0000c624\U0000b298\U0000c740 \U0000b0a0\U0000c528\U0000ac00 \U0000d750\U0000b9bd\U0000b2c8\U0000b2e4."
+    FIXTURES = {1: ("evals/files/short_phrase.txt", PHRASE_DRAFT), 2: ("evals/files/report_draft.txt", DRAFT),
+                3: ("evals/files/weather_note.txt", WEATHER)}
+    CHANGES = "Changes:\n- spacing: %s -> %s\n- spelling: %s -> %s\n" % (VERB_DRAFT, VERB_FIXED, END_DRAFT, END_FIXED)
+    ANSWERS = ((1, "Corrected text: %s\nChanges:\n- spacing and spelling: %s -> %s\n" % (PHRASE_FIXED, PHRASE_DRAFT, PHRASE_FIXED)),
+               (2, "Corrected sentence: %s\n%s" % (FIXED, CHANGES)),
+               (2, "Corrected sentence: %s\n%s" % (FIXED_NOUN_JOINED, CHANGES)),
+               (3, "There is nothing to fix.\nText: %s\nChanges: none\n" % WEATHER))
+
+    def setUp(self):
+        spec, problems = se.load_eval_set(self.SKILL)
+        self.assertEqual(problems, [])
+        self.files = {c["id"]: c["files"] for c in spec["cases"]}
+        self.static = {c["id"]: [it["check"] for it in c["items"] if it["layer"] == "static"] for c in spec["cases"]}
+        self.assertEqual({cid: len(checks) for cid, checks in self.static.items()}, {1: 1, 2: 3, 3: 1})
+
+    def outcomes(self, cid, final):
+        return [se.static_check(chk, {"final": final}, self.SKILL)[0] for chk in self.static[cid]]
+
+    def fixture(self, cid):
+        with open(os.path.join(self.SKILL, *self.FIXTURES[cid][0].split("/")), encoding="utf-8") as f: return f.read()
+
+    def test_each_case_gets_its_fixture_with_the_required_text(self):
+        for cid, (rel, text) in self.FIXTURES.items():
+            self.assertEqual(self.files[cid], [rel])
+            self.assertEqual(self.fixture(cid), text + "\n", rel)
+
+    def test_a_correct_answer_passes_even_when_its_changes_list_quotes_the_uncorrected_text(self):
+        for cid, final in self.ANSWERS:
+            self.assertEqual(self.outcomes(cid, final), [True] * len(self.static[cid]), final)
+
+    def test_the_uncorrected_fixture_fails_every_static_assertion(self):
+        for cid in (1, 2):
+            self.assertEqual(self.outcomes(cid, self.fixture(cid)), [False] * len(self.static[cid]), cid)
+
+    def test_a_half_fixed_answer_fails_the_assertion_of_the_missed_fix(self):
+        draft_spacing, draft_ending = self.PHRASE_DRAFT.split(" ")
+        fixed_spacing, fixed_ending = self.PHRASE_FIXED.rsplit(" ", 1)
+        for final in ("%s %s" % (fixed_spacing, draft_ending), "%s %s" % (draft_spacing, fixed_ending)):
+            self.assertEqual(self.outcomes(1, final), [False], final)
+        for fixed, draft, want in ((self.VERB_FIXED, self.VERB_DRAFT, [False, True, False]),
+                                   (self.END_FIXED, self.END_DRAFT, [True, False, False])):
+            final = self.FIXED.replace(fixed, draft)
+            self.assertEqual(self.outcomes(2, final), want, final)
+
+    def test_the_clean_sentence_passes_unchanged_and_fails_when_changed(self):
+        self.assertEqual(self.outcomes(3, self.fixture(3)), [True])
+        self.assertEqual(self.outcomes(3, self.WEATHER_CHANGED), [False])
 
 class TestValidate(T.Base):
     def cli(self, *argv):

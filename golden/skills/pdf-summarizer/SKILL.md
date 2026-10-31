@@ -7,11 +7,11 @@ metadata:
 ---
 # PDF Summarizer
 ## Inputs
-- pdf_path: 요약할 PDF 파일 경로
+- pdf_path: path of the PDF file to summarize
 ## Outputs
-- summary.md: 한 쪽짜리 한국어 요약
+- summary.md: a one-page summary in Korean
 ## Steps
-1. `pdftotext`로 텍스트를 추출한다.
-2. 섹션별 핵심을 3줄 이내로 정리한다. 형식은 [references/format.md](references/format.md)를 따른다.
+1. Extract the text with `pdftotext`.
+2. Reduce the key points of each section to at most three lines. Write the summary in Korean, whatever the language of the PDF. Follow [references/format.md](references/format.md) for the format.
 ## Example
-입력: `report.pdf` → 출력: `summary.md` (제목, 핵심 3줄, 결론)
+Input: `report.pdf`. Output: `summary.md` (title, three key lines, conclusion).

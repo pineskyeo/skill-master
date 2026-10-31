@@ -103,8 +103,18 @@ NOT_SELECTED, NOT_AVAILABLE = "not-run: engine not selected", "not-run: engine n
 NO_COVERAGE_ENTRY = "unknown (no valid tool_coverage entry)"
 CLAUDE_ONLY_MISSING = [coverage_missing("opencode", NOT_AVAILABLE), coverage_missing("hermes", NOT_AVAILABLE)]
 NO_COVERAGE_MISSING = [coverage_missing(t, NO_COVERAGE_ENTRY) for t in eva.TOOLS]
-GOLDEN_SKILL_SHA256 = "83cfab923ed37b4272ab82c75bcb18f18d0f574210f1e72653247ac79a44c4e3"
-GOLDEN_EVAL_SET_SHA256 = "717798e203f74aa21c344347d54c4761dfffb603812ae2bf6e10939d6dfad31f"
+GOLDEN_SKILL_SHA256 = "56b195dbf7f629759a97afb01b28b4d579780a774e21fba3426181f535daaee8"
+GOLDEN_EVAL_SET_SHA256 = "c26792eef07db500c7bb8a2b1fc1e7669f5502088abdc022596385a785e04d7e"
+GOLDEN_SKILL_MD_SHA256 = "48735f8784c9f373522d09e63214de76b308c32af7546804f017f43900b6d29e"
+PRE_TRANSLATION_SKILL_SHA256 = "83cfab923ed37b4272ab82c75bcb18f18d0f574210f1e72653247ac79a44c4e3"
+PRE_TRANSLATION_EVAL_SET_SHA256 = "717798e203f74aa21c344347d54c4761dfffb603812ae2bf6e10939d6dfad31f"
+
+def pre_translation_csv_cleaner(dest):
+    d = shutil.copytree(os.path.join(ROOT, "golden", "skills", "csv-cleaner"), os.path.join(dest, "csv-cleaner"))
+    frozen = os.path.join(ROOT, "tests", "pre_translation", "csv-cleaner")
+    for rel in ("SKILL.md", "evals/evals.json", "evals/trigger_evals.json"):
+        shutil.copyfile(os.path.join(frozen, *rel.split("/")), os.path.join(d, *rel.split("/")))
+    return d
 
 def waive_coverage(spec, ws, tools=tuple(t for t in eva.TOOLS if t != "claude")):
     for t in tools: se.approve("coverage_waiver:" + t, spec, ws)

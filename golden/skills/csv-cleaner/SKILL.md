@@ -14,8 +14,8 @@ Use a new output path. Never pass the input path as the output path or overwrite
 
 The script always trims cells **and** removes duplicate rows after trimming. If the user requests only one of these changes and preserving the other matters, explain that this skill changes both and ask which behavior they want.
 ## Inputs
-- csv_path: 정리할 CSV 파일 경로
+- csv_path: path of the CSV file to clean
 ## Outputs
-- cleaned_csv_path: 중복 행을 지우고 칸 앞뒤 공백을 없앤 CSV
+- cleaned_csv_path: the CSV with duplicate rows removed and leading and trailing spaces trimmed from every cell
 ## Example
-입력: 중복 3줄이 있는 `a.csv` → 출력: 중복 제거된 `a.clean.csv`
+Input: `a.csv` with 3 duplicate lines. Output: `a.clean.csv` with the duplicates removed.

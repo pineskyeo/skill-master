@@ -18,7 +18,7 @@ SKILL = os.path.join(os.path.dirname(os.path.dirname(__file__)), "golden", "skil
 class TestCsvCleanerRound16(unittest.TestCase):
     def setUp(self):
         self.spec, problems = se.load_eval_set(SKILL)
-        self.assertEqual([x for x in problems if not x.startswith("english-only rule:")], [])  # golden csv-cleaner is Korean: only english-only problems remain (golden/ is neither exempted nor edited)
+        self.assertEqual(problems, [])
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
 

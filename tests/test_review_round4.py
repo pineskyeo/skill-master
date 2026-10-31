@@ -10,7 +10,7 @@ skill still snapshots whole, evals/ included.
 Mocked like tests/test_review_round3.py: subprocess is patched to fail for the whole module, lifted only for the child
 processes that run skill_tree_hash or the snapshot command under a timeout. No claude/codex/opencode/hermes call, no network, register()
 and approve() are never called. ASCII only: non-English text is built from code points."""
-import json, os, re, shutil, subprocess, sys, unittest
+import hashlib, json, os, re, shutil, subprocess, sys, unittest
 from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import eva
@@ -229,14 +229,33 @@ class TestInstallEqualsWalkEqualsScan(E.TmpMixin, unittest.TestCase):
                 self.assertEqual(sorted(eva.unit_tree(d).files), installed)
                 self.assertEqual(named_paths(d), set(installed))
 
+def sha256_labeled_by_hand(pairs):
+    h = hashlib.sha256()
+    for label, path in pairs:
+        with open(path, "rb") as f: data = f.read()
+        h.update(b"<file>%d:%d:" % (len(label.encode()), len(data)) + label.encode() + data)
+    return h.hexdigest()
+
+def tree_pairs(d):
+    return [(rel, os.path.join(d, *rel.split("/"))) for rel in eva.unit_tree(d).files]
+
+def skill_md_hash(d):
+    with open(os.path.join(d, "SKILL.md"), "rb") as f: return hashlib.sha256(b"SKILL.md\0" + f.read()).hexdigest()
+
 class TestGoldenHashUnchanged(E.TmpMixin, unittest.TestCase):
     def test_a_copy_of_the_registered_golden_skill_hashes_as_recorded(self):
         src = os.path.join(T.ROOT, "golden", "skills")
-        d = os.path.join(self.tmp, "csv-cleaner")
-        shutil.copytree(os.path.join(src, "csv-cleaner"), d)
+        d = T.pre_translation_csv_cleaner(self.tmp)
         rec = T.rjson(os.path.join(src, "csv-cleaner-workspace", "registration.json"))
         self.assertEqual(old_tree_hash(d), rec["skill_sha256"])
-        self.assertEqual(se.skill_tree_hash(d), T.GOLDEN_SKILL_SHA256)
+        self.assertEqual(se.skill_tree_hash(d), T.PRE_TRANSLATION_SKILL_SHA256)
+        self.assertEqual(sha256_labeled_by_hand(tree_pairs(d)), T.PRE_TRANSLATION_SKILL_SHA256)
+        self.assertEqual(sha256_labeled_by_hand(se.eval_set_files(d)), T.PRE_TRANSLATION_EVAL_SET_SHA256)
+        self.assertEqual(skill_md_hash(d), rec["skill_md_sha256"])
+        today = shutil.copytree(os.path.join(src, "csv-cleaner"), os.path.join(self.tmp, "today", "csv-cleaner"))
+        self.assertEqual(sha256_labeled_by_hand(tree_pairs(today)), T.GOLDEN_SKILL_SHA256)
+        self.assertEqual(sha256_labeled_by_hand(se.eval_set_files(today)), T.GOLDEN_EVAL_SET_SHA256)
+        self.assertEqual(skill_md_hash(today), T.GOLDEN_SKILL_MD_SHA256)
 
 if __name__ == "__main__":
     unittest.main()

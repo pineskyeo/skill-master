@@ -153,7 +153,15 @@ class TestGoldenSite(Golden):
             self.assertIn("no generated wrapper: run python3 eva.py generate agents/code-reviewer", body)
 
     def test_the_korean_description_is_withheld_and_the_site_is_ascii(self):
-        self.assertIn("(description withheld: not English)", self.page("skills/korean-proofreader"))
+        skill = os.path.join(self.tmp, "g", "skills", "korean-proofreader")
+        shutil.copytree(os.path.join(ROOT, "golden", "skills", "korean-proofreader"), skill)
+        fp = os.path.join(skill, "SKILL.md")
+        write(fp, read(fp).replace("description: Corrects", "description: %s Corrects" % KOREAN, 1))
+        out = os.path.join(self.tmp, "site")
+        rc, stdout, err = build(os.path.join(self.tmp, "g"), "--out", out)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("(description withheld: not English)", site(out)["units/skills--korean-proofreader.html"].decode("ascii"))
+        self.assertNotIn("description withheld", self.page("skills/korean-proofreader"))
         for rel, data in self.files.items():
             self.assertTrue(data.isascii(), rel)
             self.assertNotIn(b"&#x", data, rel)

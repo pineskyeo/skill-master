@@ -966,7 +966,7 @@ class TestCli(Base):
     def test_check_text_ends_with_one_hash_line(self):
         rc, out, _ = run_main(["check", os.path.join(ROOT, "golden", "skills", "csv-cleaner")])
         lines = out.splitlines()
-        self.assertEqual(rc, 1)
+        self.assertEqual(rc, 0)
         self.assertRegex(lines[-1], HEX64)
         self.assertEqual(sum(bool(HEX64.match(l)) for l in lines), 1)
         self.assertEqual(lines[-1], "ruleset_sha256 " + RR.default_bundle().sha256)

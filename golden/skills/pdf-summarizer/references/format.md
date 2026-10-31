@@ -1,1 +1,3 @@
-# 요약 형식: 제목 / 핵심 3줄 / 결론 1줄
+# Summary format: title / three key lines / one-line conclusion
+
+Write the summary in Korean.
