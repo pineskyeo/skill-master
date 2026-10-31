@@ -3,29 +3,75 @@
   "evals": [
     {
       "id": 1,
-      "prompt": "\"할수 있읍니다\" 맞춤법 고쳐줘",
-      "expected_output": "\"할 수 있습니다\"와 바뀐 부분 2곳",
+      "prompt": "Fix the spelling in evals/files/short_phrase.txt. Reply with the corrected text and the list of changes.",
+      "expected_output": "The corrected phrase and the two changed parts",
+      "files": [
+        "evals/files/short_phrase.txt"
+      ],
       "assertions": [
-        "교정문이 '할 수 있습니다'이다",
-        "changes에 띄어쓰기 1건, 맞춤법 1건이 있다"
+        {
+          "text": "The corrected text has the spacing and the spelling fixed",
+          "layer": "static",
+          "check": {
+            "type": "regex",
+            "pattern": "할 수 있습니다"
+          }
+        },
+        "changes lists one spacing fix and one spelling fix"
       ]
     },
     {
       "id": 2,
-      "prompt": "보고서 초안인데 띄어쓰기랑 맞춤법만 봐줘. 내용은 바꾸지 마: 이번 분기 매출은 전년대비 증가 했으며 원인은 신제품 출시 때문이였다.",
-      "expected_output": "의미는 그대로 두고 띄어쓰기·맞춤법만 고친 문장과 바뀐 부분 목록",
+      "prompt": "evals/files/report_draft.txt is a report draft. Check only its spacing and spelling, and do not change the content. Reply with the corrected sentence and the list of changes.",
+      "expected_output": "The sentence with only spacing and spelling fixed and its meaning unchanged, plus the list of changed parts",
+      "files": [
+        "evals/files/report_draft.txt"
+      ],
       "assertions": [
-        "'증가했으며'로 붙여 쓴다",
-        "'때문이었다'로 고친다",
-        "문장의 의미를 바꾸지 않는다"
+        {
+          "text": "The verb with the stray space is written as one word",
+          "layer": "static",
+          "check": {
+            "type": "regex",
+            "pattern": "증가했으며"
+          }
+        },
+        {
+          "text": "The misspelled ending is corrected",
+          "layer": "static",
+          "check": {
+            "type": "regex",
+            "pattern": "때문이었다"
+          }
+        },
+        {
+          "text": "The whole corrected sentence keeps every word of the draft in order",
+          "layer": "static",
+          "check": {
+            "type": "regex",
+            "pattern": "이번 분기 매출은 전년 ?대비 증가했으며 원인은 신제품 출시 때문이었다"
+          }
+        },
+        "The sentence does not change in meaning"
       ]
     },
     {
       "id": 3,
-      "prompt": "이 문장 틀린 데 있어? 오늘은 날씨가 맑습니다.",
-      "expected_output": "고칠 곳이 없다고 알리고 원문을 그대로 돌려준다",
+      "prompt": "Is anything wrong with the sentence in evals/files/weather_note.txt? Reply with the text and the list of changes.",
+      "expected_output": "Says there is nothing to fix and returns the original text unchanged",
+      "files": [
+        "evals/files/weather_note.txt"
+      ],
       "assertions": [
-        "changes가 비어 있다"
+        "changes is empty",
+        {
+          "text": "The original sentence comes back unchanged",
+          "layer": "static",
+          "check": {
+            "type": "regex",
+            "pattern": "오늘은 날씨가 맑습니다\\."
+          }
+        }
       ]
     }
   ]

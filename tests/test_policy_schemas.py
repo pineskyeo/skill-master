@@ -2233,14 +2233,15 @@ UNREADABLE_FRONTMATTER_ROW = [('fail', True,
                                'byte 0xff in position 24: invalid start byte')]
 
 # Digests of the rows and messages the P7 commit 53edf4c gave, captured on the trunk export by a scratch script. The rows
-# were captured again on 2026-10-30, when the three Codex parity rules left the bundle.
+# were captured again on 2026-10-30, when the three Codex parity rules left the bundle, and on 2026-10-31, when the three
+# golden skills became English.
 # Outside a git work tree refs-exist reads '../outside.md' as escaping the repository, so two digests differ.
 P7_UNIT_ROWS = {'bad/agents/no-context-agent': '04949a4656ef', 'bad/agents/vague-agent': '046ba91a1714',
     'bad/skills/DoEverything': '35cdfb23721e', 'bad/skills/bad-version-skill': '1d41fb9343ed',
     'bad/skills/no-io-skill': 'a2deb27f995f', 'bad/skills/wrong-folder-name': '35e796ee7b5a',
     'golden/agents/code-reviewer': 'f12c1c8fc64e', 'golden/agents/research-assistant': '3c68a1a42884',
-    'golden/skills/csv-cleaner': 'bb0c1b2c3f7a', 'golden/skills/korean-proofreader': '3c2dd926c86e',
-    'golden/skills/pdf-summarizer': '392405c05039', 'tests/fixtures/agents/code-reviewer-v2': '108eb10eb121',
+    'golden/skills/csv-cleaner': '1ed30775b4be', 'golden/skills/korean-proofreader': 'a77c04b56e2d',
+    'golden/skills/pdf-summarizer': '694fe203605c', 'tests/fixtures/agents/code-reviewer-v2': '108eb10eb121',
     'tests/fixtures/agents/research-assistant-v2': 'c40482718d44',
     'tests/fixtures/skills/csv-cleaner-en': 'd6dc803893be',
     'tests/rules/_selftest/selftest-name-matches-folder/fail/bad-name': '3db6f313ac59',
@@ -2513,11 +2514,11 @@ P7_UNIT_ROWS = {'bad/agents/no-context-agent': '04949a4656ef', 'bad/agents/vague
     'variant:frontmatter:fm-dmi-true': '542c70815210', 'variant:frontmatter:fm-license-blank': '59b0aaf6d9dc',
     'variant:frontmatter:fm-unknown-field': 'b1d29ff9d6bd'}
 P7_ROW_IDS = {'agent-frontmatter-v2': '86a00c02102e', 'compatibility-length': '95f922b35ed2',
-    'description-length': '1eafe8cad60d', 'description-min-length': '9912ac6dcf08',
+    'description-length': 'e3adc2870804', 'description-min-length': '0dbb5b92a194',
     'description-no-xml': '97e453072165', 'description-pov': '88f525d8a1dd', 'description-present': '2c07caa09fb5',
-    'description-when': '10f7d1bb00ca', 'english-agent-md': '31ab98c0270d', 'english-bundled-files': 'd09db4138562',
-    'english-evals': '49b02e1a8d71', 'english-output-matchers': 'e567f1c3747b', 'english-scenarios': '30d2ea6eeaf1',
-    'english-skill-md': '703ab2a85697', 'english-tool-files': 'd87c584a1d86', 'english-wrappers': '5cb76919149b',
+    'description-when': '10f7d1bb00ca', 'english-agent-md': '31ab98c0270d', 'english-bundled-files': 'd81c8bc3f055',
+    'english-evals': '65fa174ae046', 'english-output-matchers': 'cd122edf24d6', 'english-scenarios': '30d2ea6eeaf1',
+    'english-skill-md': '342040cf7fe1', 'english-tool-files': 'd87c584a1d86', 'english-wrappers': '5cb76919149b',
     'evals-count': '61a493e2d12f', 'evals-valid': 'a019ae3aec21', 'example-present': '0a7a8c7e6e86',
     'field-types': '518fe7e9fef3', 'frontmatter': '904cbdb0dfb5', 'frontmatter-fields': '457d159aa98e',
     'goal-present': '6892e133713f', 'inputs-declared': '8fb4e2a43939', 'memory-section': '2bf008dc098c',
@@ -2532,7 +2533,7 @@ P7_ROW_IDS = {'agent-frontmatter-v2': '86a00c02102e', 'compatibility-length': '9
     'parity-wrapper-opencode': '929dd300f13e', 'reference-toc': 'c17149ab066b', 'refs-exist': 'e66fb56bbae8',
     'refs-one-level': '2139477e6850', 'refs-path-depth': '1bd40c228248', 'refs-relative': 'b833247d92f4',
     'scenarios-expected': '2146551e4649', 'scenarios-present': 'b31b52ce5d91', 'scenarios-valid': '97a07b69c334',
-    'single-purpose': 'c811fce42fed', 'size-limit': '7c0331c503ad', 'success-measurable': 'd7727eb4925f',
+    'single-purpose': 'c811fce42fed', 'size-limit': '6dbdfbef0aa4', 'success-measurable': 'd7727eb4925f',
     'tool-metadata-generated': '2d483da455f7', 'tools-declared': 'f7ec8b6e2177', 'tools-documented': '91ff97db28c8',
     'tools-subset': '32137cb4f35d', 'version-format': '9e9f75afd2a2', 'wrappers-generated': 'e75d695e0cf2'}
 P7_MESSAGES = {'_field_type_errors:allowed-tools-empty': '76b38fe73114',
@@ -2839,8 +2840,8 @@ P7_MESSAGES = {'_field_type_errors:allowed-tools-empty': '76b38fe73114',
     'load_triggers:count-9-10': 'e56523ae3206', 'load_triggers:count-9-11': 'c779b65a388c',
     'load_triggers:duplicate-query': '1e26b9f72850', 'load_triggers:extra-keys': '4f53cda18c2b',
     'load_triggers:golden/skills/csv-cleaner': '4f53cda18c2b',
-    'load_triggers:golden/skills/korean-proofreader': '013ac6057d35',
-    'load_triggers:golden/skills/pdf-summarizer': '013ac6057d35', 'load_triggers:invalid-json': '2ef15d64a691',
+    'load_triggers:golden/skills/korean-proofreader': '4f53cda18c2b',
+    'load_triggers:golden/skills/pdf-summarizer': '4f53cda18c2b', 'load_triggers:invalid-json': '2ef15d64a691',
     'load_triggers:item-not-object': '436f557ccd10', 'load_triggers:missing-file': '013ac6057d35',
     'load_triggers:not-list': '706212f2a35c', 'load_triggers:query-blank': 'cccb265b6376',
     'load_triggers:query-deep': 'e4380c2e4ddf', 'load_triggers:query-deep-twice': '2050535c6f1c',

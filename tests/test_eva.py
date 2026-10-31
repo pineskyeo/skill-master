@@ -225,7 +225,7 @@ class TestExitCodes(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             return eva.main(argv)
     def test_check_all_exit(self):
-        self.assertEqual(self.run_main(["check-all", p("golden")]), 1)  # golden is Korean: english-* checks FAIL (exit 1)
+        self.assertEqual(self.run_main(["check-all", p("golden")]), 1)
         self.assertEqual(self.run_main(["check-all", p("bad")]), 1)
 
 class TestLoop(unittest.TestCase):

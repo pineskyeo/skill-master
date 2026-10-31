@@ -182,10 +182,10 @@ class TestRegisteredGoldenSkillKeepsItsMeaning(unittest.TestCase):
     tests/test_review_round3.py (TestRegistrationDecision)."""
     def setUp(self):
         self.tmp = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, self.tmp)
-        for name in ("csv-cleaner", "csv-cleaner-workspace"):
-            shutil.copytree(os.path.join(T.ROOT, "golden", "skills", name), os.path.join(self.tmp, name))
-        self.spec, _ = se.load_eval_set(os.path.join(self.tmp, "csv-cleaner"))
-        self.ws = os.path.join(self.tmp, "csv-cleaner-workspace")
+        skill = T.pre_translation_csv_cleaner(self.tmp)
+        self.ws = shutil.copytree(os.path.join(T.ROOT, "golden", "skills", "csv-cleaner-workspace"),
+                                  os.path.join(self.tmp, "csv-cleaner-workspace"))
+        self.spec, _ = se.load_eval_set(skill)
         self.approvals = se.rjson(os.path.join(self.ws, "approvals.json"))
 
     def test_every_recorded_hash_still_matches_and_reads_unsigned(self):
@@ -193,7 +193,7 @@ class TestRegisteredGoldenSkillKeepsItsMeaning(unittest.TestCase):
         for gate, rec in self.approvals.items():
             if gate == "eval_set":
                 self.assertEqual(old_labeled(se.unit_eval_files(self.spec)), rec["sha256"])
-                self.assertEqual(se.gate_hash(gate, self.spec, self.ws), T.GOLDEN_EVAL_SET_SHA256)
+                self.assertEqual(se.gate_hash(gate, self.spec, self.ws), T.PRE_TRANSLATION_EVAL_SET_SHA256)
             else:
                 self.assertEqual(se.gate_hash(gate, self.spec, self.ws), rec["sha256"], gate)
             self.assertEqual(se.approval_verdict(gate, self.spec, self.ws).status, "unsigned", gate)

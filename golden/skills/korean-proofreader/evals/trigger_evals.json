@@ -1,0 +1,22 @@
+[
+  {"query": "Proofread this Korean paragraph from my newsletter", "should_trigger": true},
+  {"query": "Fix the spelling in my Korean cover letter, draft_letter.txt", "should_trigger": true},
+  {"query": "Please fix the spacing in this Korean report before I send it", "should_trigger": true},
+  {"query": "Can you proofread the Korean text in notes_ko.md?", "should_trigger": true},
+  {"query": "My Korean essay has typos. Correct the spelling and spacing", "should_trigger": true},
+  {"query": "Fix the spacing errors in this Korean sentence", "should_trigger": true},
+  {"query": "Proofread my Korean blog post and list what you changed", "should_trigger": true},
+  {"query": "Check this Korean email for spelling mistakes and correct them", "should_trigger": true},
+  {"query": "I wrote a Korean product description. Fix its spacing and spelling", "should_trigger": true},
+  {"query": "Review the Korean document minutes_final.txt for spelling errors and fix them", "should_trigger": true},
+  {"query": "Proofread this English essay for grammar mistakes", "should_trigger": false},
+  {"query": "Translate this Korean paragraph into English", "should_trigger": false},
+  {"query": "Summarize this Korean news article in three lines", "should_trigger": false},
+  {"query": "Check the grammar of this Japanese email", "should_trigger": false},
+  {"query": "Check the grammar in my Chinese cover letter", "should_trigger": false},
+  {"query": "Rewrite this Korean message in a more polite tone", "should_trigger": false},
+  {"query": "How do I pronounce this Korean word?", "should_trigger": false},
+  {"query": "Romanize this Korean name for my passport form", "should_trigger": false},
+  {"query": "Summarize report.pdf in one page", "should_trigger": false},
+  {"query": "Write a Korean birthday message for my grandmother", "should_trigger": false}
+]
