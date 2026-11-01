@@ -3,18 +3,29 @@
   "evals": [
     {
       "id": 1,
-      "prompt": "Fix the spelling in evals/files/short_phrase.txt. Reply with the corrected text and the list of changes.",
-      "expected_output": "The corrected phrase and the two changed parts",
+      "prompt": "Fix the spelling in evals/files/short_phrase.txt. Write the corrected text to corrected.txt in the work folder, ending with one newline like the input file. Also reply with the corrected text and the list of changes.",
+      "expected_output": "corrected.txt holds the corrected phrase, and the answer shows it with the two changed parts",
       "files": [
-        "evals/files/short_phrase.txt"
+        "evals/files/short_phrase.txt",
+        "evals/files/short_phrase.expected.txt"
       ],
       "assertions": [
         {
-          "text": "The corrected text has the spacing and the spelling fixed",
+          "text": "corrected.txt holds the phrase with the spacing and the spelling fixed",
           "layer": "static",
           "check": {
-            "type": "regex",
-            "pattern": "할 수 있습니다"
+            "type": "file_equals_fixture",
+            "path": "corrected.txt",
+            "fixture": "evals/files/short_phrase.expected.txt"
+          }
+        },
+        {
+          "text": "No tool input and no answer names the expected-output fixture",
+          "layer": "static",
+          "check": {
+            "type": "not_regex",
+            "pattern": "\\.expected\\.txt",
+            "target": "transcript"
           }
         },
         "changes lists one spacing fix and one spelling fix"
@@ -22,34 +33,29 @@
     },
     {
       "id": 2,
-      "prompt": "evals/files/report_draft.txt is a report draft. Check only its spacing and spelling, and do not change the content. Reply with the corrected sentence and the list of changes.",
-      "expected_output": "The sentence with only spacing and spelling fixed and its meaning unchanged, plus the list of changed parts",
+      "prompt": "evals/files/report_draft.txt is a report draft. Check only its spacing and spelling, and do not change the content. Write the corrected sentence to corrected.txt in the work folder, ending with one newline like the input file. Also reply with the corrected sentence and the list of changes.",
+      "expected_output": "corrected.txt holds the sentence with only spacing and spelling fixed and its meaning unchanged, and the answer shows that sentence with the list of changed parts",
       "files": [
-        "evals/files/report_draft.txt"
+        "evals/files/report_draft.txt",
+        "evals/files/report_draft.expected.txt"
       ],
       "assertions": [
         {
-          "text": "The verb with the stray space is written as one word",
+          "text": "corrected.txt holds the sentence with every spacing and spelling fix, and every word of the draft in order",
           "layer": "static",
           "check": {
-            "type": "regex",
-            "pattern": "증가했으며"
+            "type": "file_equals_fixture",
+            "path": "corrected.txt",
+            "fixture": "evals/files/report_draft.expected.txt"
           }
         },
         {
-          "text": "The misspelled ending is corrected",
+          "text": "No tool input and no answer names the expected-output fixture",
           "layer": "static",
           "check": {
-            "type": "regex",
-            "pattern": "때문이었다"
-          }
-        },
-        {
-          "text": "The whole corrected sentence keeps every word of the draft in order",
-          "layer": "static",
-          "check": {
-            "type": "regex",
-            "pattern": "이번 분기 매출은 전년 ?대비 증가했으며 원인은 신제품 출시 때문이었다"
+            "type": "not_regex",
+            "pattern": "\\.expected\\.txt",
+            "target": "transcript"
           }
         },
         "The sentence does not change in meaning"
@@ -57,19 +63,20 @@
     },
     {
       "id": 3,
-      "prompt": "Is anything wrong with the sentence in evals/files/weather_note.txt? Reply with the text and the list of changes.",
-      "expected_output": "Says there is nothing to fix and returns the original text unchanged",
+      "prompt": "Is anything wrong with the sentence in evals/files/weather_note.txt? Write the corrected text to corrected.txt in the work folder, ending with one newline like the input file. Also reply with the text and the list of changes.",
+      "expected_output": "Says there is nothing to fix, corrected.txt holds the original text unchanged, and the answer shows it",
       "files": [
         "evals/files/weather_note.txt"
       ],
       "assertions": [
         "changes is empty",
         {
-          "text": "The original sentence comes back unchanged",
+          "text": "corrected.txt holds the original sentence unchanged",
           "layer": "static",
           "check": {
-            "type": "regex",
-            "pattern": "오늘은 날씨가 맑습니다\\."
+            "type": "file_equals_fixture",
+            "path": "corrected.txt",
+            "fixture": "evals/files/weather_note.txt"
           }
         }
       ]
