@@ -299,7 +299,7 @@ class TestIndexAndGolden(E.SkillMixin, unittest.TestCase):
     def test_golden_units_fail_exactly_on_these_checks(self):
         agent_rows = {"english-agent-md", "english-scenarios"} | WRAPPERS_MISSING | V1_AGENT_ROWS
         want = {E.p("golden", "skills", "csv-cleaner"): ("PASS", set(), []),
-                E.p("golden", "skills", "korean-proofreader"): ("REVIEW", set(), ["english-output-matchers"]),
+                E.p("golden", "skills", "korean-proofreader"): ("PASS", set(), []),
                 E.p("golden", "skills", "pdf-summarizer"): ("PASS", set(), []),
                 E.p("golden", "agents", "code-reviewer"): ("FAIL", agent_rows, []),
                 E.p("golden", "agents", "research-assistant"): ("FAIL", agent_rows, []),
@@ -343,53 +343,84 @@ class TestKoreanProofreaderMatchers(unittest.TestCase):
     FIXED_NOUN_JOINED = "%s %s %s %s %s." % (SALES, NOUN_JOINED, VERB_FIXED, CAUSE, END_FIXED)
     WEATHER = "\U0000c624\U0000b298\U0000c740 \U0000b0a0\U0000c528\U0000ac00 \U0000b9d1\U0000c2b5\U0000b2c8\U0000b2e4."
     WEATHER_CHANGED = "\U0000c624\U0000b298\U0000c740 \U0000b0a0\U0000c528\U0000ac00 \U0000d750\U0000b9bd\U0000b2c8\U0000b2e4."
-    FIXTURES = {1: ("evals/files/short_phrase.txt", PHRASE_DRAFT), 2: ("evals/files/report_draft.txt", DRAFT),
-                3: ("evals/files/weather_note.txt", WEATHER)}
-    CHANGES = "Changes:\n- spacing: %s -> %s\n- spelling: %s -> %s\n" % (VERB_DRAFT, VERB_FIXED, END_DRAFT, END_FIXED)
-    ANSWERS = ((1, "Corrected text: %s\nChanges:\n- spacing and spelling: %s -> %s\n" % (PHRASE_FIXED, PHRASE_DRAFT, PHRASE_FIXED)),
-               (2, "Corrected sentence: %s\n%s" % (FIXED, CHANGES)),
-               (2, "Corrected sentence: %s\n%s" % (FIXED_NOUN_JOINED, CHANGES)),
-               (3, "There is nothing to fix.\nText: %s\nChanges: none\n" % WEATHER))
+    FIXTURES = {1: (("evals/files/short_phrase.txt", PHRASE_DRAFT), ("evals/files/short_phrase.expected.txt", PHRASE_FIXED)),
+                2: (("evals/files/report_draft.txt", DRAFT), ("evals/files/report_draft.expected.txt", FIXED)),
+                3: (("evals/files/weather_note.txt", WEATHER),)}
+    CHANGES = "Changes:\n- spacing: %s -> %s\n- spacing: %s -> %s\n- spelling: %s -> %s\n" % (NOUN_JOINED, NOUN_SPACED, VERB_DRAFT, VERB_FIXED, END_DRAFT, END_FIXED)
+    ANSWERS = ((1, PHRASE_FIXED, "Corrected text: %s\nChanges:\n- spacing and spelling: %s -> %s\n" % (PHRASE_FIXED, PHRASE_DRAFT, PHRASE_FIXED)),
+               (2, FIXED, "Corrected sentence: %s\n%s" % (FIXED, CHANGES)),
+               (3, WEATHER, "There is nothing to fix.\nText: %s\nChanges: none\n" % WEATHER))
 
     def setUp(self):
         spec, problems = se.load_eval_set(self.SKILL)
         self.assertEqual(problems, [])
         self.files = {c["id"]: c["files"] for c in spec["cases"]}
+        self.prompts = {c["id"]: c["prompt"] for c in spec["cases"]}
         self.static = {c["id"]: [it["check"] for it in c["items"] if it["layer"] == "static"] for c in spec["cases"]}
-        self.assertEqual({cid: len(checks) for cid, checks in self.static.items()}, {1: 1, 2: 3, 3: 1})
+        self.assertEqual({cid: [chk["type"] for chk in checks] for cid, checks in self.static.items()},
+                         {1: ["file_equals_fixture", "not_regex"], 2: ["file_equals_fixture", "not_regex"],
+                          3: ["file_equals_fixture"]})
 
-    def outcomes(self, cid, final):
-        return [se.static_check(chk, {"final": final}, self.SKILL)[0] for chk in self.static[cid]]
+    @staticmethod
+    def line(text):
+        return (text + "\n").encode("utf-8")
 
-    def fixture(self, cid):
-        with open(os.path.join(self.SKILL, *self.FIXTURES[cid][0].split("/")), encoding="utf-8") as f: return f.read()
+    def outcomes(self, cid, corrected, final="", tool_calls=()):
+        t = {"prompt": self.prompts[cid], "final": final, "tool_calls": list(tool_calls)}
+        with tempfile.TemporaryDirectory() as work:
+            if corrected is not None:
+                with open(os.path.join(work, "corrected.txt"), "wb") as f: f.write(corrected)
+            return [se.static_check(chk, t, work, self.SKILL)[0] for chk in self.static[cid]]
+
+    def fixture(self, rel):
+        with open(os.path.join(self.SKILL, *rel.split("/")), "rb") as f: return f.read()
+
+    def wrong_file(self, cid):
+        return [False] + [True] * (len(self.static[cid]) - 1)
 
     def test_each_case_gets_its_fixture_with_the_required_text(self):
-        for cid, (rel, text) in self.FIXTURES.items():
-            self.assertEqual(self.files[cid], [rel])
-            self.assertEqual(self.fixture(cid), text + "\n", rel)
+        for cid, fixtures in self.FIXTURES.items():
+            self.assertEqual(self.files[cid], [rel for rel, _ in fixtures])
+            for rel, text in fixtures:
+                self.assertEqual(self.fixture(rel), self.line(text), rel)
 
     def test_a_correct_answer_passes_even_when_its_changes_list_quotes_the_uncorrected_text(self):
-        for cid, final in self.ANSWERS:
-            self.assertEqual(self.outcomes(cid, final), [True] * len(self.static[cid]), final)
+        for cid, corrected, final in self.ANSWERS:
+            self.assertEqual(self.outcomes(cid, self.line(corrected), final), [True] * len(self.static[cid]), final)
 
-    def test_the_uncorrected_fixture_fails_every_static_assertion(self):
+    def test_the_uncorrected_fixture_fails_the_corrected_text_check(self):
         for cid in (1, 2):
-            self.assertEqual(self.outcomes(cid, self.fixture(cid)), [False] * len(self.static[cid]), cid)
+            draft = self.fixture(self.FIXTURES[cid][0][0])
+            self.assertEqual(self.outcomes(cid, draft), self.wrong_file(cid), cid)
 
     def test_a_half_fixed_answer_fails_the_assertion_of_the_missed_fix(self):
         draft_spacing, draft_ending = self.PHRASE_DRAFT.split(" ")
         fixed_spacing, fixed_ending = self.PHRASE_FIXED.rsplit(" ", 1)
-        for final in ("%s %s" % (fixed_spacing, draft_ending), "%s %s" % (draft_spacing, fixed_ending)):
-            self.assertEqual(self.outcomes(1, final), [False], final)
-        for fixed, draft, want in ((self.VERB_FIXED, self.VERB_DRAFT, [False, True, False]),
-                                   (self.END_FIXED, self.END_DRAFT, [True, False, False])):
-            final = self.FIXED.replace(fixed, draft)
-            self.assertEqual(self.outcomes(2, final), want, final)
+        for text in ("%s %s" % (fixed_spacing, draft_ending), "%s %s" % (draft_spacing, fixed_ending)):
+            self.assertEqual(self.outcomes(1, self.line(text)), self.wrong_file(1), text)
+        for text in (self.FIXED.replace(self.VERB_FIXED, self.VERB_DRAFT), self.FIXED.replace(self.END_FIXED, self.END_DRAFT),
+                     self.FIXED_NOUN_JOINED):
+            self.assertEqual(self.outcomes(2, self.line(text)), self.wrong_file(2), text)
 
     def test_the_clean_sentence_passes_unchanged_and_fails_when_changed(self):
-        self.assertEqual(self.outcomes(3, self.fixture(3)), [True])
-        self.assertEqual(self.outcomes(3, self.WEATHER_CHANGED), [False])
+        self.assertEqual(self.outcomes(3, self.fixture(self.FIXTURES[3][0][0])), [True])
+        self.assertEqual(self.outcomes(3, self.line(self.WEATHER_CHANGED)), [False])
+
+    def test_a_missing_file_or_a_missing_final_newline_fails(self):
+        for cid, corrected, final in self.ANSWERS:
+            self.assertEqual(self.outcomes(cid, None, final), self.wrong_file(cid), cid)
+            self.assertEqual(self.outcomes(cid, corrected.encode("utf-8"), final), self.wrong_file(cid), cid)
+
+    def test_a_run_that_names_the_expected_file_fails_and_a_run_that_does_not_passes(self):
+        for cid in (1, 2):
+            (draft, _), (expected, text) = self.FIXTURES[cid]
+            right = self.line(text)
+            self.assertEqual(self.outcomes(cid, right), [True, True], cid)
+            read_draft = [{"tool": "Read", "input": {"file_path": draft}}]
+            self.assertEqual(self.outcomes(cid, right, tool_calls=read_draft), [True, True], cid)
+            read_expected = [{"tool": "Read", "input": {"file_path": expected}}]
+            self.assertEqual(self.outcomes(cid, right, tool_calls=read_expected), [True, False], cid)
+            self.assertEqual(self.outcomes(cid, right, final="Compared with %s." % expected), [True, False], cid)
 
 class TestValidate(T.Base):
     def cli(self, *argv):

@@ -2233,14 +2233,14 @@ UNREADABLE_FRONTMATTER_ROW = [('fail', True,
                                'byte 0xff in position 24: invalid start byte')]
 
 # Digests of the rows and messages the P7 commit 53edf4c gave, captured on the trunk export by a scratch script. The rows
-# were captured again on 2026-10-30, when the three Codex parity rules left the bundle, and on 2026-10-31, when the three
-# golden skills became English.
+# were captured again on 2026-10-30, when the three Codex parity rules left the bundle, on 2026-10-31, when the three
+# golden skills became English, and on 2026-11-01, when the korean-proofreader matchers became file checks.
 # Outside a git work tree refs-exist reads '../outside.md' as escaping the repository, so two digests differ.
 P7_UNIT_ROWS = {'bad/agents/no-context-agent': '04949a4656ef', 'bad/agents/vague-agent': '046ba91a1714',
     'bad/skills/DoEverything': '35cdfb23721e', 'bad/skills/bad-version-skill': '1d41fb9343ed',
     'bad/skills/no-io-skill': 'a2deb27f995f', 'bad/skills/wrong-folder-name': '35e796ee7b5a',
     'golden/agents/code-reviewer': 'f12c1c8fc64e', 'golden/agents/research-assistant': '3c68a1a42884',
-    'golden/skills/csv-cleaner': '1ed30775b4be', 'golden/skills/korean-proofreader': 'a77c04b56e2d',
+    'golden/skills/csv-cleaner': '1ed30775b4be', 'golden/skills/korean-proofreader': '978eec949f31',
     'golden/skills/pdf-summarizer': '694fe203605c', 'tests/fixtures/agents/code-reviewer-v2': '108eb10eb121',
     'tests/fixtures/agents/research-assistant-v2': 'c40482718d44',
     'tests/fixtures/skills/csv-cleaner-en': 'd6dc803893be',
@@ -2517,7 +2517,7 @@ P7_ROW_IDS = {'agent-frontmatter-v2': '86a00c02102e', 'compatibility-length': '9
     'description-length': 'e3adc2870804', 'description-min-length': '0dbb5b92a194',
     'description-no-xml': '97e453072165', 'description-pov': '88f525d8a1dd', 'description-present': '2c07caa09fb5',
     'description-when': '10f7d1bb00ca', 'english-agent-md': '31ab98c0270d', 'english-bundled-files': 'd81c8bc3f055',
-    'english-evals': '65fa174ae046', 'english-output-matchers': 'cd122edf24d6', 'english-scenarios': '30d2ea6eeaf1',
+    'english-evals': '65fa174ae046', 'english-output-matchers': 'e567f1c3747b', 'english-scenarios': '30d2ea6eeaf1',
     'english-skill-md': '342040cf7fe1', 'english-tool-files': 'd87c584a1d86', 'english-wrappers': '5cb76919149b',
     'evals-count': '61a493e2d12f', 'evals-valid': 'a019ae3aec21', 'example-present': '0a7a8c7e6e86',
     'field-types': '518fe7e9fef3', 'frontmatter': '904cbdb0dfb5', 'frontmatter-fields': '457d159aa98e',

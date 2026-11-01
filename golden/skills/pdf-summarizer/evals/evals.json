@@ -3,16 +3,22 @@
   "evals": [
     {
       "id": 1,
-      "prompt": "Summarize report.pdf",
+      "prompt": "Summarize evals/files/report.pdf",
       "expected_output": "summary.md with a title, three key lines and a conclusion",
+      "files": [
+        "evals/files/report.pdf"
+      ],
       "assertions": [
         "summary.md has a title, three key lines and a one-line conclusion"
       ]
     },
     {
       "id": 2,
-      "prompt": "My team lead wants ~/Downloads/2025_business_plan_v3.pdf condensed to one page before tomorrow's meeting. The PDF is in English, but write the summary in Korean",
+      "prompt": "My team lead wants evals/files/2025_business_plan_v3.pdf condensed to one page before tomorrow's meeting. The PDF is in English, but write the summary in Korean",
       "expected_output": "A one-page summary of the English original, written in Korean",
+      "files": [
+        "evals/files/2025_business_plan_v3.pdf"
+      ],
       "assertions": [
         "The summary is written in Korean",
         "The summary follows the one-page format (three key lines + conclusion)"
@@ -20,8 +26,11 @@
     },
     {
       "id": 3,
-      "prompt": "This PDF is only scanned images, so the pdftotext output is empty. Can it still be summarized?",
+      "prompt": "evals/files/scanned_notice.pdf is only scanned images, so the pdftotext output is empty. Can it still be summarized?",
       "expected_output": "Says that the text cannot be extracted and does not make up a summary",
+      "files": [
+        "evals/files/scanned_notice.pdf"
+      ],
       "assertions": [
         "Tells the user that the text extraction failed",
         "Does not make up a summary with content that is not in the original"
